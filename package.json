@@ -1,0 +1,13 @@
+{
+  "name": "boop-watch",
+  "version": "1.0.0",
+  "description": "Public, no-login viewing portal for a curated Jellyfin collection",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
