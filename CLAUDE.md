@@ -27,23 +27,29 @@ schedule scraper → `app.listen`. Keep this ordering; add new routes among the 
 
 ## Run / build / deploy
 
-This service is **built and run by the parent compose file**, not from this directory directly:
+**Deploy is automated via GitHub → GHCR → Watchtower.** Merging to `main` triggers
+`.github/workflows/docker-publish.yml`, which builds and pushes `ghcr.io/n0es/boop-watch:latest`
+(public package). The host's Watchtower polls GHCR every 30s and auto-redeploys the `boop-watch`
+container (it carries the `com.centurylinklabs.watchtower.enable=true` label). **You don't run a
+manual build to deploy — open a PR, merge it, and the new image rolls out on its own.** Every PR
+also builds the image (no push) as a CI check.
 
 ```bash
-# deploy a change (from the compose root, /opt/boopurnoes)
-cd /opt/boopurnoes && docker compose up -d --build boop-watch
-
-# syntax check before rebuilding
+# syntax check (the CI does this too)
 node --check boop-watch/server.js
 
 # smoke test (runs inside the container; the app listens on :3000)
 docker exec boop-watch wget -qO- http://localhost:3000/health        # -> ok
 docker exec boop-watch wget -qO- http://localhost:3000/ | head
+
+# force an immediate pull instead of waiting for Watchtower's 30s poll
+cd /opt/boopurnoes && docker compose pull boop-watch && docker compose up -d boop-watch
 ```
 
-The compose service `boop-watch` (`build: ./boop-watch`) sits on the `proxy` network behind
-Traefik (`conf.d/watch.yml`, no auth middleware). The public DNS record is **grey-clouded**
-(Cloudflare proxy off) so video bypasses CF's free-tier video ToS.
+The compose service `boop-watch` (`image: ghcr.io/n0es/boop-watch:latest`) sits on the `proxy`
+network behind Traefik (`conf.d/watch.yml`, no auth middleware). The public DNS record is
+**grey-clouded** (Cloudflare proxy off) so video bypasses CF's free-tier video ToS. The compose file
+lives at `/opt/boopurnoes/docker-compose.yml` (not in this repo, not in git).
 
 Local dev without Docker: `JELLYFIN_API_KEY=… WATCH_COLLECTION_ID=… node server.js`.
 
