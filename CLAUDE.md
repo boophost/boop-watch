@@ -110,3 +110,8 @@ Public collection (`isCollectionItem` / `playableIds`). Never bypass it.
 3. Smoke-test the affected route via `docker exec boop-watch wget -qO- …`.
 4. UI changes can't be screenshot here — reason about layout from the CSS, and verify markup/data
    attributes in the served HTML.
+5. **Always commit your changes** when work is complete — don't leave the tree dirty. Use a
+   **branch-and-PR flow**: create a feature branch, commit there, push to `origin`, and open a PR
+   into `main` (`gh pr create`). **Don't commit directly to `main`.** If the working tree already
+   had unrelated pending changes, call that out in the commit/PR description rather than silently
+   bundling them as your own. Remote: `github.com/n0es/boop-watch` (private).
