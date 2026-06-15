@@ -152,6 +152,12 @@ const ICONS = {
   calendar:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18M8 3v4M16 3v4"/>',
   tv:      '<rect x="2" y="7" width="20" height="15" rx="2"/><path d="m17 2-5 5-5-5"/>',
   film:    '<rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/>',
+  audio:   '<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/>',
+  captions:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 11h3M7 14.5h5M14 11h3M14.5 14.5h2.5"/>',
+  gear:    '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  theater: '<path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M16 21h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>',
+  shrink:  '<path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M16 21v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/>',
+  next:    '<polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/>',
 };
 const svg = (name, size = 16, fill = 'none') =>
   `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="${fill}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ''}</svg>`;
@@ -286,7 +292,7 @@ const STYLE = `
   .cal-stat .v { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin-top: 4px; }
   .cal-stat .s { font-size: 11px; color: var(--fg-subtle); margin-top: 2px; }
   .cal-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); }
-  .cal-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); min-width: 880px; }
+  .cal-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); min-width: 1085px; }
   .cal-day { border-right: 1px solid var(--border); min-height: 360px; display: flex; flex-direction: column; }
   .cal-day:last-child { border-right: none; }
   .cal-day-head { padding: 14px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
@@ -296,18 +302,20 @@ const STYLE = `
   .cal-date { font-family: var(--font-mono); font-size: 13px; font-weight: 500; margin-top: 2px; }
   .cal-events { padding: 10px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
   .cal-empty { margin: auto; font-size: 11px; color: var(--fg-subtle); }
-  .evt { position: relative; padding: 10px 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
+  .evt { position: relative; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
   .evt.now { border-color: var(--accent); }
-  .evt.now::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--accent); }
+  .evt.now::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--accent); z-index: 1; }
   .evt.aired { opacity: 0.62; }
-  .evt-top { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
-  .evt-time { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); }
-  .evt-main { display: flex; gap: 9px; align-items: center; }
-  .evt-thumb { position: relative; width: 30px; height: 42px; border-radius: 4px; overflow: hidden; flex-shrink: 0;
+  .evt-main { display: block; }
+  .evt-thumb { position: relative; width: 100%; height: 84px; overflow: hidden;
     background: linear-gradient(135deg, oklch(0.26 0.06 310), oklch(0.16 0.03 285)); }
-  .evt-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  .evt-title { font-size: 12px; font-weight: 500; line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .evt-label { font-size: 10px; color: var(--fg-subtle); margin-top: 2px; }
+  .evt-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 30%; }
+  .evt-body { min-width: 0; padding: 9px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .evt-title { font-size: 12px; font-weight: 500; line-height: 1.3; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .evt-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 6px; }
+  .evt-time { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); }
+  .evt-label { font-size: 10px; color: var(--fg-subtle); }
   .evt-label.up { color: var(--info); }
   .lang { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 4px;
     font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 0.06em; border: 1px solid transparent; }
@@ -879,6 +887,14 @@ const TITLE_STOP = new Set(('the and of to in on at as is or no na ni wa ga de d
 // Distinctive tokens of a title: 4+ chars, not a generic word.
 const sigTokens = (s) => baseTitle(s).split(' ').filter((w) => w.length >= 4 && !TITLE_STOP.has(w));
 
+// Manual romaji aliases. Some library shows store an English name (TheTVDB) and a
+// *kanji* OriginalTitle, which yields no Latin tokens — so they can't bridge to
+// animeschedule's romaji title. Map English base-title -> romaji, to seed extra
+// signature tokens. Add an entry when a known airing show won't match.
+const TITLE_ALIASES = [
+  ['classroom of the elite', 'youkoso jitsuryoku shijou shugi no kyoushitsu e'],
+];
+
 // Build a matcher that keeps only airings whose show is in the library.
 // animeschedule uses romaji; the library often stores English (TheTVDB), so a
 // strict match misses. Fall back to a shared distinctive token (e.g. "slime",
@@ -893,7 +909,12 @@ function libraryMatcher(items) {
       if (b) exact.add(b);
     }
     if (it.Type === 'Series') {
-      const sig = new Set([it.Name, it.OriginalTitle].filter(Boolean).flatMap(sigTokens));
+      const names = [it.Name, it.OriginalTitle].filter(Boolean);
+      const sig = new Set(names.flatMap(sigTokens));
+      const bases = names.map(baseTitle);
+      for (const [en, romaji] of TITLE_ALIASES) {
+        if (bases.includes(en)) for (const t of sigTokens(romaji)) sig.add(t);
+      }
       if (sig.size) seriesSig.push(sig);
     }
   }
@@ -1066,17 +1087,19 @@ app.get('/schedule', async (req, res) => {
   const LANG = { sub: 'SUB', dub: 'DUB', raw: 'RAW' };
   const eventCard = (e) => `
     <div class="evt${e.now ? ' now' : ''}${e.aired ? ' aired' : ''}">
-      <div class="evt-top">
-        <span class="evt-time">${esc(fmtTime.format(e.when))}</span>
-        ${e.ep ? `<span class="badge badge-mono badge-square">${esc(e.ep)}</span>` : ''}
-        <span class="lang lang-${e.type}">${LANG[e.type] || 'RAW'}</span>
-        ${e.now ? '<span class="badge badge-accent" style="margin-left:auto;">Next</span>' : ''}
-      </div>
       <div class="evt-main">
         <div class="evt-thumb">${e.img ? `<img src="${esc(e.img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</div>
-        <div style="min-width:0;">
+        <div class="evt-body">
           <div class="evt-title">${esc(e.title)}</div>
-          <div class="evt-label${e.aired ? '' : ' up'}">${e.aired ? 'Aired' : 'Upcoming'}</div>
+          <div class="evt-meta">
+            <span class="evt-time">${esc(fmtTime.format(e.when))}</span>
+            ${e.ep ? `<span class="badge badge-mono badge-square">${esc(e.ep)}</span>` : ''}
+            <span class="lang lang-${e.type}">${LANG[e.type] || 'RAW'}</span>
+          </div>
+          <div class="evt-meta">
+            <span class="evt-label${e.aired ? '' : ' up'}">${e.aired ? 'Aired' : 'Upcoming'}</span>
+            ${e.now ? '<span class="badge badge-accent badge-square">Next</span>' : ''}
+          </div>
         </div>
       </div>
     </div>`;
@@ -1149,6 +1172,25 @@ app.get('/schedule', async (req, res) => {
 });
 
 // Player page
+// Human-readable audio/subtitle stream labels.
+const LANG_NAMES = {
+  eng: 'English', jpn: 'Japanese', jap: 'Japanese', spa: 'Spanish', fre: 'French', fra: 'French',
+  ger: 'German', deu: 'German', por: 'Portuguese', ita: 'Italian', kor: 'Korean', chi: 'Chinese',
+  zho: 'Chinese', rus: 'Russian', ara: 'Arabic', vie: 'Vietnamese', tha: 'Thai', ind: 'Indonesian',
+  und: 'Unknown',
+};
+const langName = (c) => (c ? (LANG_NAMES[String(c).toLowerCase()] || String(c).toUpperCase()) : 'Unknown');
+const chLabel = (n) => (n === 1 ? 'Mono' : n === 2 ? 'Stereo' : n === 6 ? '5.1' : n === 8 ? '7.1' : n ? `${n}ch` : '');
+
+// Server-side quality presets (resolution + bitrate cap). Auto = source-driven.
+const QUALITY_PRESETS = [
+  { key: 'auto', label: 'Auto', h: 0, vb: 0 },
+  { key: '1080', label: '1080p', h: 1080, vb: 8000000 },
+  { key: '720', label: '720p', h: 720, vb: 4000000 },
+  { key: '480', label: '480p', h: 480, vb: 1500000 },
+  { key: '240', label: '240p', h: 240, vb: 600000 },
+];
+
 app.get('/watch/:id', async (req, res) => {
   const { id } = req.params;
   try {
@@ -1159,12 +1201,124 @@ app.get('/watch/:id', async (req, res) => {
   if (!playableIds.has(id)) return res.status(403).send('not available');
 
   let item = {};
-  try { item = await jfItem(id); } catch { /* title is cosmetic */ }
+  try { item = await jfItem(id, 'MediaStreams,MediaSources,Overview'); } catch { /* title is cosmetic */ }
   const title = item.Name || 'Now playing';
   const epNum = (item.ParentIndexNumber != null && item.IndexNumber != null)
     ? `S${item.ParentIndexNumber}·E${item.IndexNumber}` : '';
-  const backHref = item.Type === 'Episode' && item.SeriesId ? `/series/${item.SeriesId}` : '/';
-  const backLabel = item.Type === 'Episode' && item.SeriesId ? (item.SeriesName || 'Series') : 'All titles';
+  const isEpisode = item.Type === 'Episode' && item.SeriesId;
+  const backHref = isEpisode ? `/series/${item.SeriesId}` : '/';
+  const backLabel = isEpisode ? (item.SeriesName || 'Series') : 'All titles';
+
+  // Audio + subtitle tracks (drive the sub/dub menus).
+  const streams = item.MediaStreams
+    || (item.MediaSources && item.MediaSources[0] && item.MediaSources[0].MediaStreams) || [];
+  const audioTracks = streams.filter((s) => s.Type === 'Audio').map((s) => ({
+    index: s.Index,
+    lang: String(s.Language || '').toLowerCase(),
+    label: langName(s.Language),
+    detail: [String(s.Codec || '').toUpperCase(), chLabel(s.Channels)].filter(Boolean).join(' · '),
+    def: !!s.IsDefault,
+  }));
+  const defAudio = (audioTracks.find((t) => t.def) || audioTracks[0] || {}).index;
+
+  // Subtitles: English only, burned in server-side. Condense the long track list
+  // to the "Full" dialogue tracks (one per release group, e.g. KawaSubs / FLE),
+  // dropping the redundant signs-only / CC / SDH / forced variants.
+  const isTextSub = (s) => s.IsTextSubtitleStream
+    || /^(ass|ssa|subrip|srt|webvtt|vtt|mov_text|text)$/i.test(s.Codec || '');
+  const isEngSub = (s) => /^en/i.test(s.Language || '') || /\beng(lish)?\b/i.test(s.DisplayTitle || s.Title || '');
+  const subCat = (s) => {
+    const t = `${s.Title || ''} ${s.DisplayTitle || ''}`.toLowerCase();
+    if (s.IsForced || /forced/.test(t)) return 'forced';
+    if (/sdh|deaf|hard of hearing|closed caption|\bcc\b/.test(t)) return 'cc';
+    if (/(sign|song)/.test(t) && !/\bfull\b/.test(t)) return 'signs';
+    return 'full';
+  };
+  // Release-group tag, e.g. "English - Full Subtitles [KawaSubs]" -> "KawaSubs".
+  const subGroup = (s) => {
+    const m = `${s.Title || ''} ${s.DisplayTitle || ''}`.match(/\[([^\]]+)\]/);
+    return m ? m[1].trim() : '';
+  };
+  const engSubs = streams.filter((s) => s.Type === 'Subtitle' && isTextSub(s) && isEngSub(s));
+  let subSources = engSubs.filter((s) => subCat(s) === 'full');
+  if (!subSources.length) subSources = engSubs;                     // fallback: whatever English we have
+  // Styled ASS/SSA first (carry the signs & songs typesetting), then by index.
+  subSources = subSources.sort((a, b) => {
+    const ass = (/^(ass|ssa)$/i.test(b.Codec || '') ? 1 : 0) - (/^(ass|ssa)$/i.test(a.Codec || '') ? 1 : 0);
+    return ass || a.Index - b.Index;
+  }).map((s) => ({ index: s.Index, group: subGroup(s) }));
+
+  // Sibling episodes (for the in-player list + auto-advance), scoped to the public set.
+  let episodes = [];
+  if (isEpisode) {
+    try {
+      const e = await jfJson(`/Shows/${item.SeriesId}/Episodes`);
+      episodes = (e.Items || []).filter((ep) => playableIds.has(ep.Id));
+    } catch { /* sidebar is optional */ }
+  }
+  const curIdx = episodes.findIndex((ep) => ep.Id === id);
+  const nextEp = curIdx >= 0 ? episodes[curIdx + 1] : null;
+  const epLabel = (ep) => (ep.ParentIndexNumber != null && ep.IndexNumber != null)
+    ? `S${ep.ParentIndexNumber}·E${ep.IndexNumber}` : (ep.IndexNumber != null ? `E${ep.IndexNumber}` : '·');
+
+  // --- menu builders (only render a menu when there's a real choice) ---
+  const popitem = (active, attrs, label, detail) =>
+    `<button type="button" class="popitem" role="option" data-active="${active}" ${attrs}>
+       <span class="pi-main">${esc(label)}</span>${detail ? `<span class="pi-detail">${esc(detail)}</span>` : ''}
+     </button>`;
+
+  const defAudioLabel = (audioTracks.find((t) => t.index === defAudio) || {}).label || 'Audio';
+  const audioMenu = audioTracks.length > 1 ? `
+    <details class="pmenu" data-kind="audio">
+      <summary>${svg('audio', 16)}<span class="pmlabel">${esc(defAudioLabel)}</span>${svg('chevron', 14)}</summary>
+      <div class="pop" role="listbox">
+        <div class="pop-head">Audio</div>
+        ${audioTracks.map((t) => popitem(t.index === defAudio, `data-index="${t.index}" data-lang="${esc(t.lang)}" data-short="${esc(t.label)}"`, t.label, t.detail)).join('')}
+      </div>
+    </details>` : '';
+
+  const subMenu = subSources.length ? `
+    <details class="pmenu" data-kind="subs">
+      <summary>${svg('captions', 16)}<span class="pmlabel">Subtitles: Off</span>${svg('chevron', 14)}</summary>
+      <div class="pop" role="listbox">
+        <div class="pop-head">Subtitles</div>
+        ${popitem(true, 'data-index="" data-group="" data-short="Off"', 'Off', '')}
+        ${subSources.map((s, i) => popitem(false,
+          `data-index="${s.index}" data-group="${esc(s.group)}" data-short="${esc(s.group || 'English')}"`,
+          'English', s.group || (subSources.length > 1 ? `Track ${i + 1}` : 'Full'))).join('')}
+      </div>
+    </details>` : '';
+
+  const qualityMenu = `
+    <details class="pmenu" data-kind="quality">
+      <summary>${svg('gear', 16)}<span class="pmlabel">Auto</span>${svg('chevron', 14)}</summary>
+      <div class="pop" role="listbox">
+        <div class="pop-head">Quality</div>
+        ${QUALITY_PRESETS.map((q) => popitem(q.key === 'auto', `data-key="${q.key}" data-h="${q.h}" data-vb="${q.vb}" data-short="${esc(q.label)}"`, q.label, '')).join('')}
+      </div>
+    </details>`;
+
+  const nextBtn = nextEp
+    ? `<a class="pctl" href="/watch/${nextEp.Id}" title="Next episode">${svg('next', 16)}<span>Next</span></a>`
+    : '';
+
+  const epsAside = episodes.length ? `
+    <aside class="col-eps panel">
+      <div class="eps-head">${svg('tv', 15)}<span>Episodes</span><span class="badge">${episodes.length}</span></div>
+      <div class="eps-list" id="eps">
+        ${episodes.map((ep) => `<a class="eprow${ep.Id === id ? ' current' : ''}" href="/watch/${ep.Id}"${ep.Id === id ? ' aria-current="true"' : ''}>
+          <span class="epn">${esc(epLabel(ep))}</span>
+          <span class="ept">${esc(ep.Name || 'Episode')}</span>
+          ${ep.Id === id ? `<span class="epnow">${svg('play', 12, 'currentColor')}</span>` : ''}
+        </a>`).join('')}
+      </div>
+    </aside>` : '';
+
+  const clientData = JSON.stringify({
+    id,
+    audio: defAudio == null ? null : String(defAudio),
+    next: nextEp ? nextEp.Id : null,
+  }).replace(/</g, '\\u003c');
 
   res.send(`<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1176,45 +1330,278 @@ app.get('/watch/:id', async (req, res) => {
   :root {
     color-scheme: dark;
     --font-sans:"Geist",ui-sans-serif,system-ui,sans-serif; --font-mono:"Geist Mono",ui-monospace,Menlo,monospace;
+    --bg:oklch(0.145 0.008 285); --bg-elev:oklch(0.185 0.01 285); --bg-elev-2:oklch(0.22 0.012 285);
+    --bg-hover:oklch(0.25 0.015 285);
     --fg:oklch(0.985 0.003 285); --fg-muted:oklch(0.72 0.012 285); --fg-subtle:oklch(0.55 0.012 285);
-    --accent-soft:oklch(0.72 0.18 310 / 12%); --accent-soft-fg:oklch(0.82 0.18 310); --border:oklch(1 0 0 / 8%);
+    --accent:oklch(0.72 0.18 310); --accent-soft:oklch(0.72 0.18 310 / 12%); --accent-soft-fg:oklch(0.82 0.18 310);
+    --border:oklch(1 0 0 / 8%); --border-strong:oklch(1 0 0 / 14%);
   }
   * { box-sizing:border-box; }
   body { margin:0; background:#000; color:var(--fg); font:15px/1.5 var(--font-sans); -webkit-font-smoothing:antialiased; }
-  .bar { padding:14px 22px; display:flex; gap:14px; align-items:center; border-bottom:1px solid var(--border);
-    background: oklch(0.145 0.008 285 / 70%); backdrop-filter: blur(10px); }
-  .bar .back { display:inline-flex; align-items:center; gap:6px; color:var(--fg-muted); font-size:13px; }
-  .bar .back:hover { color:var(--fg); }
-  .bar .sep { color:var(--fg-subtle); }
-  .bar .t { color:var(--fg); font-weight:600; }
-  .bar .ep { font-family:var(--font-mono); font-size:11px; color:var(--accent-soft-fg); background:var(--accent-soft);
-    padding:2px 7px; border-radius:5px; }
+  a { text-decoration:none; color:inherit; }
   .icon { flex-shrink:0; }
-  .stage { display:flex; justify-content:center; padding: 24px; }
-  video { width:100%; max-width:1280px; max-height:82vh; background:#000; border-radius:12px;
-    box-shadow: 0 30px 80px -30px oklch(0 0 0 / 80%); }
-  a { text-decoration:none; }
+
+  .topbar { padding:14px 22px; display:flex; gap:14px; align-items:center; border-bottom:1px solid var(--border);
+    background: oklch(0.145 0.008 285 / 70%); backdrop-filter: blur(10px); }
+  .topbar .back { display:inline-flex; align-items:center; gap:6px; color:var(--fg-muted); font-size:13px; }
+  .topbar .back:hover { color:var(--fg); }
+  .topbar .sep { color:var(--fg-subtle); }
+  .topbar .t { color:var(--fg); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .topbar .ep { font-family:var(--font-mono); font-size:11px; color:var(--accent-soft-fg); background:var(--accent-soft);
+    padding:2px 7px; border-radius:5px; flex:none; }
+
+  .wrap { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:20px;
+    max-width:1560px; margin:0 auto; padding:20px; align-items:start; }
+  .wrap.no-eps { grid-template-columns:minmax(0,1fr); max-width:1280px; }
+  .col-video { min-width:0; }
+  .vid { position:relative; background:#000; border-radius:12px; overflow:hidden;
+    box-shadow:0 30px 80px -30px oklch(0 0 0 / 80%); }
+  video { display:block; width:100%; max-height:78vh; background:#000; }
+
+  /* Player control bar (custom; sits under the native <video controls>) */
+  .pbar { display:flex; align-items:center; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .pbar .spacer { flex:1; }
+  .pctl, .pmenu > summary {
+    display:inline-flex; align-items:center; gap:7px; height:38px; padding:0 13px; border-radius:9px;
+    background:var(--bg-elev-2); border:1px solid var(--border); color:var(--fg); font:13px var(--font-sans);
+    cursor:pointer; white-space:nowrap; user-select:none; list-style:none;
+    transition:background .14s, border-color .14s, color .14s; }
+  .pctl:hover, .pmenu > summary:hover { background:var(--bg-hover); border-color:var(--border-strong); }
+  .pmenu > summary::-webkit-details-marker { display:none; }
+  .pmenu > summary .pmlabel { max-width:140px; overflow:hidden; text-overflow:ellipsis; }
+  .pmenu > summary svg:last-child { color:var(--fg-subtle); transition:transform .15s; }
+  .pmenu[open] > summary { background:var(--bg-hover); border-color:var(--border-strong); }
+  .pmenu[open] > summary svg:last-child { transform:rotate(180deg); }
+
+  .pmenu { position:relative; }
+  .pop { position:absolute; bottom:calc(100% + 8px); right:0; min-width:220px; z-index:140;
+    background:var(--bg-elev); border:1px solid var(--border); border-radius:11px; padding:6px;
+    box-shadow:0 30px 80px -20px oklch(0 0 0 / 75%); max-height:340px; overflow-y:auto; }
+  .pop-head { font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:0.1em;
+    color:var(--fg-subtle); padding:6px 10px 8px; }
+  .popitem { display:flex; align-items:baseline; gap:10px; width:100%; text-align:left; padding:8px 10px;
+    border:none; border-radius:7px; background:transparent; color:var(--fg); font:13px var(--font-sans);
+    cursor:pointer; }
+  .popitem:hover { background:var(--bg-hover); }
+  .popitem[data-active="true"] { background:var(--accent-soft); color:var(--accent-soft-fg); }
+  .pi-main { flex:1; min-width:0; }
+  .pi-detail { font-family:var(--font-mono); font-size:10.5px; color:var(--fg-subtle); white-space:nowrap; }
+  .popitem[data-active="true"] .pi-detail { color:var(--accent-soft-fg); opacity:.8; }
+
+  /* Episode sidebar */
+  .panel { background:var(--bg-elev); border:1px solid var(--border); border-radius:12px; }
+  .col-eps { display:flex; flex-direction:column; max-height:calc(100vh - 92px); position:sticky; top:20px; overflow:hidden; }
+  .eps-head { display:flex; align-items:center; gap:8px; padding:14px 16px; border-bottom:1px solid var(--border);
+    font-weight:600; font-size:14px; }
+  .eps-head .badge { margin-left:auto; font-family:var(--font-mono); font-size:11px; font-weight:500;
+    height:20px; padding:0 8px; display:inline-flex; align-items:center; border-radius:999px;
+    background:var(--bg-elev-2); color:var(--fg-muted); border:1px solid var(--border); }
+  .eps-list { overflow-y:auto; padding:6px; }
+  .eprow { display:flex; align-items:center; gap:12px; padding:10px 12px; border-radius:9px; }
+  .eprow:hover { background:oklch(1 0 0 / 4%); }
+  .eprow .epn { font-family:var(--font-mono); font-size:12px; color:var(--fg-subtle); flex:none; width:54px; }
+  .eprow .ept { font-size:13px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .eprow.current { background:var(--accent-soft); }
+  .eprow.current .epn { color:var(--accent-soft-fg); }
+  .eprow.current .ept { color:var(--accent-soft-fg); font-weight:600; }
+  .eprow .epnow { color:var(--accent-soft-fg); display:flex; flex:none; }
+  .eprow.watched { opacity:0.45; }
+  .eprow.watched:hover { opacity:1; }
+  .eprow.watched .epn, .eprow.watched .ept { color:var(--fg-subtle); }
+
+  /* Theater mode: fill the viewport in-page (no real fullscreen) */
+  body.theater { overflow:hidden; }
+  body.theater .topbar { display:none; }
+  body.theater .wrap { display:block; max-width:none; margin:0; padding:0; height:100vh; }
+  body.theater .col-eps { display:none; }
+  body.theater .col-video { position:fixed; inset:0; z-index:100; background:#000; display:flex; flex-direction:column; }
+  body.theater .vid { flex:1; min-height:0; border-radius:0; box-shadow:none; display:flex; }
+  body.theater video { max-height:none; height:100%; width:100%; object-fit:contain; }
+  body.theater .pbar { margin:0; padding:10px 16px; gap:8px;
+    background:oklch(0.145 0.008 285 / 94%); border-top:1px solid var(--border); }
+
+  @media (max-width: 980px) {
+    .wrap { grid-template-columns:minmax(0,1fr); }
+    .col-eps { position:static; max-height:420px; }
+  }
 </style></head><body>
-<div class="bar">
+<div class="topbar">
   <a class="back" href="${backHref}">${svg('back', 15)} ${esc(backLabel)}</a>
   <span class="sep">/</span>
   ${epNum ? `<span class="ep">${esc(epNum)}</span>` : ''}
   <span class="t">${esc(title)}</span>
 </div>
-<div class="stage"><video id="v" controls autoplay playsinline></video></div>
+<div class="wrap${episodes.length ? '' : ' no-eps'}">
+  <div class="col-video">
+    <div class="vid"><video id="v" controls autoplay playsinline></video></div>
+    <div class="pbar">
+      ${nextBtn}
+      <div class="spacer"></div>
+      ${audioMenu}${subMenu}${qualityMenu}
+      <button type="button" class="pctl" id="theater">${svg('theater', 16)}<span id="theater-label">Theater</span></button>
+    </div>
+  </div>
+  ${epsAside}
+</div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
-  var src = '/api/play/${encodeURIComponent(id)}/master.m3u8';
-  var v = document.getElementById('v');
-  if (v.canPlayType('application/vnd.apple.mpegurl')) {
-    v.src = src; // Safari / native HLS
-  } else if (window.Hls && window.Hls.isSupported()) {
-    var hls = new Hls({ enableWorker: true });
-    hls.loadSource(src);
-    hls.attachMedia(v);
-  } else {
-    document.body.insertAdjacentHTML('beforeend', '<p style="padding:20px">Your browser cannot play HLS.</p>');
-  }
+  (function () {
+    var D = ${clientData};
+    var v = document.getElementById('v');
+    var hls = null;
+    var state = { audio: D.audio, subs: null, h: 0, vb: 0 };
+
+    // ---- persisted preferences (audio language, subtitles on/off, quality) ----
+    var PREF_KEY = 'bw:pref';
+    function readPref() { try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch (e) { return {}; } }
+    function savePref(patch) { var p = readPref(); for (var k in patch) p[k] = patch[k]; try { localStorage.setItem(PREF_KEY, JSON.stringify(p)); } catch (e) {} }
+    var pref = readPref();
+
+    // ---- watched episodes (a set of ids, used to dim rows in the sidebar) ----
+    var WATCHED_KEY = 'bw:watched';
+    function readWatched() { try { return JSON.parse(localStorage.getItem(WATCHED_KEY)) || {}; } catch (e) { return {}; } }
+    function markWatched(id) { var w = readWatched(); if (!w[id]) { w[id] = 1; try { localStorage.setItem(WATCHED_KEY, JSON.stringify(w)); } catch (e) {} } }
+
+    // ---- resume position (per episode) ----
+    var POS_KEY = 'bw:pos:' + D.id;
+    function savePos() {
+      var d = v.duration;
+      if (!d || isNaN(d)) return;
+      var t = v.currentTime || 0;
+      try {
+        if (t > 5 && t < d - 15) localStorage.setItem(POS_KEY, String(Math.floor(t)));
+        else { localStorage.removeItem(POS_KEY); if (t >= d - 15) markWatched(D.id); }   // finished -> watched
+      } catch (e) {}
+    }
+    var resumeAt = (function () { var n = parseInt(localStorage.getItem(POS_KEY), 10); return Number.isInteger(n) && n > 5 ? n : 0; })();
+    setInterval(savePos, 5000);
+    window.addEventListener('pagehide', savePos);
+    document.addEventListener('visibilitychange', function () { if (document.hidden) savePos(); });
+
+    function buildSrc() {
+      var p = new URLSearchParams();
+      if (state.audio != null && state.audio !== '') p.set('audio', state.audio);
+      if (state.subs != null && state.subs !== '') p.set('subs', state.subs);
+      if (state.h) p.set('h', state.h);
+      if (state.vb) p.set('vb', state.vb);
+      var qs = p.toString();
+      return '/api/play/' + encodeURIComponent(D.id) + '/master.m3u8' + (qs ? '?' + qs : '');
+    }
+
+    // initial=true seeks to the resume point; otherwise we preserve the live position.
+    function load(initial) {
+      var t = initial ? resumeAt : (v.currentTime || 0);
+      var wasPlaying = initial ? true : !v.paused;
+      var src = buildSrc();
+      function restore() { if (t > 0) { try { v.currentTime = t; } catch (e) {} } if (wasPlaying) { v.play().catch(function () {}); } }
+      if (hls) { hls.destroy(); hls = null; }
+      if (window.Hls && window.Hls.isSupported()) {
+        hls = new Hls({ enableWorker: true });
+        hls.loadSource(src);
+        hls.attachMedia(v);
+        hls.on(Hls.Events.MANIFEST_PARSED, restore);
+      } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+        v.src = src;
+        v.addEventListener('loadedmetadata', function h2() { v.removeEventListener('loadedmetadata', h2); restore(); });
+      } else {
+        document.body.insertAdjacentHTML('beforeend', '<p style="padding:20px">Your browser cannot play HLS.</p>');
+      }
+    }
+
+    function applyItem(menu, it, kind) {
+      menu.querySelectorAll('.popitem').forEach(function (x) { x.setAttribute('data-active', 'false'); });
+      it.setAttribute('data-active', 'true');
+      var label = menu.querySelector('.pmlabel');
+      if (label) { var s = it.getAttribute('data-short') || ''; label.textContent = kind === 'subs' ? 'Subtitles: ' + s : s; }
+    }
+
+    document.querySelectorAll('.pmenu').forEach(function (menu) {
+      var kind = menu.getAttribute('data-kind');
+      menu.querySelectorAll('.popitem').forEach(function (it) {
+        it.addEventListener('click', function () {
+          applyItem(menu, it, kind);
+          menu.open = false;
+          if (kind === 'audio') {
+            state.audio = it.getAttribute('data-index');
+            savePref({ audioLang: it.getAttribute('data-lang') || '' });
+            load(false);                       // audio is muxed into the transcode -> reload
+          } else if (kind === 'quality') {
+            state.h = +(it.getAttribute('data-h') || 0); state.vb = +(it.getAttribute('data-vb') || 0);
+            savePref({ quality: it.getAttribute('data-key') || 'auto' });
+            load(false);
+          } else if (kind === 'subs') {
+            var ix = it.getAttribute('data-index');
+            state.subs = ix === '' ? null : ix;
+            savePref({ subGroup: ix === '' ? 'off' : (it.getAttribute('data-group') || 'on') });
+            load(false);                       // subtitles are burned in -> reload
+          }
+        });
+      });
+    });
+
+    // Close any open menu when clicking elsewhere.
+    document.addEventListener('click', function (e) {
+      document.querySelectorAll('.pmenu[open]').forEach(function (m) { if (!m.contains(e.target)) m.open = false; });
+    });
+
+    // ---- restore saved preferences into the menus before first load ----
+    var aMenu = document.querySelector('.pmenu[data-kind="audio"]');
+    if (aMenu && pref.audioLang) {
+      var ai = aMenu.querySelector('.popitem[data-lang="' + (window.CSS && CSS.escape ? CSS.escape(pref.audioLang) : pref.audioLang) + '"]');
+      if (ai) { applyItem(aMenu, ai, 'audio'); state.audio = ai.getAttribute('data-index'); }
+    }
+    var qMenu = document.querySelector('.pmenu[data-kind="quality"]');
+    if (qMenu && pref.quality && pref.quality !== 'auto') {
+      var qi = qMenu.querySelector('.popitem[data-key="' + pref.quality + '"]');
+      if (qi) { applyItem(qMenu, qi, 'quality'); state.h = +(qi.getAttribute('data-h') || 0); state.vb = +(qi.getAttribute('data-vb') || 0); }
+    }
+    var sMenu = document.querySelector('.pmenu[data-kind="subs"]');
+    if (sMenu && pref.subGroup && pref.subGroup !== 'off') {
+      // Re-select the same release group when available, else the first English track.
+      var si = sMenu.querySelector('.popitem[data-group="' + (window.CSS && CSS.escape ? CSS.escape(pref.subGroup) : pref.subGroup) + '"]')
+        || sMenu.querySelector('.popitem[data-index]:not([data-index=""])');
+      if (si && si.getAttribute('data-index')) { applyItem(sMenu, si, 'subs'); state.subs = si.getAttribute('data-index'); }
+    }
+
+    // Theater mode (in-page, not the browser fullscreen API).
+    var theaterBtn = document.getElementById('theater');
+    var ICON_THEATER = ${JSON.stringify(svg('theater', 16))};
+    var ICON_SHRINK = ${JSON.stringify(svg('shrink', 16))};
+    function setTheater(on) {
+      document.body.classList.toggle('theater', on);
+      theaterBtn.innerHTML = (on ? ICON_SHRINK : ICON_THEATER)
+        + '<span id="theater-label">' + (on ? 'Exit theater' : 'Theater') + '</span>';
+    }
+    theaterBtn.addEventListener('click', function () { setTheater(!document.body.classList.contains('theater')); });
+
+    // Keyboard: 't' toggles theater, Esc exits it (ignored while typing).
+    document.addEventListener('keydown', function (e) {
+      var el = document.activeElement, tag = el && el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return;
+      if (e.key === 'Escape' && document.body.classList.contains('theater')) { e.preventDefault(); setTheater(false); }
+      else if ((e.key === 't' || e.key === 'T') && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); setTheater(!document.body.classList.contains('theater')); }
+    });
+
+    // Auto-advance to the next episode when this one ends.
+    if (D.next) {
+      v.addEventListener('ended', function () { markWatched(D.id); window.location.href = '/watch/' + D.next; });
+    } else {
+      v.addEventListener('ended', function () { markWatched(D.id); });
+    }
+
+    // Dim episodes already watched, then keep the current one in view.
+    var watched = readWatched();
+    document.querySelectorAll('.eprow').forEach(function (a) {
+      if (a.classList.contains('current')) return;
+      var href = a.getAttribute('href') || '';
+      var epId = href.slice(href.lastIndexOf('/') + 1);
+      if (epId && watched[epId]) a.classList.add('watched');
+    });
+    var cur = document.querySelector('.eprow.current');
+    if (cur) cur.scrollIntoView({ block: 'center' });
+
+    load(true);                                // first load -> resume saved position
+  })();
 </script>
 </body></html>`);
 });
@@ -1233,7 +1620,7 @@ app.get('/api/play/:id/master.m3u8', async (req, res) => {
   try { await ensureScope(); } catch { return res.status(502).end(); }
   if (!playableIds.has(id)) return res.status(403).end();
 
-  const url = jfUrl(`/Videos/${id}/master.m3u8`, {
+  const params = {
     MediaSourceId: id,
     VideoCodec: 'h264',
     AudioCodec: 'aac,mp3',
@@ -1242,7 +1629,20 @@ app.get('/api/play/:id/master.m3u8', async (req, res) => {
     BreakOnNonKeyFrames: 'true',
     MinSegments: '2',
     PlaySessionId: crypto.randomUUID(),
-  });
+  };
+  // Audio / subtitle / quality selection (validated as ints so nothing arbitrary
+  // reaches JF). Subtitles are burned in (SubtitleMethod=Encode) because these
+  // heavily-typeset fansub ASS tracks are too large to render in the browser.
+  const audio = parseInt(req.query.audio, 10);
+  if (Number.isInteger(audio)) params.AudioStreamIndex = audio;
+  const subs = parseInt(req.query.subs, 10);
+  if (Number.isInteger(subs)) { params.SubtitleStreamIndex = subs; params.SubtitleMethod = 'Encode'; }
+  const h = parseInt(req.query.h, 10);
+  if (Number.isInteger(h) && h > 0) params.maxHeight = h;
+  const vb = parseInt(req.query.vb, 10);
+  if (Number.isInteger(vb) && vb > 0) params.videoBitRate = vb;
+
+  const url = jfUrl(`/Videos/${id}/master.m3u8`, params);
   await proxy(req, res, url, { isPlaylist: true });
 });
 
