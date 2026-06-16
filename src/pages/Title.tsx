@@ -25,7 +25,7 @@ function DetailShell({
         </div>
         <div style={{ paddingBottom: 6 }}>
           <div className="series-meta-row">{badges}</div>
-          <h1 className="h-1" style={{ fontSize: 32 }}>{name}</h1>
+          <h1 className="k-h1" style={{ fontSize: 32 }}>{name}</h1>
           {sub && <div className="series-sub">{sub}</div>}
         </div>
       </div>
@@ -77,7 +77,7 @@ export default function Title() {
       <PortalLayout crumb={BackCrumb}>
         <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview}>
           <div className="ep-head">
-            <h2 className="h-3">Episodes</h2>
+            <h2 className="k-h3">Episodes</h2>
             <span className="badge badge-mono">{data.episodes.length}</span>
             <div className="spacer" />
           </div>
@@ -110,7 +110,7 @@ export default function Title() {
     <PortalLayout crumb={BackCrumb}>
       <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview}>
         <div className="ep-head">
-          <h2 className="h-3">Feature film</h2>
+          <h2 className="k-h3">Feature film</h2>
           <div className="spacer" />
         </div>
         <div className="panel" style={{ padding: 22, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
