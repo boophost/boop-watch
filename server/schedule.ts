@@ -1,6 +1,8 @@
 // Schedule — weekly anime airings scraped from animeschedule.net's homepage,
-// filtered to titles in the Public library. Ported from the legacy server.
+// filtered to titles in the library (the Jellyfin "Public" collection + the
+// /manage watchlist). Ported from the legacy server.
 import { getCollectionItems, type JfItem } from './jellyfin.js'
+import { listSeries } from './db.js'
 
 const SCHEDULE_TZ = process.env.SCHEDULE_TZ || process.env.TZ || 'America/New_York'
 const SCHEDULE_TTL_MS = 30 * 60 * 1000
@@ -31,7 +33,7 @@ const baseTitle = (s: string): string => normTitle(s)
 
 // Generic words that don't identify a show (so they can't bridge two titles).
 const TITLE_STOP = new Set(('the and of to in on at as is or no na ni wa ga de da wo desu ka mo ' +
-  'season cour part story life world another isekai again after final movie special ova ' +
+  'season cour part story life world another isekai tensei again after final movie special ova ' +
   'time your hero saga arc days kara shitara datta').split(/\s+/))
 // Distinctive tokens of a title: 4+ chars, not a generic word.
 const sigTokens = (s: string): string[] => baseTitle(s).split(' ').filter((w) => w.length >= 4 && !TITLE_STOP.has(w))
@@ -222,9 +224,19 @@ function buildDays(items: Airing[], allAirings: Airing[], now: Date): ScheduleDa
 }
 
 /** weekParam: '' for the current week, or 'year=Y&week=W'. */
+// Anticipated titles added in /manage surface on the schedule even before they
+// land in Jellyfin — treat each as a library series for matching.
+function watchlistItems(): JfItem[] {
+  try {
+    return listSeries().map((s) => ({ Id: `mal:${s.mal_id}`, Name: s.title, Type: 'Series' }))
+  } catch {
+    return [] // DB optional
+  }
+}
+
 export async function getSchedule(weekParam: string): Promise<SchedulePayload> {
   const week = await getWeek(weekParam)
-  const inLibrary = libraryMatcher(getCollectionItems())
+  const inLibrary = libraryMatcher([...getCollectionItems(), ...watchlistItems()])
   const items = latestPerShow(week.airings.filter((it) => inLibrary(it.title)))
   const now = new Date()
   const days = buildDays(items, week.airings, now)
