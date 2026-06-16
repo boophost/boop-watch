@@ -81,7 +81,7 @@ export default function SeriesDetail() {
 
   useEffect(() => {
     if (!Number.isFinite(id)) {
-      navigate('/', { replace: true })
+      navigate('/manage', { replace: true })
       return
     }
     let cancelled = false
@@ -91,7 +91,7 @@ export default function SeriesDetail() {
       try {
         const r = await fetch(`/api/series/${id}/detail`, { credentials: 'include' })
         if (r.status === 404) {
-          navigate('/', { replace: true })
+          navigate('/manage', { replace: true })
           return
         }
         if (!r.ok) throw new Error('Failed to load series')
@@ -105,7 +105,7 @@ export default function SeriesDetail() {
         setMal(d.mal)
         if (d.malError) setMalError(d.malError)
       } catch {
-        if (!cancelled) navigate('/', { replace: true })
+        if (!cancelled) navigate('/manage', { replace: true })
       } finally {
         if (!cancelled) setDetailLoading(false)
       }
@@ -175,7 +175,7 @@ export default function SeriesDetail() {
     <div className="min-h-screen bg-background">
       <header className="flex items-center gap-2 border-b px-4 py-3 md:px-6">
         <Button variant="ghost" size="sm" className="shrink-0 gap-1 px-2" asChild>
-          <Link to="/">
+          <Link to="/manage">
             <ChevronLeft className="size-4" />
             Back
           </Link>
