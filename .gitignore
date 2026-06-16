@@ -5,3 +5,13 @@ npm-debug.log*
 .env.*
 .DS_Store
 *.tmp
+
+# build output
+dist/
+dist-server/
+node_modules/.tmp/
+
+# local sqlite data
+data/
+*.sqlite
+*.sqlite-*
