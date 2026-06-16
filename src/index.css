@@ -73,6 +73,29 @@
   --ring: oklch(0.556 0 0);
 }
 
+/* Align the admin (shadcn) dark theme with the portal's "Kagura" language:
+ * violet-tinted neutrals + a violet primary/ring, so /manage reads as the same
+ * product as the public portal (which is scoped under .kagura, untouched here). */
+.dark {
+  --background: oklch(0.145 0.008 285);
+  --foreground: oklch(0.985 0.003 285);
+  --card: oklch(0.185 0.01 285);
+  --card-foreground: oklch(0.985 0.003 285);
+  --popover: oklch(0.185 0.01 285);
+  --popover-foreground: oklch(0.985 0.003 285);
+  --primary: oklch(0.72 0.18 310);
+  --primary-foreground: oklch(0.145 0.008 285);
+  --secondary: oklch(0.22 0.012 285);
+  --secondary-foreground: oklch(0.985 0.003 285);
+  --muted: oklch(0.22 0.012 285);
+  --muted-foreground: oklch(0.72 0.012 285);
+  --accent: oklch(0.25 0.015 285);
+  --accent-foreground: oklch(0.985 0.003 285);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.72 0.18 310);
+}
+
 * {
   border-color: var(--border);
   outline-color: var(--ring);
@@ -81,6 +104,7 @@
 body {
   background-color: var(--background);
   color: var(--foreground);
+  font-family: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 /* ── Version badge (fixed corner, same idea as link) ── */
