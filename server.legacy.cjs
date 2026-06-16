@@ -1444,6 +1444,7 @@ app.get('/watch/:id', async (req, res) => {
   ${epsAside}
 </div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script src="https://cdn.jsdelivr.net/npm/jassub@1.8.8/dist/jassub.umd.js"></script>
 <script>
   (function () {
     var D = ${clientData};
@@ -1481,7 +1482,6 @@ app.get('/watch/:id', async (req, res) => {
     function buildSrc() {
       var p = new URLSearchParams();
       if (state.audio != null && state.audio !== '') p.set('audio', state.audio);
-      if (state.subs != null && state.subs !== '') p.set('subs', state.subs);
       if (state.h) p.set('h', state.h);
       if (state.vb) p.set('vb', state.vb);
       var qs = p.toString();
@@ -1508,6 +1508,33 @@ app.get('/watch/:id', async (req, res) => {
       }
     }
 
+    // ---- client-side subtitles (JASSUB) -------------------------------------
+    // Subs are an overlay on the same <video>, independent of the transcode, so
+    // switching tracks is instant and survives audio/quality reloads (the video
+    // element persists). Off -> tear the renderer down.
+    var JASSUB_CDN = 'https://cdn.jsdelivr.net/npm/jassub@1.8.8/dist/';
+    var subRenderer = null;
+    function subUrl(ix) { return '/api/sub/' + encodeURIComponent(D.id) + '/' + encodeURIComponent(ix); }
+    function setSub(ix) {
+      state.subs = (ix == null || ix === '') ? null : ix;
+      if (state.subs == null) {
+        if (subRenderer) { subRenderer.destroy(); subRenderer = null; }
+        return;
+      }
+      var url = subUrl(state.subs);
+      if (subRenderer) {
+        subRenderer.setTrackByUrl(url);
+      } else if (window.JASSUB) {
+        subRenderer = new JASSUB({
+          video: v,
+          subUrl: url,
+          workerUrl: JASSUB_CDN + 'jassub-worker.js',
+          wasmUrl: JASSUB_CDN + 'jassub-worker.wasm',
+          legacyWasmUrl: JASSUB_CDN + 'jassub-worker.wasm.js',
+        });
+      }
+    }
+
     function applyItem(menu, it, kind) {
       menu.querySelectorAll('.popitem').forEach(function (x) { x.setAttribute('data-active', 'false'); });
       it.setAttribute('data-active', 'true');
@@ -1531,9 +1558,8 @@ app.get('/watch/:id', async (req, res) => {
             load(false);
           } else if (kind === 'subs') {
             var ix = it.getAttribute('data-index');
-            state.subs = ix === '' ? null : ix;
             savePref({ subGroup: ix === '' ? 'off' : (it.getAttribute('data-group') || 'on') });
-            load(false);                       // subtitles are burned in -> reload
+            setSub(ix === '' ? null : ix);     // client-side overlay -> no reload
           }
         });
       });
@@ -1601,6 +1627,7 @@ app.get('/watch/:id', async (req, res) => {
     if (cur) cur.scrollIntoView({ block: 'center' });
 
     load(true);                                // first load -> resume saved position
+    if (state.subs != null) setSub(state.subs); // restore saved subtitle track (overlay)
   })();
 </script>
 </body></html>`);
@@ -1630,13 +1657,13 @@ app.get('/api/play/:id/master.m3u8', async (req, res) => {
     MinSegments: '2',
     PlaySessionId: crypto.randomUUID(),
   };
-  // Audio / subtitle / quality selection (validated as ints so nothing arbitrary
-  // reaches JF). Subtitles are burned in (SubtitleMethod=Encode) because these
-  // heavily-typeset fansub ASS tracks are too large to render in the browser.
+  // Audio / quality selection (validated as ints so nothing arbitrary reaches
+  // JF). Subtitles are deliberately NOT burned in here — they're delivered as
+  // separate ASS via /api/sub and rendered client-side with JASSUB. That keeps
+  // the video transcode independent of the subtitle choice, so toggling or
+  // switching subtitles no longer restarts ffmpeg from scratch.
   const audio = parseInt(req.query.audio, 10);
   if (Number.isInteger(audio)) params.AudioStreamIndex = audio;
-  const subs = parseInt(req.query.subs, 10);
-  if (Number.isInteger(subs)) { params.SubtitleStreamIndex = subs; params.SubtitleMethod = 'Encode'; }
   const h = parseInt(req.query.h, 10);
   if (Number.isInteger(h) && h > 0) params.maxHeight = h;
   const vb = parseInt(req.query.vb, 10);
@@ -1660,6 +1687,23 @@ app.get('/api/play/:id/*', async (req, res) => {
   for (const [k, v] of Object.entries(req.query)) {
     if (k !== 'api_key') url.searchParams.set(k, v);
   }
+  await proxy(req, res, url);
+});
+
+// Text-subtitle delivery (rendered client-side by JASSUB). Jellyfin converts any
+// text track — ASS/SSA passthrough, SubRip transcoded — to ASS, so a single path
+// covers every subtitle. Serving them separately (instead of burning them into
+// the video) means switching tracks never restarts the transcode.
+app.get('/api/sub/:id/:index', async (req, res) => {
+  const { id } = req.params;
+  try { await ensureScope(); } catch { return res.status(502).end(); }
+  if (!playableIds.has(id)) return res.status(403).end();
+  const index = parseInt(req.params.index, 10);
+  if (!Number.isInteger(index) || index < 0) return res.status(400).end();
+
+  const url = jfUrl(`/Videos/${id}/${id}/Subtitles/${index}/0/Stream.ass`);
+  res.set('cache-control', 'public, max-age=86400'); // subtitles are static per item
+  res.set('access-control-allow-origin', '*');       // JASSUB's worker may fetch cross-origin
   await proxy(req, res, url);
 });
 
