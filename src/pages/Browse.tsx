@@ -72,7 +72,7 @@ export default function Browse() {
       <main>
         <div className="section-head">
           <div className="h-eyebrow">Public library</div>
-          <h1 className="h-1">Watch</h1>
+          <h1 className="k-h1">Watch</h1>
         </div>
 
         {error && <p className="empty">{error}</p>}

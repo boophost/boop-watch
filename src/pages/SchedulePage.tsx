@@ -74,7 +74,7 @@ export default function SchedulePage() {
       <main>
         <div className="section-head">
           <div className="h-eyebrow">{sched.isCurrent ? 'This week' : 'Week of'} · {sched.range}</div>
-          <h1 className="h-1">Schedule</h1>
+          <h1 className="k-h1">Schedule</h1>
           <p>The latest episode of each title in your library, via animeschedule.net.</p>
         </div>
 
