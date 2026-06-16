@@ -5,7 +5,12 @@ making changes. It covers the architecture, the deploy/verify loop, the design-s
 and the data-source gotchas (Jellyfin, animeschedule).
 
 Quick rules:
-- Single-file Express app (`server.js`), server-rendered HTML, **no build step / no client framework**.
-- Style only via the `STYLE` design tokens — don't hardcode colors.
-- All Jellyfin access is server-side; never expose the API key. Keep the scope guard.
-- Deploy from the compose root: `cd /opt/boopurnoes && docker compose up -d --build boop-watch`.
+- React (Vite) + TypeScript SPA served by an Express + better-sqlite3 backend. There **is** a build
+  step (`npm run build:all`). The old single-file `server.js` is kept as `server.legacy.cjs` for
+  reference only — don't run or extend it.
+- Two surfaces: the public **portal** (Kagura design system, `src/kagura.css`, scoped under
+  `.kagura`/`.player`) and the authenticated **library manager** at `/manage` (shadcn). Don't
+  hardcode colors — use the design tokens.
+- All Jellyfin access is server-side; never expose the API key. Keep the scope guard and the HLS
+  `api_key` stripping.
+- Deploy is automated: merge to `main` → GHCR → Watchtower redeploys. Don't build manually to deploy.
