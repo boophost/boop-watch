@@ -11,10 +11,13 @@ import {
   episodeNumberFromUrl,
 } from './jikan.js'
 import * as seriesDb from './db.js'
+import { publicRouter } from './publicRoutes.js'
+import { warmScope } from './jellyfin.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const app = express()
+app.disable('x-powered-by')
 const PORT = parseInt(process.env.PORT ?? '3001')
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
 const AUTH_USERNAME = process.env.AUTH_USERNAME ?? 'admin'
@@ -24,6 +27,10 @@ const IS_PROD = process.env.NODE_ENV === 'production'
 
 app.use(express.json())
 app.use(cookieParser())
+
+// Public, no-login portal routes (catalog, player, HLS/sub/image proxies,
+// schedule). Registered before the authed admin APIs and the SPA catch-all.
+app.use(publicRouter)
 
 function requireAuth(
   req: express.Request,
@@ -231,5 +238,6 @@ if (IS_PROD) {
 
 app.listen(PORT, () => {
   seriesDb.getDb()
+  warmScope()
   console.log(`Server running on http://localhost:${PORT}`)
 })
