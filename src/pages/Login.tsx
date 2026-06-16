@@ -32,7 +32,8 @@ export default function Login() {
     <div className="flex h-screen items-center justify-center bg-background">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle className="text-2xl">Anime Indexer</CardTitle>
+          <CardTitle className="text-2xl">boopurnoes</CardTitle>
+          <p className="text-sm text-muted-foreground">Library manager</p>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
