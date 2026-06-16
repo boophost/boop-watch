@@ -20,7 +20,7 @@ export default function Login() {
     setLoading(true)
     try {
       await login(username, password)
-      navigate('/', { replace: true })
+      navigate('/manage', { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
     } finally {

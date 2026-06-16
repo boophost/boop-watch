@@ -67,11 +67,11 @@ export function SeriesList({ refreshKey }: SeriesListProps) {
           role="button"
           tabIndex={0}
           className="flex cursor-pointer gap-3 rounded-lg border border-border bg-card p-3 shadow-sm outline-none ring-offset-background transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={() => navigate(`/series/${s.id}`)}
+          onClick={() => navigate(`/manage/series/${s.id}`)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault()
-              navigate(`/series/${s.id}`)
+              navigate(`/manage/series/${s.id}`)
             }
           }}
         >
