@@ -57,6 +57,10 @@ export default function Watch() {
   const [error, setError] = useState('')
   const [libsReady, setLibsReady] = useState(false)
   const [theater, setTheater] = useState(false)
+  // Gate the HLS load until audio/quality are initialised from the response, so
+  // it loads once with the final selection instead of starting one transcode at
+  // audioIndex=null and immediately reloading (which lost the resume position).
+  const [selReady, setSelReady] = useState(false)
 
   // selections
   const [audioIndex, setAudioIndex] = useState<string | null>(null)
@@ -80,7 +84,7 @@ export default function Watch() {
 
   // Fetch metadata when the episode changes.
   useEffect(() => {
-    setData(null); setError('')
+    setData(null); setError(''); setSelReady(false)
     firstLoad.current = true
     getWatch(id).then(setData).catch((e: Error) => setError(e.message))
   }, [id])
@@ -102,6 +106,7 @@ export default function Watch() {
       if (m) sub = String(m.index)
     }
     setSubIndex(sub)
+    setSelReady(true)
   }, [data])
 
   const quality = useMemo(() => data?.quality.find((q) => q.key === qKey) || { h: 0, vb: 0, key: 'auto', label: 'Auto' }, [data, qKey])
@@ -109,7 +114,7 @@ export default function Watch() {
   // (Re)load the HLS source. Audio + quality are muxed into the transcode, so
   // changing them reloads; the first load seeks the saved resume point.
   useEffect(() => {
-    if (!data || !libsReady) return
+    if (!data || !libsReady || !selReady) return
     const v = videoRef.current
     if (!v) return
     const Hls = window.Hls
@@ -149,7 +154,7 @@ export default function Watch() {
     } else {
       setError('Your browser cannot play HLS.')
     }
-  }, [data, libsReady, audioIndex, quality])
+  }, [data, libsReady, selReady, audioIndex, quality])
 
   // Client-side subtitles (JASSUB overlay) — independent of the transcode.
   useEffect(() => {
