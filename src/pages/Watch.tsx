@@ -12,6 +12,19 @@ const HLS_SRC = 'https://cdn.jsdelivr.net/npm/hls.js@1'
 const JASSUB_CDN = 'https://cdn.jsdelivr.net/npm/jassub@1.8.8/dist/'
 const JASSUB_SRC = JASSUB_CDN + 'jassub.umd.js'
 
+// JASSUB does `new Worker(workerUrl)` directly, but a classic Worker can't be
+// constructed from a cross-origin (CDN) script URL — the browser throws a
+// SecurityError and subtitles silently never render. Wrap the CDN worker in a
+// same-origin blob that importScripts() it (cross-origin importScripts is allowed
+// since jsdelivr serves permissive CORS); the wasm is fetched from its absolute
+// URL by the worker, so no relative-path resolution is needed.
+let jassubWorkerUrl: string | null = null
+function jassubWorker(): string {
+  return (jassubWorkerUrl ??= URL.createObjectURL(
+    new Blob([`importScripts(${JSON.stringify(JASSUB_CDN + 'jassub-worker.js')})`], { type: 'text/javascript' }),
+  ))
+}
+
 const scriptCache: Record<string, Promise<void>> = {}
 function loadScript(src: string): Promise<void> {
   return (scriptCache[src] ??= new Promise<void>((resolve, reject) => {
@@ -154,9 +167,14 @@ export default function Watch() {
       subRef.current = new window.JASSUB({
         video: v,
         subUrl: url,
-        workerUrl: JASSUB_CDN + 'jassub-worker.js',
+        workerUrl: jassubWorker(),
         wasmUrl: JASSUB_CDN + 'jassub-worker.wasm',
         legacyWasmUrl: JASSUB_CDN + 'jassub-worker.wasm.js',
+        // The fallback font default ('./default.woff2') is relative; inside a blob
+        // worker it has no valid base, so point it at the CDN. Our subs name fonts
+        // that aren't embedded (e.g. "Cronos Pro") and fall back to this.
+        availableFonts: { 'liberation sans': JASSUB_CDN + 'default.woff2' },
+        fallbackFont: 'liberation sans',
       })
     }
   }, [data, libsReady, subIndex])
