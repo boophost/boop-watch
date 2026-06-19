@@ -415,7 +415,12 @@ body.theater .player .topbar { display: none; }
 body.theater .player .wrap { display: block; max-width: none; margin: 0; padding: 0; height: 100vh; }
 body.theater .player .col-eps { display: none; }
 body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
-body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow: none; display: flex; }
-body.theater .player video { max-height: none; height: 100%; width: 100%; object-fit: contain; }
+/* Keep .vid in block flow (not flex): JASSUB inserts a 0-width anchor div right
+   after the <video> and positions its subtitle canvas relative to it, assuming
+   the anchor shares the video's left edge. A flex row would push that anchor to
+   the right of the full-width video and drag the canvas off-screen, so fill the
+   video by absolute positioning instead. */
+body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow: none; position: relative; }
+body.theater .player video { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; object-fit: contain; }
 body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
   background: oklch(0.145 0.008 285 / 94%); border-top: 1px solid var(--border); }
