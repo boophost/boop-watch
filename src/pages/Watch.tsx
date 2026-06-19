@@ -160,7 +160,9 @@ export default function Watch() {
       if (subRef.current) { subRef.current.destroy(); subRef.current = null }
       return
     }
-    const url = `/api/sub/${encodeURIComponent(data.id)}/${encodeURIComponent(subIndex)}`
+    // Absolute URL: JASSUB fetches this from inside the (blob:) worker, where a
+    // root-relative path has no resolvable base and throws "Invalid URL".
+    const url = `${location.origin}/api/sub/${encodeURIComponent(data.id)}/${encodeURIComponent(subIndex)}`
     if (subRef.current) {
       subRef.current.setTrackByUrl(url)
     } else if (window.JASSUB) {
