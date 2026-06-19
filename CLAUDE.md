@@ -148,7 +148,11 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
    `better-sqlite3` is glibc-native so `node dist-server/index.js` runs locally. The public JSON
    APIs and a headless browser (Playwright) screenshot are the way to verify UI; you can't rely on
    server-rendered HTML anymore (it's a client-rendered SPA).
-3. **Always commit your changes** when work is complete — don't leave the tree dirty. Use a
+3. **Bump the version in every PR.** Increment `version` in `package.json` (semver: patch for
+   fixes, minor for features, major for breaking changes). This is the single source of truth —
+   `src/version.ts` re-exports it and the portal footer renders it as `v<version>`, so a bump is how
+   a deploy becomes visibly identifiable. One bump per PR.
+4. **Always commit your changes** when work is complete — don't leave the tree dirty. Use a
    **branch-and-PR flow**: feature branch, commit, push to `origin`, open a PR into `main`
    (`gh pr create`). **Don't commit directly to `main`.** If the tree already had unrelated pending
    changes, call that out rather than bundling them. Remote: `github.com/n0es/boop-watch` (private).
