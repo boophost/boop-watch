@@ -1,7 +1,7 @@
 {
   "name": "boop-watch",
   "private": true,
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Public, no-login viewing portal for a curated Jellyfin collection + library manager",
   "type": "module",
   "scripts": {
@@ -16,11 +16,13 @@
   "dependencies": {
     "@radix-ui/react-label": "^2.1.1",
     "@radix-ui/react-slot": "^1.1.2",
+    "@vidstack/react": "^1.15.6",
     "better-sqlite3": "^12.9.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cookie-parser": "^1.4.7",
     "express": "^5.1.0",
+    "hls.js": "^1.6.16",
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.511.0",
     "react": "^19.1.0",
