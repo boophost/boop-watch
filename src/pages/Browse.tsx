@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
-import { PortalLayout, ScheduleCrumb } from '@/components/PortalLayout'
+import { PortalLayout } from '@/components/PortalLayout'
 import { loadCatalog, imgUrl, type CatalogItem } from '@/lib/api'
 
 const initials = (n: string) =>
@@ -68,7 +68,7 @@ export default function Browse() {
   ]
 
   return (
-    <PortalLayout crumb={ScheduleCrumb}>
+    <PortalLayout>
       <main>
         <div className="section-head">
           <div className="h-eyebrow">Public library</div>
