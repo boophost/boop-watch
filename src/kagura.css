@@ -357,6 +357,19 @@
   & .vds-player { width: 100%; max-height: 78vh; --media-brand: var(--accent); --media-focus-ring-color: var(--accent); }
   & .vds-player video { max-height: 78vh; }
 
+  /* Subtitle (JASSUB) overlay. Vidstack wraps <video> in a flex
+     [data-media-provider] and JASSUB inserts its canvas anchor as a *sibling* of
+     the video — so by default it lays out as a centered flex item beside the
+     video instead of over it, and the ASS subtitles render off to the side.
+     Pin the anchor to fill the provider (which is the video's box) so the canvas
+     overlays the frame. Must beat JASSUB's inline `position: relative`, hence
+     !important. Applies before JASSUB initialises (kagura.css loads at startup),
+     so its first geometry calc is already correct. */
+  & .vds-player [data-media-provider] > .JASSUB {
+    position: absolute !important; top: 0 !important; left: 0 !important;
+    width: 100% !important; height: 100% !important; pointer-events: none;
+  }
+
   /* Skip intro/outro button, overlaid above the player controls. */
   & .skip-btn { position: absolute; right: 20px; bottom: 86px; z-index: 50;
     display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 16px; border-radius: 10px;
