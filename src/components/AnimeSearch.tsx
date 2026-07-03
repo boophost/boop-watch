@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import { fetchAuth } from '@/lib/api'
 
 export interface AnimeSearchHit {
   mal_id: number
@@ -47,9 +48,8 @@ export function AnimeSearch({ className, onAdded }: AnimeSearchProps) {
         setLoading(true)
         setError('')
         try {
-          const r = await fetch(
+          const r = await fetchAuth(
             `/api/search/anime?q=${encodeURIComponent(t)}`,
-            { credentials: 'include' },
           )
           const raw = (await r.json()) as { results?: AnimeSearchHit[]; error?: string }
           if (!r.ok) {
@@ -69,9 +69,8 @@ export function AnimeSearch({ className, onAdded }: AnimeSearchProps) {
 
   const addSeries = async (hit: AnimeSearchHit) => {
     try {
-      const r = await fetch('/api/series', {
+      const r = await fetchAuth('/api/series', {
         method: 'POST',
-        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mal_id: hit.mal_id,

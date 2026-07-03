@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { fetchAuth } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Trash2 } from 'lucide-react'
 
@@ -25,7 +26,7 @@ export function SeriesList({ refreshKey }: SeriesListProps) {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const r = await fetch('/api/series', { credentials: 'include' })
+      const r = await fetchAuth('/api/series')
       if (!r.ok) throw new Error('load failed')
       const d = (await r.json()) as { series: SeriesEntry[] }
       setSeries(d.series)
@@ -41,7 +42,7 @@ export function SeriesList({ refreshKey }: SeriesListProps) {
   }, [load, refreshKey])
 
   const remove = async (id: number) => {
-    await fetch(`/api/series/${id}`, { method: 'DELETE', credentials: 'include' })
+    await fetchAuth(`/api/series/${id}`, { method: 'DELETE' })
     void load()
   }
 

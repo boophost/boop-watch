@@ -9,6 +9,8 @@ import Title from './pages/Title'
 import Watch from './pages/Watch'
 import SchedulePage from './pages/SchedulePage'
 
+import Signup from './pages/Signup'
+
 function RequireAuth() {
   const { user, loading } = useAuth()
 
@@ -37,6 +39,7 @@ export default function App() {
 
         {/* Authenticated library manager */}
         <Route path="/login" element={<Login />} />
+        <Route path="/signup" element={<Signup />} />
         <Route path="/manage" element={<RequireAuth />}>
           <Route index element={<Dashboard />} />
           <Route path="series/:seriesId" element={<AdminSeriesDetail />} />
