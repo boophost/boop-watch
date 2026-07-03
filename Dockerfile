@@ -1,26 +1,35 @@
-# Multi-stage build: Vite/React frontend (-> dist) + Express/TS backend (-> dist-server).
-# better-sqlite3 is a native module, so the build stage needs python3/make/g++.
-FROM node:20-alpine AS build
+# Base stage with dependencies
+FROM node:20-alpine AS deps
 RUN apk add --no-cache python3 make g++
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
-COPY . .
-# .git is dockerignored, so the footer's commit hash comes in from CI via this
-# build arg (falls back to "dev" for local `docker build` without it).
+
+# Frontend build stage
+FROM deps AS build-frontend
+COPY index.html vite.config.ts tsconfig*.json components.json ./
+COPY public ./public
+COPY src ./src
 ARG GIT_SHA=dev
 ENV GIT_SHA=$GIT_SHA
-RUN npm run build:all
+RUN npm run build
 
+# Backend build stage
+FROM deps AS build-backend
+COPY tsconfig*.json ./
+COPY server ./server
+RUN npm run build:server
+
+# Final production stage
 FROM node:20-alpine
 RUN apk add --no-cache python3 make g++
 WORKDIR /app
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/dist-server ./dist-server
-COPY --from=build /app/package*.json ./
+COPY --from=build-frontend /app/dist ./dist
+COPY --from=build-backend /app/dist-server ./dist-server
+COPY --from=deps /app/package*.json ./
+# Use npm ci from deps layer without dev dependencies
 RUN npm ci --omit=dev && apk del python3 make g++
 EXPOSE 3000
 ENV PORT=3000
 ENV NODE_ENV=production
-# wget (busybox) is available in alpine for the compose healthcheck
 CMD ["node", "dist-server/index.js"]
