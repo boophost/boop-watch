@@ -54,6 +54,7 @@
     border-bottom: 1px solid var(--border);
   }
   & .chrome .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; }
+  @media (min-width: 768px) { & .chrome .brand { display: none; } }
   & .chrome .brand-mark {
     width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
     background: linear-gradient(135deg, var(--accent), oklch(0.62 0.2 270));
@@ -62,7 +63,7 @@
   }
   & .chrome .brand .label { white-space: nowrap; }
   & .chrome .brand .sub { color: var(--fg-subtle); font-weight: 500; }
-  & .chrome .chrome-right { grid-column: 3; justify-self: end; }
+  & .chrome .chrome-right { grid-column: 3; justify-self: end; display: flex; align-items: center; gap: 16px; }
   & .chrome .crumb { color: var(--fg-muted); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
   & .chrome .crumb:hover { color: var(--fg); }
 

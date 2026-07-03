@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Icon } from './Icon'
+import { UserCrumb } from './PortalLayout'
 import { loadCatalog, imgUrl, type CatalogItem } from '@/lib/api'
 
 const initials = (n: string) =>
@@ -151,7 +152,10 @@ export function Chrome({ crumb }: { crumb?: ReactNode }) {
           </div>
         )}
       </form>
-      <div className="chrome-right">{crumb}</div>
+      <div className="chrome-right">
+        {crumb}
+        <UserCrumb />
+      </div>
     </header>
   )
 }
