@@ -51,7 +51,7 @@ npm run dev             # Vite dev server (proxies /api and /img)
 | `PORT` | no | `3000` |
 
 Deploy is automated: merge to `main` → GitHub Actions builds & pushes `ghcr.io/n0es/boop-watch:latest`
-→ Watchtower redeploys the container.
+→ the workflow's `deploy` job rolls the k3s Deployment (`link-apps` namespace) so the new image rolls out.
 
 ## Curate
 Add or remove titles from the **"Public"** collection in Jellyfin. The portal's scope cache
