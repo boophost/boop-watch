@@ -353,6 +353,18 @@
     box-shadow: 0 30px 80px -30px oklch(0 0 0 / 80%); }
   & video { display: block; width: 100%; max-height: 78vh; background: #000; }
 
+  /* Vidstack player, themed to the Kagura accent. */
+  & .vds-player { width: 100%; max-height: 78vh; --media-brand: var(--accent); --media-focus-ring-color: var(--accent); }
+  & .vds-player video { max-height: 78vh; }
+
+  /* Skip intro/outro button, overlaid above the player controls. */
+  & .skip-btn { position: absolute; right: 20px; bottom: 86px; z-index: 50;
+    display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 16px; border-radius: 10px;
+    background: var(--bg-elev-2); border: 1px solid var(--border-strong); color: var(--fg);
+    font: 600 13px var(--font-sans); cursor: pointer; backdrop-filter: blur(8px);
+    box-shadow: 0 8px 24px -8px oklch(0 0 0 / 70%); transition: background .14s, border-color .14s, transform .14s; }
+  & .skip-btn:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); transform: translateY(-1px); }
+
   & .pbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
   & .pbar .spacer { flex: 1; }
   & .pctl, & .pmenu > summary {
@@ -421,6 +433,8 @@ body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; backg
    the right of the full-width video and drag the canvas off-screen, so fill the
    video by absolute positioning instead. */
 body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow: none; position: relative; }
+body.theater .player .vds-player { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; }
 body.theater .player video { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; object-fit: contain; }
+body.theater .player .skip-btn { bottom: 96px; }
 body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
   background: oklch(0.145 0.008 285 / 94%); border-top: 1px solid var(--border); }

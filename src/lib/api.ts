@@ -37,6 +37,7 @@ export interface AudioTrack { index: number; lang: string; label: string; detail
 export interface SubTrack { index: number; group: string }
 export interface QualityPreset { key: string; label: string; h: number; vb: number }
 export interface WatchEpisode { id: string; num: string; name: string; current: boolean }
+export interface Segment { type: 'intro' | 'outro'; start: number; end: number }
 export interface WatchData {
   id: string
   title: string
@@ -48,6 +49,7 @@ export interface WatchData {
   quality: QualityPreset[]
   episodes: WatchEpisode[]
   nextId: string | null
+  segments: Segment[]
 }
 
 export interface ScheduleEvent {

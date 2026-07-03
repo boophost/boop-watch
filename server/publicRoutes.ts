@@ -109,6 +109,17 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
     res.status(403).json({ error: 'not available' })
     return
   }
+  // Intro/outro skip ranges from Jellyfin Media Segments (populated server-side
+  // by a provider plugin, e.g. Intro Skipper). Keyed by the same item id; empty
+  // when no provider is installed, so the player simply shows no skip button.
+  const segPromise = jfJson<{ Items?: Array<{ Type?: string; StartTicks?: number; EndTicks?: number }> }>(
+    `/MediaSegments/${id}`, { includeSegmentTypes: 'Intro,Outro' },
+  ).then((d) => (d.Items || []).flatMap((s) => {
+    const type = String(s.Type || '').toLowerCase()
+    if (type !== 'intro' && type !== 'outro') return []
+    return [{ type: type as 'intro' | 'outro', start: (s.StartTicks || 0) / 1e7, end: (s.EndTicks || 0) / 1e7 }]
+  })).catch(() => [])
+
   let item: JfItem = { Id: id }
   try { item = await jfItem(id, 'MediaStreams,MediaSources,Overview') } catch { /* title is cosmetic */ }
 
@@ -119,7 +130,7 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
       siblings = (e.Items || []).filter((ep) => getPlayableIds().has(ep.Id))
     } catch { /* sidebar is optional */ }
   }
-  res.json(buildWatchData(id, item, siblings))
+  res.json(buildWatchData(id, item, siblings, await segPromise))
 })
 
 // Weekly anime schedule, filtered to the library.

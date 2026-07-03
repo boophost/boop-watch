@@ -1,14 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import {
+  MediaPlayer, MediaProvider, isHLSProvider, isVideoProvider,
+  type MediaPlayerInstance, type MediaProviderAdapter,
+} from '@vidstack/react'
+import { DefaultVideoLayout, defaultLayoutIcons } from '@vidstack/react/player/layouts/default'
+import HLS from 'hls.js'
 import { Icon, type IconName } from '@/components/Icon'
-import { getWatch, type WatchData } from '@/lib/api'
+import { getWatch, type Segment, type WatchData } from '@/lib/api'
+import '@vidstack/react/player/styles/default/theme.css'
+import '@vidstack/react/player/styles/default/layouts/video.css'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 declare global {
-  interface Window { Hls?: any; JASSUB?: any }
+  interface Window { JASSUB?: any }
 }
 
-const HLS_SRC = 'https://cdn.jsdelivr.net/npm/hls.js@1'
 const JASSUB_CDN = 'https://cdn.jsdelivr.net/npm/jassub@1.8.8/dist/'
 const JASSUB_SRC = JASSUB_CDN + 'jassub.umd.js'
 
@@ -55,37 +62,43 @@ export default function Watch() {
 
   const [data, setData] = useState<WatchData | null>(null)
   const [error, setError] = useState('')
-  const [libsReady, setLibsReady] = useState(false)
+  const [subsReady, setSubsReady] = useState(false) // JASSUB library loaded
   const [theater, setTheater] = useState(false)
-  // Gate the HLS load until audio/quality are initialised from the response, so
-  // it loads once with the final selection instead of starting one transcode at
-  // audioIndex=null and immediately reloading (which lost the resume position).
+  // Gate the source URL until audio/quality are initialised from the response, so
+  // the player loads once with the final selection instead of reloading the
+  // transcode (which loses the resume position).
   const [selReady, setSelReady] = useState(false)
+  // The underlying <video> element, captured from the provider for JASSUB.
+  const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null)
+  // The intro/outro segment the playhead is currently inside (drives the skip button).
+  const [activeSeg, setActiveSeg] = useState<Segment | null>(null)
 
   // selections
   const [audioIndex, setAudioIndex] = useState<string | null>(null)
   const [subIndex, setSubIndex] = useState<string>('') // '' = off
   const [qKey, setQKey] = useState<string>('auto')
 
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const hlsRef = useRef<any>(null)
+  const playerRef = useRef<MediaPlayerInstance | null>(null)
   const subRef = useRef<any>(null)
   const firstLoad = useRef(true)
+  // Position + play-state to restore after a transcode reload (audio/quality switch).
+  const pendingSeek = useRef<{ time: number; play: boolean } | null>(null)
 
-  // Load the player libraries once. A CDN hiccup is non-fatal: the page chrome
-  // (back link, controls, episode list) still renders; only playback waits.
+  // Load the subtitle library (JASSUB) once. A CDN hiccup is non-fatal: the
+  // player and page chrome still work; only subtitle rendering waits.
   useEffect(() => {
     let alive = true
-    Promise.all([loadScript(HLS_SRC), loadScript(JASSUB_SRC)])
-      .then(() => { if (alive) setLibsReady(true) })
-      .catch(() => { if (alive) console.warn('player libraries failed to load') })
+    loadScript(JASSUB_SRC)
+      .then(() => { if (alive) setSubsReady(true) })
+      .catch(() => { if (alive) console.warn('subtitle library failed to load') })
     return () => { alive = false }
   }, [])
 
   // Fetch metadata when the episode changes.
   useEffect(() => {
-    setData(null); setError(''); setSelReady(false)
+    setData(null); setError(''); setSelReady(false); setActiveSeg(null)
     firstLoad.current = true
+    pendingSeek.current = null
     getWatch(id).then(setData).catch((e: Error) => setError(e.message))
   }, [id])
 
@@ -111,56 +124,78 @@ export default function Watch() {
 
   const quality = useMemo(() => data?.quality.find((q) => q.key === qKey) || { h: 0, vb: 0, key: 'auto', label: 'Auto' }, [data, qKey])
 
-  // (Re)load the HLS source. Audio + quality are muxed into the transcode, so
-  // changing them reloads; the first load seeks the saved resume point.
-  useEffect(() => {
-    if (!data || !libsReady || !selReady) return
-    const v = videoRef.current
-    if (!v) return
-    const Hls = window.Hls
-
+  // The HLS source. Audio + quality are muxed into the transcode, so changing
+  // them changes the URL and Vidstack reloads; position is restored on canplay.
+  const src = useMemo(() => {
+    if (!data || !selReady) return ''
     const params = new URLSearchParams()
     if (audioIndex != null && audioIndex !== '') params.set('audio', audioIndex)
     if (quality.h) params.set('h', String(quality.h))
     if (quality.vb) params.set('vb', String(quality.vb))
     const qs = params.toString()
-    const src = `/api/play/${encodeURIComponent(data.id)}/master.m3u8${qs ? `?${qs}` : ''}`
+    return `/api/play/${encodeURIComponent(data.id)}/master.m3u8${qs ? `?${qs}` : ''}`
+  }, [data, selReady, audioIndex, quality])
 
-    const initial = firstLoad.current
-    firstLoad.current = false
-    let resumeAt = 0
-    if (initial) {
+  // Use our bundled hls.js (not Vidstack's CDN default) and grab the real <video>
+  // element so JASSUB can render the ASS overlay onto it.
+  const onProviderChange = (provider: MediaProviderAdapter | null) => {
+    if (isHLSProvider(provider)) {
+      provider.library = HLS
+      provider.config = { enableWorker: true }
+      setVideoEl(provider.video)
+    } else if (isVideoProvider(provider)) {
+      setVideoEl(provider.video) // Safari native HLS fallback
+    }
+  }
+
+  // First load seeks the saved resume point; later loads (audio/quality switch)
+  // restore the position + play-state captured before the source changed.
+  const onCanPlay = () => {
+    const p = playerRef.current
+    if (!p || !data) return
+    if (firstLoad.current) {
+      firstLoad.current = false
       const n = parseInt(localStorage.getItem(`bw:pos:${data.id}`) || '', 10)
-      resumeAt = Number.isInteger(n) && n > 5 ? n : 0
+      if (Number.isInteger(n) && n > 5) p.currentTime = n
+    } else if (pendingSeek.current) {
+      const { time, play } = pendingSeek.current
+      pendingSeek.current = null
+      if (time > 0) p.currentTime = time
+      if (play) p.play().catch(() => {})
     }
-    const t = initial ? resumeAt : (v.currentTime || 0)
-    const wasPlaying = initial ? true : !v.paused
-    const restore = () => {
-      if (t > 0) { try { v.currentTime = t } catch { /* ignore */ } }
-      if (wasPlaying) v.play().catch(() => {})
-    }
+  }
 
-    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null }
-    if (Hls && Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true })
-      hlsRef.current = hls
-      hls.loadSource(src)
-      hls.attachMedia(v)
-      hls.on(Hls.Events.MANIFEST_PARSED, restore)
-    } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
-      v.src = src
-      const h2 = () => { v.removeEventListener('loadedmetadata', h2); restore() }
-      v.addEventListener('loadedmetadata', h2)
-    } else {
-      setError('Your browser cannot play HLS.')
-    }
-  }, [data, libsReady, selReady, audioIndex, quality])
+  // Surface a skip button while the playhead sits inside an intro/outro segment.
+  const onTimeUpdate = () => {
+    const p = playerRef.current
+    if (!p || !data?.segments.length) return
+    const t = p.currentTime
+    const seg = data.segments.find((s) => t >= s.start && t < s.end - 1) || null
+    setActiveSeg((prev) => (prev?.type === seg?.type && prev?.start === seg?.start ? prev : seg))
+  }
+
+  const skip = () => {
+    const p = playerRef.current
+    if (p && activeSeg) { p.currentTime = activeSeg.end; setActiveSeg(null) }
+  }
+
+  // Capture position + play-state before an audio/quality switch reloads the
+  // transcode, so onCanPlay can restore them.
+  const captureSeek = () => {
+    const p = playerRef.current
+    pendingSeek.current = p ? { time: p.currentTime, play: !p.paused } : null
+  }
+
+  // Auto-advance when the episode ends.
+  const onEnded = () => {
+    if (!data) return
+    markWatched(data.id)
+    if (data.nextId) navigate(`/watch/${data.nextId}`)
+  }
 
   // Client-side subtitles (JASSUB overlay) — independent of the transcode.
   useEffect(() => {
-    if (!data || !libsReady) return
-    const v = videoRef.current
-    if (!v) return
+    if (!data || !subsReady || !videoEl) return
     if (subIndex === '') {
       if (subRef.current) { subRef.current.destroy(); subRef.current = null }
       return
@@ -172,7 +207,7 @@ export default function Watch() {
       subRef.current.setTrackByUrl(url)
     } else if (window.JASSUB) {
       subRef.current = new window.JASSUB({
-        video: v,
+        video: videoEl,
         subUrl: url,
         workerUrl: jassubWorker(),
         wasmUrl: JASSUB_CDN + 'jassub-worker.wasm',
@@ -184,18 +219,18 @@ export default function Watch() {
         fallbackFont: 'liberation sans',
       })
     }
-  }, [data, libsReady, subIndex])
+  }, [data, subsReady, subIndex, videoEl])
 
   // Persist resume position; finish -> mark watched.
   useEffect(() => {
     if (!data) return
-    const v = videoRef.current
-    if (!v) return
     const POS_KEY = `bw:pos:${data.id}`
     const savePos = () => {
-      const d = v.duration
+      const p = playerRef.current
+      if (!p) return
+      const d = p.duration
       if (!d || isNaN(d)) return
-      const t = v.currentTime || 0
+      const t = p.currentTime || 0
       try {
         if (t > 5 && t < d - 15) localStorage.setItem(POS_KEY, String(Math.floor(t)))
         else { localStorage.removeItem(POS_KEY); if (t >= d - 15) markWatched(data.id) }
@@ -208,16 +243,6 @@ export default function Watch() {
     document.addEventListener('visibilitychange', onVis)
     return () => { clearInterval(iv); window.removeEventListener('pagehide', onHide); document.removeEventListener('visibilitychange', onVis); savePos() }
   }, [data])
-
-  // Auto-advance when the episode ends.
-  useEffect(() => {
-    if (!data) return
-    const v = videoRef.current
-    if (!v) return
-    const onEnded = () => { markWatched(data.id); if (data.nextId) navigate(`/watch/${data.nextId}`) }
-    v.addEventListener('ended', onEnded)
-    return () => v.removeEventListener('ended', onEnded)
-  }, [data, navigate])
 
   // Theater mode reflects onto <body> (CSS targets body.theater).
   useEffect(() => {
@@ -249,9 +274,8 @@ export default function Watch() {
     return () => document.removeEventListener('click', onClick)
   }, [])
 
-  // Tear down players on unmount.
+  // Tear down JASSUB on unmount (Vidstack disposes itself).
   useEffect(() => () => {
-    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null }
     if (subRef.current) { subRef.current.destroy(); subRef.current = null }
   }, [])
 
@@ -280,7 +304,31 @@ export default function Watch() {
 
       <div className={`wrap${data.episodes.length ? '' : ' no-eps'}`}>
         <div className="col-video">
-          <div className="vid"><video id="v" ref={videoRef} controls autoPlay playsInline /></div>
+          <div className="vid">
+            {src && (
+              <MediaPlayer
+                ref={playerRef}
+                className="vds-player"
+                title={data.title}
+                src={{ src, type: 'application/x-mpegurl' }}
+                aspectRatio="16/9"
+                autoPlay
+                playsInline
+                onProviderChange={onProviderChange}
+                onCanPlay={onCanPlay}
+                onTimeUpdate={onTimeUpdate}
+                onEnded={onEnded}
+              >
+                <MediaProvider />
+                <DefaultVideoLayout icons={defaultLayoutIcons} />
+                {activeSeg && (
+                  <button type="button" className="skip-btn" onClick={skip}>
+                    Skip {activeSeg.type === 'intro' ? 'Intro' : 'Outro'} <Icon name="next" size={15} />
+                  </button>
+                )}
+              </MediaPlayer>
+            )}
+          </div>
           <div className="pbar">
             {data.nextId && (
               <Link className="pctl" to={`/watch/${data.nextId}`} title="Next episode"><Icon name="next" size={16} /><span>Next</span></Link>
@@ -291,7 +339,7 @@ export default function Watch() {
               <Menu kind="audio" icon="audio" title="Audio" label={audioLabel}>
                 {data.audio.tracks.map((t) => (
                   <PopItem key={t.index} active={String(t.index) === audioIndex} label={t.label} detail={t.detail}
-                    onClick={(e) => { closeMenu(e); setAudioIndex(String(t.index)); savePref({ audioLang: t.lang || '' }) }} />
+                    onClick={(e) => { closeMenu(e); captureSeek(); setAudioIndex(String(t.index)); savePref({ audioLang: t.lang || '' }) }} />
                 ))}
               </Menu>
             )}
@@ -311,7 +359,7 @@ export default function Watch() {
             <Menu kind="quality" icon="gear" title="Quality" label={qualityLabel}>
               {data.quality.map((q) => (
                 <PopItem key={q.key} active={q.key === qKey} label={q.label}
-                  onClick={(e) => { closeMenu(e); setQKey(q.key); savePref({ quality: q.key }) }} />
+                  onClick={(e) => { closeMenu(e); captureSeek(); setQKey(q.key); savePref({ quality: q.key }) }} />
               ))}
             </Menu>
 
