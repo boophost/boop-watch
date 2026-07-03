@@ -47,30 +47,38 @@ non-file GETs (the SPA router).
 
 ## Run / build / deploy
 
-**Deploy is automated via GitHub → GHCR → Watchtower.** Merging to `main` triggers
-`.github/workflows/docker-publish.yml` (install + `npm run build:all`, then build & push
-`ghcr.io/n0es/boop-watch:latest`). The host's Watchtower polls GHCR every 30s and auto-redeploys
-the `boop-watch` container (`com.centurylinklabs.watchtower.enable=true`). **You don't run a manual
-build to deploy — open a PR, merge it, and the new image rolls out on its own.** Every PR also
-builds (no push) as a CI check.
+**Deploy is automated via GitHub → GHCR → k3s.** Merging to `main` triggers
+`.github/workflows/docker-publish.yml`: the `build` job installs + `npm run build:all` and pushes
+`ghcr.io/n0es/boop-watch:latest`, then the `deploy` job rolls the k3s Deployment. **You don't run a
+manual build to deploy — open a PR, merge it, and the new image rolls out on its own.** Every PR
+also builds (no push) as a CI check.
+
+The app now runs on a **k3s cluster** (control plane `k8s-cp`, `192.168.50.61`), provisioned by the
+`n0es/link` platform: Deployment/Service `boop-watch` live in the **`link-apps`** namespace with
+`link.boopurno.es/app: boop-watch` labels. link sets `imagePullPolicy: Always` + a changing
+`link.dev/deployed-at` pod annotation, but a *running* pod never re-pulls a moved `:latest` on its
+own — so the `deploy` job runs `kubectl rollout restart` (same effect as link's redeploy) to force
+the new pod to pull the freshly pushed image. It is **not** a Watchtower/compose deploy anymore (the
+old `boop-watch` compose service on `boopurnoes` is retired/stopped).
+
+The `deploy` job runs on a **self-hosted runner on `k8s-cp`** (label `k3s-cp`) because the k3s API is
+LAN-only. It authenticates with a token scoped (RBAC `Role` in `link-apps`) to `get/list/watch/patch`
+deployments — not cluster-admin — via kubeconfig `~ethan/.kube/boop-watch-deployer.yaml` on that host.
+Manual roll if ever needed: `kubectl -n link-apps rollout restart deployment/boop-watch`.
 
 ```bash
 npm run build:all     # tsc -b && vite build  +  tsc -p server/tsconfig.json  (CI does this)
 npm run dev           # Vite dev server (proxies /api + /img to the backend)
 npm run server:dev    # tsx watch server/index.ts  (backend on :3001)
 
-# smoke test (runs inside the container; the app listens on :3000)
-docker exec boop-watch wget -qO- http://localhost:3000/health        # -> ok
-
-# force an immediate pull instead of waiting for Watchtower's 30s poll
-cd /opt/boopurnoes && docker compose pull boop-watch && docker compose up -d boop-watch
+# smoke test the running pod (the app listens on :3000 in-container)
+kubectl -n link-apps exec deploy/boop-watch -- wget -qO- http://localhost:3000/health   # -> ok
 ```
 
-The compose service `boop-watch` (`image: ghcr.io/n0es/boop-watch:latest`) sits on the `proxy`
-network behind Traefik (`conf.d/watch.yml`, no auth middleware — auth is per-route in the app).
-The public DNS record is **grey-clouded** (Cloudflare proxy off) so video bypasses CF's free-tier
-video ToS. The compose file lives at `/opt/boopurnoes/docker-compose.yml` (not in this repo, not in
-git). The SQLite DB needs a persistent volume mounted at `DATA_DIR`.
+`watch.boopurno.es` is served through the `link`/k3s ingress path (MetalLB), not the old
+`boopurnoes` Traefik route. The public DNS record is **grey-clouded** (Cloudflare proxy off) so video
+bypasses CF's free-tier video ToS. The SQLite DB needs a persistent volume (the k3s app `Volume` /
+PVC, mounted at `DATA_DIR`).
 
 ### Environment variables
 - `JELLYFIN_URL` — base URL (default `http://jellyfin:8096`)

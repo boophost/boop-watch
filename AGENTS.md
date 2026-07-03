@@ -13,4 +13,5 @@ Quick rules:
   hardcode colors — use the design tokens.
 - All Jellyfin access is server-side; never expose the API key. Keep the scope guard and the HLS
   `api_key` stripping.
-- Deploy is automated: merge to `main` → GHCR → Watchtower redeploys. Don't build manually to deploy.
+- Deploy is automated: merge to `main` → GHCR → the workflow's `deploy` job rolls the k3s Deployment
+  (`link-apps` ns) via `kubectl rollout restart`. Don't build manually to deploy.
