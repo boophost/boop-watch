@@ -37,42 +37,24 @@ function requireAuth(
   res: express.Response,
   next: express.NextFunction,
 ) {
-  const token = req.cookies[COOKIE_NAME] as string | undefined
+  let token = req.cookies[COOKIE_NAME] as string | undefined
+  const authHeader = req.headers.authorization
+  if (authHeader?.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1]
+  }
+
   if (!token) {
     res.status(401).json({ error: 'Unauthorized' })
     return
   }
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as { username: string }
-    res.locals.username = payload.username
+    const payload = jwt.verify(token, JWT_SECRET) as { username?: string, email?: string }
+    res.locals.username = payload.email || payload.username || 'admin'
     next()
   } catch {
     res.status(401).json({ error: 'Unauthorized' })
   }
 }
-
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body as { username?: string; password?: string }
-
-  if (username !== AUTH_USERNAME || password !== AUTH_PASSWORD) {
-    res.status(401).json({ error: 'Invalid credentials' })
-    return
-  }
-
-  const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '30d' })
-  res.cookie(COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: IS_PROD,
-    sameSite: 'lax',
-    maxAge: 30 * 24 * 60 * 60 * 1000,
-  })
-  res.json({ username })
-})
-
-app.post('/api/logout', (_req, res) => {
-  res.clearCookie(COOKIE_NAME)
-  res.json({ ok: true })
-})
 
 app.get('/api/me', requireAuth, (_req, res) => {
   res.json({ username: res.locals.username as string })

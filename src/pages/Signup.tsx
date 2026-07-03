@@ -6,8 +6,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card'
 
-export default function Login() {
-  const { login } = useAuth()
+export default function Signup() {
+  const { signup } = useAuth()
   const navigate = useNavigate()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -19,10 +19,10 @@ export default function Login() {
     setError('')
     setLoading(true)
     try {
-      await login(email, password)
+      await signup(email, password)
       navigate('/manage', { replace: true })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed')
+      setError(err instanceof Error ? err.message : 'Signup failed')
     } finally {
       setLoading(false)
     }
@@ -33,7 +33,7 @@ export default function Login() {
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle className="text-2xl">boopurnoes</CardTitle>
-          <p className="text-sm text-muted-foreground">Library manager</p>
+          <p className="text-sm text-muted-foreground">Library manager - Create account</p>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -62,15 +62,15 @@ export default function Login() {
               <p className="text-sm text-destructive">{error}</p>
             )}
             <Button type="submit" disabled={loading} className="w-full">
-              {loading ? 'Signing in...' : 'Sign in'}
+              {loading ? 'Signing up...' : 'Sign up'}
             </Button>
           </form>
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-sm text-muted-foreground">
-            Don't have an account?{' '}
-            <Link to="/signup" className="text-primary hover:underline">
-              Sign up
+            Already have an account?{' '}
+            <Link to="/login" className="text-primary hover:underline">
+              Sign in
             </Link>
           </p>
         </CardFooter>

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ChevronLeft, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
+import { fetchAuth } from '@/lib/api'
 
 interface MalImages {
   jpg?: { large_image_url?: string | null; image_url?: string | null }
@@ -89,7 +90,7 @@ export default function SeriesDetail() {
     setMalError('')
     void (async () => {
       try {
-        const r = await fetch(`/api/series/${id}/detail`, { credentials: 'include' })
+        const r = await fetchAuth(`/api/series/${id}/detail`)
         if (r.status === 404) {
           navigate('/manage', { replace: true })
           return
@@ -121,9 +122,7 @@ export default function SeriesDetail() {
       setEpLoading(true)
       setEpError('')
       try {
-        const r = await fetch(`/api/series/${id}/episodes?page=${page}`, {
-          credentials: 'include',
-        })
+        const r = await fetchAuth(`/api/series/${id}/episodes?page=${page}`)
         const raw = (await r.json()) as {
           episodes?: EpisodeRow[]
           pagination?: { has_next_page: boolean }
