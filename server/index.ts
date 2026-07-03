@@ -206,8 +206,17 @@ app.delete('/api/series/:id', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
+app.get('/config.js', (req, res) => {
+  res.setHeader('Content-Type', 'application/javascript')
+  res.send(`window.ENV = {
+    SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
+    SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)}
+  };`)
+})
+
 if (IS_PROD) {
   const distPath = path.join(__dirname, '../dist')
+  
   app.use(express.static(distPath))
   app.use((req, res) => {
     if (req.method === 'GET' && !req.path.startsWith('/api')) {
