@@ -6,6 +6,10 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY . .
+# .git is dockerignored, so the footer's commit hash comes in from CI via this
+# build arg (falls back to "dev" for local `docker build` without it).
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
 RUN npm run build:all
 
 FROM node:20-alpine

@@ -24,6 +24,8 @@ export const QUALITY_PRESETS = [
 export interface AudioTrack { index: number; lang: string; label: string; detail: string; def: boolean }
 export interface SubTrack { index: number; group: string }
 export interface WatchEpisode { id: string; num: string; name: string; current: boolean }
+// Intro/outro skip ranges (seconds), sourced from Jellyfin Media Segments.
+export interface Segment { type: 'intro' | 'outro'; start: number; end: number }
 export interface WatchData {
   id: string
   title: string
@@ -35,6 +37,7 @@ export interface WatchData {
   quality: typeof QUALITY_PRESETS
   episodes: WatchEpisode[]
   nextId: string | null
+  segments: Segment[]
 }
 
 const epLabel = (ep: JfItem): string =>
@@ -42,7 +45,7 @@ const epLabel = (ep: JfItem): string =>
     ? `S${ep.ParentIndexNumber}·E${ep.IndexNumber}`
     : (ep.IndexNumber != null ? `E${ep.IndexNumber}` : '·')
 
-export function buildWatchData(id: string, item: JfItem, siblings: JfItem[]): WatchData {
+export function buildWatchData(id: string, item: JfItem, siblings: JfItem[], segments: Segment[] = []): WatchData {
   const title = item.Name || 'Now playing'
   const epNum = (item.ParentIndexNumber != null && item.IndexNumber != null)
     ? `S${item.ParentIndexNumber}·E${item.IndexNumber}` : ''
@@ -105,5 +108,6 @@ export function buildWatchData(id: string, item: JfItem, siblings: JfItem[]): Wa
     quality: QUALITY_PRESETS,
     episodes,
     nextId,
+    segments,
   }
 }

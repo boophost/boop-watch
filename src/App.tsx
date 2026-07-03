@@ -1,6 +1,6 @@
 import { Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from './lib/AuthContext'
-import { APP_VERSION } from './version'
+import { APP_VERSION, APP_COMMIT } from './version'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import AdminSeriesDetail from './pages/SeriesDetail'
@@ -45,7 +45,7 @@ export default function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <div className="app-version" aria-hidden>
-        v{APP_VERSION}
+        v{APP_VERSION} ({APP_COMMIT})
       </div>
     </>
   )
