@@ -29,6 +29,9 @@ export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children:
             <NavLink to="/schedule" className="snav-link" title="Schedule">
               <Icon name="calendar" size={16} /><span className="snav-label">Schedule</span>
             </NavLink>
+            <NavLink to="/library" className="snav-link" title="Library">
+              <Icon name="bookmark" size={16} /><span className="snav-label">Library</span>
+            </NavLink>
           </nav>
           <button
             className="snav-link snav-collapse" type="button"
