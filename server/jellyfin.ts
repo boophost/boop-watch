@@ -28,6 +28,7 @@ export interface JfItem {
   Id: string
   Name?: string
   Type?: string
+  DateCreated?: string
   ProductionYear?: number
   Genres?: string[]
   OriginalTitle?: string
@@ -69,8 +70,10 @@ export async function jfItem(id: string, fields = ''): Promise<JfItem> {
 // Scope cache: what is publicly viewable, derived from the Public collection.
 //   collectionItems : direct children (movies + series) -> browse/detail
 //   playableIds     : movie ids + every episode id      -> the play guard
+//   scopeEpisodes   : every episode item (with DateCreated) -> "recently added"
 // ---------------------------------------------------------------------------
 let collectionItems: JfItem[] = []
+let scopeEpisodes: JfItem[] = []
 let playableIds = new Set<string>()
 let scopeLoadedAt = 0
 let scopeLoading: Promise<void> | null = null
@@ -83,19 +86,24 @@ async function refreshScope(): Promise<void> {
     ParentId: COLLECTION_ID,
     Recursive: 'true',
     IncludeItemTypes: 'Movie,Series',
-    Fields: 'PrimaryImageAspectRatio,ProductionYear,Genres,OriginalTitle',
+    Fields: 'PrimaryImageAspectRatio,ProductionYear,Genres,OriginalTitle,DateCreated',
   })
   const items = children.Items || []
   const playable = new Set<string>()
+  const episodes: JfItem[] = []
   for (const it of items) {
     if (it.Type === 'Series') {
-      const eps = await jfJson<{ Items?: JfItem[] }>(`/Shows/${it.Id}/Episodes`, { Fields: 'Overview' })
-      for (const ep of eps.Items || []) playable.add(ep.Id)
+      const eps = await jfJson<{ Items?: JfItem[] }>(`/Shows/${it.Id}/Episodes`, { Fields: 'Overview,DateCreated' })
+      for (const ep of eps.Items || []) {
+        playable.add(ep.Id)
+        episodes.push({ ...ep, SeriesId: ep.SeriesId || it.Id, SeriesName: ep.SeriesName || it.Name })
+      }
     } else {
       playable.add(it.Id) // Movie (or any directly-playable leaf)
     }
   }
   collectionItems = items
+  scopeEpisodes = episodes
   playableIds = playable
   scopeLoadedAt = Date.now()
 }
@@ -120,6 +128,7 @@ export function warmScope(): void {
 }
 
 export const getCollectionItems = (): JfItem[] => collectionItems
+export const getScopeEpisodes = (): JfItem[] => scopeEpisodes
 export const getPlayableIds = (): Set<string> => playableIds
 export const isCollectionItem = (id: string): boolean => collectionItems.some((it) => it.Id === id)
 

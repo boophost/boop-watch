@@ -5,7 +5,7 @@ import crypto from 'node:crypto'
 import { Router, type Request, type Response } from 'express'
 import {
   jellyfinConfigured, ensureScope, jfItem, jfJson, jfUrl, proxy,
-  getCollectionItems, getPlayableIds, isCollectionItem, type JfItem,
+  getCollectionItems, getScopeEpisodes, getPlayableIds, isCollectionItem, type JfItem,
 } from './jellyfin.js'
 import { buildWatchData } from './watch.js'
 import { getSchedule } from './schedule.js'
@@ -41,6 +41,60 @@ publicRouter.get('/api/catalog', async (_req, res) => {
   }))
   const genres = [...new Set(getCollectionItems().flatMap((it) => it.Genres || []))].sort()
   res.json({ items, genres })
+})
+
+// Home page rail: the most recently added watchables, newest first — one card
+// per series (its latest-added episode), movies as their own entries. Clicking
+// an entry goes straight to /watch/:id, so id is always a *playable* id.
+publicRouter.get('/api/recent', async (_req, res) => {
+  if (!ensureConfigured(res)) return
+  try {
+    await ensureScope()
+  } catch {
+    res.status(502).json({ error: 'Library unavailable' })
+    return
+  }
+  const epLabel = (ep: JfItem) =>
+    (ep.ParentIndexNumber != null && ep.IndexNumber != null)
+      ? `S${ep.ParentIndexNumber}·E${ep.IndexNumber}`
+      : (ep.IndexNumber != null ? `E${ep.IndexNumber}` : '')
+
+  // Newest episode per series wins; ties in DateCreated (bulk imports) break by
+  // episode order so the card advertises the furthest-along episode.
+  const latestBySeries = new Map<string, JfItem>()
+  for (const ep of getScopeEpisodes()) {
+    const key = ep.SeriesId || ep.Id
+    const prev = latestBySeries.get(key)
+    const t = Date.parse(ep.DateCreated || '') || 0
+    const pt = prev ? (Date.parse(prev.DateCreated || '') || 0) : -1
+    if (!prev || t > pt || (t === pt &&
+      ((ep.ParentIndexNumber || 0) - (prev.ParentIndexNumber || 0) || (ep.IndexNumber || 0) - (prev.IndexNumber || 0)) > 0)) {
+      latestBySeries.set(key, ep)
+    }
+  }
+
+  const entries = [
+    ...[...latestBySeries.values()].map((ep) => ({
+      id: ep.Id,
+      seriesId: ep.SeriesId || null,
+      type: 'episode' as const,
+      name: ep.SeriesName || ep.Name || '',
+      epLabel: epLabel(ep),
+      epName: ep.Name || '',
+      addedAt: ep.DateCreated || null,
+    })),
+    ...getCollectionItems().filter((it) => it.Type !== 'Series').map((it) => ({
+      id: it.Id,
+      seriesId: null,
+      type: 'movie' as const,
+      name: it.Name || '',
+      epLabel: '',
+      epName: '',
+      addedAt: it.DateCreated || null,
+    })),
+  ]
+  entries.sort((a, b) => (Date.parse(b.addedAt || '') || 0) - (Date.parse(a.addedAt || '') || 0))
+  res.json({ items: entries.slice(0, 18) })
 })
 
 // Title detail — series (with episode list) or movie.
