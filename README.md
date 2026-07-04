@@ -50,8 +50,10 @@ npm run dev             # Vite dev server (proxies /api and /img)
 | `JWT_SECRET` / `AUTH_USERNAME` / `AUTH_PASSWORD` | `/manage` | insecure dev defaults |
 | `PORT` | no | `3000` |
 
-Deploy is automated: merge to `main` → GitHub Actions builds & pushes `ghcr.io/n0es/boop-watch:latest`
-→ the workflow's `deploy` job rolls the k3s Deployment (`link-apps` namespace) so the new image rolls out.
+Deploy is automated across two environments (`link-apps` namespace): pushing to `dev` builds & pushes
+a sha-tagged image → the `deploy-dev` job rolls `boop-watch-dev` (staging); pushing to `main` moves
+`ghcr.io/n0es/boop-watch:latest` → the `deploy` job rolls `boop-watch` (production). Normal flow:
+feature branch → PR into `dev` → PR `dev` into `main`.
 
 ## Curate
 Add or remove titles from the **"Public"** collection in Jellyfin. The portal's scope cache
