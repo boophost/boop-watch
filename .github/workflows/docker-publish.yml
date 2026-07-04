@@ -1,14 +1,17 @@
 name: Build and Publish
 
-# Build the image on every PR (validation, no push). On pushes to main, build and
-# push ghcr.io/n0es/boop-watch:latest, then roll the k3s Deployment so the new
-# image actually rolls out (see the `deploy` job — the old Watchtower flow is gone).
+# Build the image on every PR (validation, no push). On pushes to main or dev, build
+# and push the image with a moving tag (main -> ghcr.io/n0es/boop-watch:latest,
+# dev -> :dev; plus a per-commit sha tag), then roll the matching k3s Deployment so the
+# new image rolls out: main -> `deploy` (boop-watch, prod), dev -> `deploy-dev`
+# (boop-watch-dev, staging). Each Deployment is pinned to its moving tag (:latest / :dev),
+# so `rollout restart` re-pulls the freshly pushed image. The old Watchtower flow is gone.
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 concurrency:
@@ -51,6 +54,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,prefix=
 
       - name: Build and push
@@ -73,7 +77,7 @@ jobs:
   # LAN-only; the runner uses a token scoped to patching link-apps deployments.
   deploy:
     needs: build
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, k3s-cp]
     steps:
       - name: Roll boop-watch deployment
@@ -82,3 +86,15 @@ jobs:
         run: |
           kubectl -n link-apps rollout restart deployment/boop-watch
           kubectl -n link-apps rollout status deployment/boop-watch --timeout=180s
+
+  deploy-dev:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+    runs-on: [self-hosted, k3s-cp]
+    steps:
+      - name: Roll boop-watch-dev deployment
+        env:
+          KUBECONFIG: /home/ethan/.kube/boop-watch-deployer.yaml
+        run: |
+          kubectl -n link-apps rollout restart deployment/boop-watch-dev
+          kubectl -n link-apps rollout status deployment/boop-watch-dev --timeout=180s

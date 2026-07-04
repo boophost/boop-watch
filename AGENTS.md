@@ -13,5 +13,11 @@ Quick rules:
   hardcode colors — use the design tokens.
 - All Jellyfin access is server-side; never expose the API key. Keep the scope guard and the HLS
   `api_key` stripping.
-- Deploy is automated: merge to `main` → GHCR → the workflow's `deploy` job rolls the k3s Deployment
-  (`link-apps` ns) via `kubectl rollout restart`. Don't build manually to deploy.
+- Deploy is automated with two envs: pushing `dev` builds `:dev` → `deploy-dev` rolls `boop-watch-dev`
+  (staging); pushing `main` builds `:latest` → `deploy` rolls `boop-watch` (production,
+  `watch.boopurno.es`), both in the `link-apps` ns via `kubectl rollout restart`. Don't build manually
+  to deploy.
+- **Workflow: commit feature work straight to `dev` and push, then verify it works on the
+  `boop-watch-dev` staging pod** (the host has `kubectl` to the LAN cluster: `kubectl -n link-apps
+  rollout status deploy/boop-watch-dev` then smoke `/health`). Promote to prod with a `dev` → `main`
+  PR. **Never commit directly to `main`.** Bump `package.json` `version` with every shipped change.
