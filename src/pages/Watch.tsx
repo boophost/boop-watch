@@ -72,6 +72,8 @@ export default function Watch() {
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null)
   // The intro/outro segment the playhead is currently inside (drives the skip button).
   const [activeSeg, setActiveSeg] = useState<Segment | null>(null)
+  // Media duration, needed to place the segment marks on the timeline.
+  const [duration, setDuration] = useState(0)
 
   // selections
   const [audioIndex, setAudioIndex] = useState<string | null>(null)
@@ -96,7 +98,7 @@ export default function Watch() {
 
   // Fetch metadata when the episode changes.
   useEffect(() => {
-    setData(null); setError(''); setSelReady(false); setActiveSeg(null)
+    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0)
     firstLoad.current = true
     pendingSeek.current = null
     getWatch(id).then(setData).catch((e: Error) => setError(e.message))
@@ -153,6 +155,7 @@ export default function Watch() {
   const onCanPlay = () => {
     const p = playerRef.current
     if (!p || !data) return
+    if (Number.isFinite(p.duration) && p.duration > 0) setDuration((d) => d || p.duration)
     if (firstLoad.current) {
       firstLoad.current = false
       const n = parseInt(localStorage.getItem(`bw:pos:${data.id}`) || '', 10)
@@ -169,6 +172,8 @@ export default function Watch() {
   const onTimeUpdate = () => {
     const p = playerRef.current
     if (!p || !data?.segments.length) return
+    // Duration settles once the HLS playlist is parsed; capture it for the marks.
+    if (Number.isFinite(p.duration) && p.duration > 0) setDuration((d) => d || p.duration)
     const t = p.currentTime
     const seg = data.segments.find((s) => t >= s.start && t < s.end - 1) || null
     setActiveSeg((prev) => (prev?.type === seg?.type && prev?.start === seg?.start ? prev : seg))
@@ -178,6 +183,22 @@ export default function Watch() {
     const p = playerRef.current
     if (p && activeSeg) { p.currentTime = activeSeg.end; setActiveSeg(null) }
   }
+
+  // Intro/outro marks on the timeline: a gradient with a stop pair per segment,
+  // painted over the seek bar by kagura.css (.vds-time-slider::after).
+  const segMarksStyle = useMemo(() => {
+    if (!data?.segments.length || !duration) return undefined
+    const stops = [...data.segments]
+      .sort((a, b) => a.start - b.start)
+      .flatMap((s) => {
+        const a = Math.min(100, Math.max(0, (s.start / duration) * 100)).toFixed(2)
+        const b = Math.min(100, Math.max(0, (s.end / duration) * 100)).toFixed(2)
+        if (Number(b) <= Number(a)) return []
+        return [`transparent ${a}%`, `var(--accent-deep) ${a}%`, `var(--accent-deep) ${b}%`, `transparent ${b}%`]
+      })
+    if (!stops.length) return undefined
+    return { '--seg-marks': `linear-gradient(to right, ${stops.join(', ')})` }
+  }, [data, duration])
 
   // Capture position + play-state before an audio/quality switch reloads the
   // transcode, so onCanPlay can restore them.
@@ -311,6 +332,7 @@ export default function Watch() {
                 className="vds-player"
                 title={data.title}
                 src={{ src, type: 'application/x-mpegurl' }}
+                style={segMarksStyle}
                 aspectRatio="16/9"
                 autoPlay
                 playsInline
