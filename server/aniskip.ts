@@ -14,6 +14,7 @@ const JIKAN = 'https://api.jikan.moe/v4'
 const ANISKIP = 'https://api.aniskip.com/v2'
 const CHAIN_TTL = 24 * 60 * 60 * 1000
 const SKIP_TTL = 24 * 60 * 60 * 1000
+const NEG_TTL = 60 * 60 * 1000             // empty answers may be an upstream blip — retry hourly
 const EPS_TTL_AIRING = 6 * 60 * 60 * 1000  // airing entries grow a row per week
 const EPS_TTL_DONE = 7 * 24 * 60 * 60 * 1000
 const MAX_CHAIN = 12          // sequel-chain hops, total (guards a runaway walk)
@@ -97,10 +98,20 @@ const entryFor = (chain: Chain, dateMs: number): ChainEntry | null =>
 // doesn't contain them either.
 async function extendChain(chain: Chain, dateMs: number): Promise<void> {
   while (!entryFor(chain, dateMs) && chain.frontier.length && chain.hops < MAX_CHAIN) {
-    const id = chain.frontier.shift()!
-    chain.hops++
+    const id = chain.frontier[0]
     await sleep(JIKAN_GAP_MS)
-    const { data } = await jikanJson<{ data?: JikanFull }>(`/anime/${id}/full`)
+    let data: JikanFull | undefined
+    try {
+      data = (await jikanJson<{ data?: JikanFull }>(`/anime/${id}/full`)).data
+    } catch (e) {
+      // Transient failure (429/timeout): leave the id at the frontier head so
+      // the next request resumes this link — shifting before a failed fetch
+      // would silently sever the chain for the whole cache lifetime. A hard
+      // 404 (dead id) is the one case to drop, or it would block forever.
+      if (!/jikan 404/.test(String(e))) throw e
+    }
+    chain.frontier.shift()
+    chain.hops++
     if (!data) continue
     if (data.type === 'TV' || data.type === 'ONA') {
       chain.entries.push({
@@ -122,8 +133,9 @@ async function resolveEntry(seriesName: string, dateMs: number): Promise<ChainEn
   walkLocks.set(key, new Promise<void>((r) => { release = r }))
   try {
     let cached = chainCache.get(key)
-    if (cached && Date.now() - cached.at > CHAIN_TTL) cached = undefined
-    if (cached && cached.chain === null) return null // negative-cached: no MAL match
+    // Negative entries (no MAL match — possibly a search blip) expire sooner.
+    if (cached && Date.now() - cached.at > (cached.chain === null ? NEG_TTL : CHAIN_TTL)) cached = undefined
+    if (cached && cached.chain === null) return null
     let chain = cached?.chain
     if (!chain) {
       const root = await searchRoot(seriesName)
@@ -161,8 +173,10 @@ async function episodeRows(entry: ChainEntry): Promise<EpRow[]> {
     }
     if (!json.pagination?.has_next_page) break
   }
+  // An empty list is more likely an upstream hiccup than a truly episode-less
+  // entry — don't let it stick for days.
   epsCache.set(entry.malId, {
-    at: Date.now(), ttl: entry.airing ? EPS_TTL_AIRING : EPS_TTL_DONE, rows,
+    at: Date.now(), ttl: !rows.length ? NEG_TTL : entry.airing ? EPS_TTL_AIRING : EPS_TTL_DONE, rows,
   })
   return rows
 }
@@ -193,12 +207,14 @@ interface AniskipResult { skipType: string; interval: { startTime: number; endTi
 async function fetchSkipTimes(malId: number, ep: number, epLenSec: number): Promise<Segment[]> {
   const key = `${malId}:${ep}:${epLenSec}`
   const cached = skipCache.get(key)
-  if (cached && Date.now() - cached.at < SKIP_TTL) return cached.segs
+  // Empty answers retry sooner: submissions for a fresh episode arrive over
+  // hours-to-days, and a transient 404 must not stick.
+  if (cached && Date.now() - cached.at < (cached.segs.length ? SKIP_TTL : NEG_TTL)) return cached.segs
   const res = await fetch(
     `${ANISKIP}/skip-times/${malId}/${ep}?types[]=op&types[]=ed&episodeLength=${epLenSec}`,
     { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(5000) },
   )
-  // 404 = no community submissions for this episode: a stable, cacheable "none".
+  // 404 = no community submissions for this episode.
   if (res.status === 404) {
     skipCache.set(key, { at: Date.now(), segs: [] })
     return []
