@@ -92,6 +92,7 @@ export default function Watch() {
   const pendingSeek = useRef<{ time: number; play: boolean } | null>(null)
   // Resume point from saved progress (account or local), applied on first canplay.
   const resumePos = useRef<number | null>(null)
+  const epsListRef = useRef<HTMLDivElement>(null)
 
   // Load the subtitle library (JASSUB) once. A CDN hiccup is non-fatal: the
   // player and page chrome still work; only subtitle rendering waits.
@@ -146,6 +147,19 @@ export default function Watch() {
     }
     setSubIndex(sub)
     setSelReady(true)
+  }, [data])
+
+  // Center the playing episode in the list, once per episode. Scrolls only the
+  // list element — scrollIntoView also scrolls the page, and the progress bar
+  // re-render made that fire every few seconds (dragging mobile down the page).
+  useEffect(() => {
+    if (!data) return
+    const list = epsListRef.current
+    const row = list?.querySelector<HTMLElement>('[aria-current="true"]')
+    if (list && row) {
+      list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top
+        - (list.clientHeight - row.clientHeight) / 2
+    }
   }, [data])
 
   const quality = useMemo(() => data?.quality.find((q) => q.key === qKey) || { h: 0, vb: 0, key: 'auto', label: 'Auto' }, [data, qKey])
@@ -362,7 +376,7 @@ export default function Watch() {
   return (
     <div className="kagura player">
       <div className="topbar">
-        <Link className="back" to={data.back.href}><Icon name="back" size={15} /> {data.back.label}</Link>
+        <Link className="back" to={data.back.href}><Icon name="back" size={15} /><span className="bl">{data.back.label}</span></Link>
         <span className="sep">/</span>
         {data.epNum && <span className="ep">{data.epNum}</span>}
         <span className="t">{data.title}</span>
@@ -441,7 +455,7 @@ export default function Watch() {
         {data.episodes.length > 0 && (
           <aside className="col-eps panel">
             <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span><span className="badge">{data.episodes.length}</span></div>
-            <div className="eps-list">
+            <div className="eps-list" ref={epsListRef}>
               {data.episodes.map((ep) => {
                 const prog = progMap[ep.id]
                 const watched = !!prog?.watched
@@ -453,7 +467,6 @@ export default function Watch() {
                     className={`eprow${ep.current ? ' current' : ''}${!ep.current && watched ? ' watched' : ''}`}
                     to={`/watch/${ep.id}`}
                     aria-current={ep.current ? 'true' : undefined}
-                    ref={ep.current ? (el) => el?.scrollIntoView({ block: 'center' }) : undefined}
                   >
                     <span className="epn">{ep.num}</span>
                     <span className="ept">{ep.name}</span>

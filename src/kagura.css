@@ -435,7 +435,9 @@
 
   & .topbar { padding: 14px 22px; display: flex; gap: 14px; align-items: center; border-bottom: 1px solid var(--border);
     background: oklch(0.145 0.008 285 / 70%); backdrop-filter: blur(10px); }
-  & .topbar .back { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: 13px; }
+  & .topbar .back { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: 13px;
+    min-width: 0; flex: 0 1 auto; }
+  & .topbar .back .bl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   & .topbar .back:hover { color: var(--fg); }
   & .topbar .sep { color: var(--fg-subtle); }
   & .topbar .t { color: var(--fg); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -553,6 +555,25 @@
   @media (max-width: 980px) {
     & .wrap { grid-template-columns: minmax(0, 1fr); }
     & .col-eps { position: static; max-height: 420px; }
+  }
+
+  /* Phone layout: tighter header (episode title dropped — the back label +
+     SxEy chip identify it), search flexes into the leftover space, and the
+     control bar flows left-to-right instead of right-aligning via the spacer. */
+  @media (max-width: 760px) {
+    & .topbar { padding: 10px 12px; gap: 8px; }
+    & .topbar .back { max-width: 38vw; }
+    & .topbar .sep { display: none; }
+    /* Episodes: the SxEy chip identifies the video, drop the long title.
+       Movies (no chip): keep the title, truncated. */
+    & .topbar .ep ~ .t { display: none; }
+    & .topbar .searchbar { flex: 1 1 120px; min-width: 110px; }
+    & .wrap { padding: 12px; gap: 14px; }
+    & .pbar { gap: 6px; }
+    & .pbar .spacer { display: none; }
+    & .pctl, & .pmenu > summary { height: 36px; padding: 0 10px; }
+    & .pmenu > summary .pmlabel { max-width: 96px; }
+    & .pmenu .pop { max-width: calc(100vw - 40px); }
   }
 }
 
