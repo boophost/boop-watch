@@ -21,7 +21,7 @@ export default function Login() {
     setLoading(true)
     try {
       await login(email, password)
-      navigate('/manage', { replace: true })
+      navigate('/profile', { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
     } finally {

@@ -21,7 +21,7 @@ export default function Signup() {
     setLoading(true)
     try {
       await signup(email, password)
-      navigate('/manage', { replace: true })
+      navigate('/profile', { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Signup failed')
     } finally {
