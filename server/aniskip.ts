@@ -52,7 +52,13 @@ async function jikanJson<T>(path: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
-interface JikanSearchHit { mal_id: number; title?: string; title_english?: string | null; type?: string }
+interface JikanSearchHit {
+  mal_id: number
+  title?: string
+  title_english?: string | null
+  type?: string
+  aired?: { from?: string | null }
+}
 interface JikanFull {
   mal_id: number
   type?: string
@@ -61,20 +67,27 @@ interface JikanFull {
   relations?: Array<{ relation: string; entry: Array<{ mal_id: number; type: string }> }>
 }
 
-// The series' MAL root: best title match among the top search results.
+// The series' MAL root: best title match among the top search results, in
+// Jikan's default relevance order (ordering by popularity floats *later
+// seasons* of big shows above their own season 1 — an unaired "5th Season"
+// root has no aired dates and no sequels, killing the whole chain). Rank
+// exact title matches first, series-shaped entries over movies/specials,
+// and earlier-aired over later, so a season-1 entry wins over its sequels.
 async function searchRoot(seriesName: string): Promise<number | null> {
   const q = norm(seriesName)
   const { data } = await jikanJson<{ data?: JikanSearchHit[] }>(
-    `/anime?q=${encodeURIComponent(seriesName)}&limit=10&order_by=popularity`,
+    `/anime?q=${encodeURIComponent(seriesName)}&limit=10`,
   )
   const hits = (data || []).filter((a) => {
     const t = norm(a.title || '')
     const e = norm(a.title_english || '')
     return t === q || e === q || (q.length > 6 && (t.includes(q) || e.includes(q) || q.includes(t) || q.includes(e)))
   })
-  // Prefer series-shaped entries over movies/specials that share the title.
-  const best = hits.find((a) => a.type === 'TV' || a.type === 'ONA') || hits[0]
-  return best ? best.mal_id : null
+  const exact = (a: JikanSearchHit): number => (norm(a.title || '') === q || norm(a.title_english || '') === q ? 0 : 1)
+  const shape = (a: JikanSearchHit): number => (a.type === 'TV' || a.type === 'ONA' ? 0 : 1)
+  const aired = (a: JikanSearchHit): number => parseMs(a.aired?.from) ?? Number.MAX_SAFE_INTEGER
+  hits.sort((a, b) => exact(a) - exact(b) || shape(a) - shape(b) || aired(a) - aired(b))
+  return hits.length ? hits[0].mal_id : null
 }
 
 const sequelIds = (full: JikanFull): number[] =>
