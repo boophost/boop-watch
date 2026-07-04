@@ -1,30 +1,46 @@
-import type { ReactNode } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useState, type ReactNode } from 'react'
+import { Link, NavLink } from 'react-router-dom'
 import { Chrome } from './Chrome'
 import { Icon } from './Icon'
 import { useAuth } from '@/lib/AuthContext'
 
-/** Public portal shell: Kagura-scoped wrapper + header. */
+/** Public portal shell: Kagura-scoped side nav + header. The side nav sticks
+ * to the viewport and collapses to an icon rail (remembered per browser). */
 export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children: ReactNode }) {
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('snav-collapsed') === '1')
+  useEffect(() => {
+    localStorage.setItem('snav-collapsed', collapsed ? '1' : '0')
+  }, [collapsed])
+
   return (
-    <div className="kagura flex min-h-screen">
-      <aside className="w-64 border-r border-white/10 hidden md:block">
-        <div className="p-4 pt-[18px]">
-          <Link className="brand" to="/" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600, fontSize: '16px', letterSpacing: '-0.02em' }}>
-            <span className="brand-mark" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '22px', height: '22px', borderRadius: '4px', background: 'var(--accent)', color: 'var(--accent-fg)', fontSize: '13px', fontWeight: 700 }}>B</span>
-            <span className="label">boopurnoes <span className="sub" style={{ opacity: 0.6, fontWeight: 400 }}>· watch</span></span>
-          </Link>
+    <div className="kagura shell" data-collapsed={collapsed}>
+      <aside className="snav">
+        <div className="snav-inner">
+          <div className="snav-head">
+            <Link className="snav-brand" to="/" title="boopurnoes · watch">
+              <span className="brand-mark">B</span>
+              <span className="snav-label">boopurnoes <span className="sub">· watch</span></span>
+            </Link>
+          </div>
+          <nav className="snav-nav">
+            <NavLink to="/" end className="snav-link" title="All titles">
+              <Icon name="film" size={16} /><span className="snav-label">All titles</span>
+            </NavLink>
+            <NavLink to="/schedule" className="snav-link" title="Schedule">
+              <Icon name="calendar" size={16} /><span className="snav-label">Schedule</span>
+            </NavLink>
+          </nav>
+          <button
+            className="snav-link snav-collapse" type="button"
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            onClick={() => setCollapsed((c) => !c)}
+          >
+            <Icon name="back" size={15} /><span className="snav-label">Collapse</span>
+          </button>
         </div>
-        <nav className="flex flex-col gap-1 p-3">
-          <Link to="/" className="flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md hover:bg-white/5 text-white/80 hover:text-white transition-colors">
-            <Icon name="film" size={16} /> All titles
-          </Link>
-          <Link to="/schedule" className="flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md hover:bg-white/5 text-white/80 hover:text-white transition-colors">
-            <Icon name="calendar" size={16} /> Schedule
-          </Link>
-        </nav>
       </aside>
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="shell-main">
         <Chrome crumb={crumb} />
         {children}
       </div>
