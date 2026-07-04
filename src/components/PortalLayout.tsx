@@ -52,8 +52,8 @@ export function UserCrumb() {
   const { user } = useAuth()
   if (user) {
     return (
-      <Link className="crumb" to="/profile">
-        <Icon name="user" size={15} /> {user.username}
+      <Link className="crumb crumb-avatar" to="/profile" title={user.username} aria-label={user.username}>
+        <Avatar user={user} />
       </Link>
     )
   }
@@ -62,6 +62,29 @@ export function UserCrumb() {
       <Icon name="user" size={15} /> Log in
     </Link>
   )
+}
+
+/** Profile photo (Google/Discord OAuth) when we have one, else the user's
+ * initial, else a generic user icon. */
+export function Avatar({ user, size = 26 }: { user: { username: string; avatarUrl: string | null }; size?: number }) {
+  const [broken, setBroken] = useState(false)
+  if (user.avatarUrl && !broken) {
+    return (
+      <img
+        className="avatar-img" src={user.avatarUrl} alt="" width={size} height={size}
+        onError={() => setBroken(true)}
+      />
+    )
+  }
+  const initial = user.username?.[0]?.toUpperCase()
+  if (initial) {
+    return (
+      <span className="avatar-fallback" style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}>
+        {initial}
+      </span>
+    )
+  }
+  return <Icon name="user" size={15} />
 }
 
 export const BackCrumb = (

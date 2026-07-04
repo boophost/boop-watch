@@ -1,5 +1,5 @@
 import { useAuth } from '../lib/AuthContext'
-import { PortalLayout } from '../components/PortalLayout'
+import { PortalLayout, Avatar } from '../components/PortalLayout'
 import { useNavigate } from 'react-router-dom'
 
 export default function Profile() {
@@ -18,9 +18,7 @@ export default function Profile() {
           <h1 className="text-2xl font-semibold mb-6">Profile</h1>
           
           <div className="flex items-center gap-4 mb-8">
-            <div className="w-16 h-16 rounded-full bg-white/10 flex items-center justify-center text-2xl font-bold text-white/50">
-              {user?.username?.[0]?.toUpperCase()}
-            </div>
+            {user && <Avatar user={user} size={64} />}
             <div>
               <div className="text-lg font-medium">{user?.username}</div>
               <div className="text-sm text-white/50">ID: {user?.id}</div>
