@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  MediaPlayer, MediaProvider, isHLSProvider, isVideoProvider,
+  MediaPlayer, MediaProvider, canFullscreen, isHLSProvider, isVideoProvider,
   type MediaPlayerInstance, type MediaProviderAdapter,
 } from '@vidstack/react'
 import { DefaultVideoLayout, defaultLayoutIcons } from '@vidstack/react/player/layouts/default'
@@ -69,6 +69,12 @@ export default function Watch() {
   const [error, setError] = useState('')
   const [subsReady, setSubsReady] = useState(false) // JASSUB library loaded
   const [theater, setTheater] = useState(false)
+  // Pseudo-fullscreen for iPhone: no element-fullscreen API there, so Vidstack's
+  // fullscreen button falls back to the video's *native* fullscreen — which
+  // presents the bare <video> layer and leaves the JASSUB subtitle canvas (a DOM
+  // overlay) behind. We intercept the request and fill the viewport with CSS
+  // instead (theater layout with the control bar hidden), keeping subs rendered.
+  const [pseudoFs, setPseudoFs] = useState(false)
   // Gate the source URL until audio/quality are initialised from the response, so
   // the player loads once with the final selection instead of reloading the
   // transcode (which loses the resume position).
@@ -325,11 +331,25 @@ export default function Watch() {
     }
   }, [data, user])
 
-  // Theater mode reflects onto <body> (CSS targets body.theater).
+  // Theater + pseudo-fullscreen reflect onto <body> (CSS targets body.theater /
+  // body.fs; pseudo-fullscreen is the theater layout plus a hidden control bar).
   useEffect(() => {
-    document.body.classList.toggle('theater', theater)
-    return () => { document.body.classList.remove('theater') }
-  }, [theater])
+    document.body.classList.toggle('theater', theater || pseudoFs)
+    document.body.classList.toggle('fs', pseudoFs)
+    return () => { document.body.classList.remove('theater', 'fs') }
+  }, [theater, pseudoFs])
+
+  // Where element fullscreen doesn't exist (iPhone), catch Vidstack's fullscreen
+  // request before its own handler runs (capture phase on document; the handler
+  // bails on defaultPrevented) and toggle pseudo-fullscreen instead. Vidstack's
+  // fullscreen state never turns on, so every button press dispatches an
+  // *enter* request — hence toggle.
+  useEffect(() => {
+    if (canFullscreen()) return
+    const onRequest = (e: Event) => { e.preventDefault(); setPseudoFs((v) => !v) }
+    document.addEventListener('media-enter-fullscreen-request', onRequest, true)
+    return () => document.removeEventListener('media-enter-fullscreen-request', onRequest, true)
+  }, [])
 
   // Keyboard: 't' toggles theater, Esc exits (ignored while typing).
   useEffect(() => {
@@ -337,7 +357,7 @@ export default function Watch() {
       const el = document.activeElement as HTMLElement | null
       const tag = el && el.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return
-      if (e.key === 'Escape') setTheater(false)
+      if (e.key === 'Escape') { setTheater(false); setPseudoFs(false) }
       else if ((e.key === 't' || e.key === 'T') && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); setTheater((t) => !t) }
     }
     document.addEventListener('keydown', onKey)
