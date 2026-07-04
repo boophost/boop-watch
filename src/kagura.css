@@ -44,6 +44,38 @@
   & *::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 8%); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
   & *::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 16%); }
 
+  /* App shell: side nav + content column. The nav's inner column is sticky,
+     so it stays pinned to the viewport while the page scrolls; data-collapsed
+     on the shell shrinks it to an icon rail. */
+  &.shell { display: flex; min-height: 100vh; }
+  & .shell-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  & .snav { flex: none; width: 232px; border-right: 1px solid var(--border); transition: width .18s ease; }
+  &.shell[data-collapsed="true"] .snav { width: 64px; }
+  & .snav-inner { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
+    gap: 2px; padding: 14px 12px; overflow: hidden; }
+  & .snav-head { padding: 2px 4px 14px; }
+  & .snav-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px;
+    letter-spacing: -0.02em; white-space: nowrap; min-width: 0; }
+  & .snav-brand .brand-mark { width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent), oklch(0.62 0.2 270));
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 13px; color: var(--accent-fg); font-weight: 600; }
+  & .snav-brand .sub { color: var(--fg-subtle); font-weight: 400; }
+  & .snav-link { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 11px;
+    border-radius: 9px; border: none; background: transparent; cursor: pointer;
+    font: 500 13.5px var(--font-sans); color: var(--fg-muted); white-space: nowrap;
+    transition: background .14s ease, color .14s ease; }
+  & .snav-link:hover { background: oklch(1 0 0 / 5%); color: var(--fg); }
+  & .snav-link[aria-current="page"] { background: var(--accent-soft); color: var(--accent-soft-fg); }
+  & .snav-collapse { margin-top: auto; color: var(--fg-subtle); }
+  & .snav-collapse .icon { transition: transform .18s ease; }
+  &.shell[data-collapsed="true"] .snav-collapse .icon { transform: rotate(180deg); }
+  &.shell[data-collapsed="true"] .snav-label { display: none; }
+  &.shell[data-collapsed="true"] .snav-inner { padding: 14px 13px; }
+  &.shell[data-collapsed="true"] .snav-link { justify-content: center; padding: 0; }
+  &.shell[data-collapsed="true"] .snav-head { padding: 2px 0 14px; display: flex; justify-content: center; }
+  @media (max-width: 767px) { & .snav { display: none; } }
+
   /* Chrome / header — brand left, centered search, crumb right */
   & .chrome {
     position: sticky; top: 0; z-index: 50;
