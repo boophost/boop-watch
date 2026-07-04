@@ -232,25 +232,23 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
   try { item = await jfItem(id, 'MediaStreams,MediaSources,Overview') } catch { /* title is cosmetic */ }
 
   let siblings: JfItem[] = []
-  let absEp = 0 // 1-based position in the series' aired order (drives the AniSkip lookup)
   if (item.Type === 'Episode' && item.SeriesId) {
     try {
       const e = await jfJson<{ Items?: JfItem[] }>(`/Shows/${item.SeriesId}/Episodes`)
-      const all = e.Items || []
-      absEp = all.filter((ep) => ep.ParentIndexNumber !== 0).findIndex((ep) => ep.Id === id) + 1
-      siblings = all.filter((ep) => getPlayableIds().has(ep.Id))
+      siblings = (e.Items || []).filter((ep) => getPlayableIds().has(ep.Id))
     } catch { /* sidebar is optional */ }
   }
 
   // Fallback: when Jellyfin has no Media Segments provider, source community
-  // skip times from AniSkip (MAL-keyed). Budgeted so a cold resolve (Jikan
-  // sequel-chain walk) can't stall the route — the walk keeps filling the cache
-  // in the background and the *next* load of the episode gets the button.
+  // skip times from AniSkip (MAL-keyed, resolved by the episode's air date).
+  // Budgeted so a cold resolve (Jikan sequel-chain walk) can't stall the route —
+  // the walk keeps filling the cache in the background and the *next* load of
+  // the episode gets the button.
   let segments = await segPromise
-  if (!segments.length && absEp > 0 && item.SeriesName) {
+  if (!segments.length && item.Type === 'Episode' && item.SeriesName) {
     const epLenSec = item.RunTimeTicks ? item.RunTimeTicks / 1e7 : 0
     segments = await Promise.race([
-      aniskipSegments(item.SeriesName, absEp, epLenSec).catch(() => [] as Segment[]),
+      aniskipSegments(item.SeriesName, item.PremiereDate, epLenSec).catch(() => [] as Segment[]),
       new Promise<Segment[]>((r) => setTimeout(() => r([]), 8000)),
     ])
   }
