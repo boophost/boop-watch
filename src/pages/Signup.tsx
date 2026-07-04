@@ -5,9 +5,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card'
+import { PortalLayout } from '@/components/PortalLayout'
 
 export default function Signup() {
-  const { signup } = useAuth()
+  const { signup, loginWithProvider } = useAuth()
   const navigate = useNavigate()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -29,7 +30,8 @@ export default function Signup() {
   }
 
   return (
-    <div className="flex h-screen items-center justify-center bg-background">
+    <PortalLayout>
+      <div className="flex flex-1 items-center justify-center p-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle className="text-2xl">boopurnoes</CardTitle>
@@ -65,6 +67,24 @@ export default function Signup() {
               {loading ? 'Signing up...' : 'Sign up'}
             </Button>
           </form>
+          <div className="relative my-4">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-background px-2 text-muted-foreground">
+                Or continue with
+              </span>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2">
+            <Button variant="outline" type="button" onClick={() => loginWithProvider('google')} disabled={loading}>
+              Google
+            </Button>
+            <Button variant="outline" type="button" onClick={() => loginWithProvider('discord')} disabled={loading}>
+              Discord
+            </Button>
+          </div>
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-sm text-muted-foreground">
@@ -75,6 +95,7 @@ export default function Signup() {
           </p>
         </CardFooter>
       </Card>
-    </div>
+      </div>
+    </PortalLayout>
   )
 }
