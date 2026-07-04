@@ -6,9 +6,9 @@ name: Build and Publish
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 concurrency:
@@ -73,7 +73,7 @@ jobs:
   # LAN-only; the runner uses a token scoped to patching link-apps deployments.
   deploy:
     needs: build
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, k3s-cp]
     steps:
       - name: Roll boop-watch deployment
