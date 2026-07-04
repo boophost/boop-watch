@@ -4,6 +4,7 @@ import { supabase } from './supabase'
 interface User {
   username: string
   id: string
+  isAdmin: boolean
 }
 
 interface AuthContextType {
@@ -30,14 +31,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ? { username: session.user.email ?? '', id: session.user.id } : null)
+      setUser(session?.user ? { 
+        username: session.user.email ?? '', 
+        id: session.user.id,
+        isAdmin: session.user.user_metadata?.admin === true || session.user.app_metadata?.role === 'admin' 
+      } : null)
       setLoading(false)
     })
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ? { username: session.user.email ?? '', id: session.user.id } : null)
+      setUser(session?.user ? { 
+        username: session.user.email ?? '', 
+        id: session.user.id,
+        isAdmin: session.user.user_metadata?.admin === true || session.user.app_metadata?.role === 'admin'
+      } : null)
       setLoading(false)
     })
 
@@ -64,7 +73,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: {
-        redirectTo: window.location.origin + '/manage'
+        redirectTo: window.location.origin + '/profile'
       }
     })
     if (error) throw error

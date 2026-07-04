@@ -36,7 +36,7 @@ export function UserCrumb() {
   const { user } = useAuth()
   if (user) {
     return (
-      <Link className="crumb" to="/manage">
+      <Link className="crumb" to="/profile">
         <Icon name="user" size={15} /> {user.username}
       </Link>
     )
