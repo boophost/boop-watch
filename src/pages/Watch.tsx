@@ -7,7 +7,14 @@ import {
 import { DefaultVideoLayout, defaultLayoutIcons } from '@vidstack/react/player/layouts/default'
 import HLS from 'hls.js'
 import { Icon, type IconName } from '@/components/Icon'
+import { SearchBar } from '@/components/SearchBar'
+import { UserCrumb } from '@/components/PortalLayout'
+import { useAuth } from '@/lib/AuthContext'
 import { getWatch, type Segment, type WatchData } from '@/lib/api'
+import {
+  loadProgressMap, localProgress, saveLocalProgress, saveAccountProgress, backfillAccountProgress,
+  type Progress,
+} from '@/lib/progress'
 import '@vidstack/react/player/styles/default/theme.css'
 import '@vidstack/react/player/styles/default/layouts/video.css'
 
@@ -44,23 +51,21 @@ function loadScript(src: string): Promise<void> {
   }))
 }
 
-// ── localStorage helpers (preferences, watched set, resume position) ──
+// ── localStorage helpers (playback preferences) ──
 const PREF_KEY = 'bw:pref'
-const WATCHED_KEY = 'bw:watched'
 type Pref = { audioLang?: string; quality?: string; subGroup?: string }
 const readPref = (): Pref => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') } catch { return {} } }
 const savePref = (patch: Pref) => { try { localStorage.setItem(PREF_KEY, JSON.stringify({ ...readPref(), ...patch })) } catch { /* ignore */ } }
-const readWatched = (): Record<string, number> => { try { return JSON.parse(localStorage.getItem(WATCHED_KEY) || '{}') } catch { return {} } }
-const markWatched = (id: string) => {
-  const w = readWatched()
-  if (!w[id]) { w[id] = 1; try { localStorage.setItem(WATCHED_KEY, JSON.stringify(w)) } catch { /* ignore */ } }
-}
 
 export default function Watch() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
+  const { user, loading: authLoading } = useAuth()
 
   const [data, setData] = useState<WatchData | null>(null)
+  // Watch progress for this series' episodes (account rows when logged in,
+  // local otherwise); drives the episode-list bars and the resume position.
+  const [progMap, setProgMap] = useState<Record<string, Progress>>({})
   const [error, setError] = useState('')
   const [subsReady, setSubsReady] = useState(false) // JASSUB library loaded
   const [theater, setTheater] = useState(false)
@@ -85,6 +90,8 @@ export default function Watch() {
   const firstLoad = useRef(true)
   // Position + play-state to restore after a transcode reload (audio/quality switch).
   const pendingSeek = useRef<{ time: number; play: boolean } | null>(null)
+  // Resume point from saved progress (account or local), applied on first canplay.
+  const resumePos = useRef<number | null>(null)
 
   // Load the subtitle library (JASSUB) once. A CDN hiccup is non-fatal: the
   // player and page chrome still work; only subtitle rendering waits.
@@ -101,8 +108,25 @@ export default function Watch() {
     setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0)
     firstLoad.current = true
     pendingSeek.current = null
+    resumePos.current = null
     getWatch(id).then(setData).catch((e: Error) => setError(e.message))
   }, [id])
+
+  // Load progress for this episode + its siblings (episode-list bars and the
+  // resume point). Waits for auth so a logged-in reload reads account rows.
+  useEffect(() => {
+    if (!data || authLoading) return
+    let alive = true
+    const ids = [data.id, ...data.episodes.map((e) => e.id)]
+    if (user) backfillAccountProgress(user.id)
+    loadProgressMap(ids, !!user).then((m) => {
+      if (!alive) return
+      setProgMap(m)
+      const cur = m[data.id]
+      if (cur && !cur.watched && cur.position > 5) resumePos.current = cur.position
+    })
+    return () => { alive = false }
+  }, [data, user, authLoading])
 
   // Initialise selections from the response + saved preferences.
   useEffect(() => {
@@ -158,8 +182,13 @@ export default function Watch() {
     if (Number.isFinite(p.duration) && p.duration > 0) setDuration((d) => d || p.duration)
     if (firstLoad.current) {
       firstLoad.current = false
-      const n = parseInt(localStorage.getItem(`bw:pos:${data.id}`) || '', 10)
-      if (Number.isInteger(n) && n > 5) p.currentTime = n
+      // Account/local progress when it loaded in time, else the sync local view
+      // (the HLS transcode start usually outlasts the progress fetch).
+      const n = resumePos.current ?? (() => {
+        const l = localProgress(data.id)
+        return l && !l.watched && l.position > 5 ? l.position : null
+      })()
+      if (n != null && n > 5) p.currentTime = n
     } else if (pendingSeek.current) {
       const { time, play } = pendingSeek.current
       pendingSeek.current = null
@@ -210,7 +239,11 @@ export default function Watch() {
   // Auto-advance when the episode ends.
   const onEnded = () => {
     if (!data) return
-    markWatched(data.id)
+    const p = playerRef.current
+    const prog: Progress = { position: p?.duration || 0, duration: p?.duration || 0, watched: true }
+    saveLocalProgress(data.id, prog)
+    if (user) saveAccountProgress(user.id, data.id, prog).catch(() => {})
+    setProgMap((m) => ({ ...m, [data.id]: prog }))
     if (data.nextId) navigate(`/watch/${data.nextId}`)
   }
 
@@ -242,28 +275,41 @@ export default function Watch() {
     }
   }, [data, subsReady, subIndex, videoEl])
 
-  // Persist resume position; finish -> mark watched.
+  // Persist progress: locally every tick (resume), to the account on a longer
+  // cadence + flush points (tab hide, unmount, near-end), and into progMap so
+  // the episode list's bar tracks the playhead. Past the -15s mark it counts
+  // as watched.
   useEffect(() => {
     if (!data) return
-    const POS_KEY = `bw:pos:${data.id}`
-    const savePos = () => {
+    let lastPush = 0
+    const savePos = (flush = false) => {
       const p = playerRef.current
       if (!p) return
       const d = p.duration
       if (!d || isNaN(d)) return
       const t = p.currentTime || 0
-      try {
-        if (t > 5 && t < d - 15) localStorage.setItem(POS_KEY, String(Math.floor(t)))
-        else { localStorage.removeItem(POS_KEY); if (t >= d - 15) markWatched(data.id) }
-      } catch { /* ignore */ }
+      if (t <= 5) return
+      const prog: Progress = { position: t, duration: d, watched: t >= d - 15 }
+      saveLocalProgress(data.id, prog)
+      setProgMap((m) => ({ ...m, [data.id]: prog }))
+      const now = Date.now()
+      if (user && (flush || prog.watched || now - lastPush >= 15000)) {
+        lastPush = now
+        saveAccountProgress(user.id, data.id, prog).catch(() => {})
+      }
     }
-    const iv = setInterval(savePos, 5000)
-    const onHide = () => savePos()
-    const onVis = () => { if (document.hidden) savePos() }
+    const iv = setInterval(() => savePos(), 5000)
+    const onHide = () => savePos(true)
+    const onVis = () => { if (document.hidden) savePos(true) }
     window.addEventListener('pagehide', onHide)
     document.addEventListener('visibilitychange', onVis)
-    return () => { clearInterval(iv); window.removeEventListener('pagehide', onHide); document.removeEventListener('visibilitychange', onVis); savePos() }
-  }, [data])
+    return () => {
+      clearInterval(iv)
+      window.removeEventListener('pagehide', onHide)
+      document.removeEventListener('visibilitychange', onVis)
+      savePos(true)
+    }
+  }, [data, user])
 
   // Theater mode reflects onto <body> (CSS targets body.theater).
   useEffect(() => {
@@ -301,13 +347,12 @@ export default function Watch() {
   }, [])
 
   if (error) {
-    return <div className="player"><div className="topbar"><Link className="back" to="/"><Icon name="back" size={15} /> All titles</Link></div><p style={{ padding: 20 }}>{error}</p></div>
+    return <div className="kagura player"><div className="topbar"><Link className="back" to="/"><Icon name="back" size={15} /> All titles</Link><SearchBar /><UserCrumb /></div><p style={{ padding: 20 }}>{error}</p></div>
   }
   if (!data) {
-    return <div className="player"><div className="topbar"><span className="t">Loading…</span></div></div>
+    return <div className="kagura player"><div className="topbar"><span className="t">Loading…</span><SearchBar /><UserCrumb /></div></div>
   }
 
-  const watched = readWatched()
   const closeMenu = (e: React.MouseEvent) => (e.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')
 
   const audioLabel = data.audio.tracks.find((t) => String(t.index) === audioIndex)?.label || 'Audio'
@@ -315,12 +360,14 @@ export default function Watch() {
   const qualityLabel = data.quality.find((q) => q.key === qKey)?.label || 'Auto'
 
   return (
-    <div className="player">
+    <div className="kagura player">
       <div className="topbar">
         <Link className="back" to={data.back.href}><Icon name="back" size={15} /> {data.back.label}</Link>
         <span className="sep">/</span>
         {data.epNum && <span className="ep">{data.epNum}</span>}
         <span className="t">{data.title}</span>
+        <SearchBar />
+        <UserCrumb />
       </div>
 
       <div className={`wrap${data.episodes.length ? '' : ' no-eps'}`}>
@@ -395,19 +442,26 @@ export default function Watch() {
           <aside className="col-eps panel">
             <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span><span className="badge">{data.episodes.length}</span></div>
             <div className="eps-list">
-              {data.episodes.map((ep) => (
-                <Link
-                  key={ep.id}
-                  className={`eprow${ep.current ? ' current' : ''}${!ep.current && watched[ep.id] ? ' watched' : ''}`}
-                  to={`/watch/${ep.id}`}
-                  aria-current={ep.current ? 'true' : undefined}
-                  ref={ep.current ? (el) => el?.scrollIntoView({ block: 'center' }) : undefined}
-                >
-                  <span className="epn">{ep.num}</span>
-                  <span className="ept">{ep.name}</span>
-                  {ep.current && <span className="epnow"><Icon name="play" size={12} fill="currentColor" /></span>}
-                </Link>
-              ))}
+              {data.episodes.map((ep) => {
+                const prog = progMap[ep.id]
+                const watched = !!prog?.watched
+                const pct = watched ? 100
+                  : prog && prog.duration > 0 ? Math.min(100, (prog.position / prog.duration) * 100) : 0
+                return (
+                  <Link
+                    key={ep.id}
+                    className={`eprow${ep.current ? ' current' : ''}${!ep.current && watched ? ' watched' : ''}`}
+                    to={`/watch/${ep.id}`}
+                    aria-current={ep.current ? 'true' : undefined}
+                    ref={ep.current ? (el) => el?.scrollIntoView({ block: 'center' }) : undefined}
+                  >
+                    <span className="epn">{ep.num}</span>
+                    <span className="ept">{ep.name}</span>
+                    {ep.current && <span className="epnow"><Icon name="play" size={12} fill="currentColor" /></span>}
+                    {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
+                  </Link>
+                )
+              })}
             </div>
           </aside>
         )}

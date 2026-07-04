@@ -438,7 +438,15 @@
   & .topbar .back { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: 13px; }
   & .topbar .back:hover { color: var(--fg); }
   & .topbar .sep { color: var(--fg-subtle); }
-  & .topbar .t { color: var(--fg); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  & .topbar .t { color: var(--fg); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  /* Library search + account crumb, right-aligned (shared components with the
+     Chrome header — the styles live in the .kagura scope, so the page root
+     carries both classes). */
+  & .topbar .searchbar { margin-left: auto; flex: 0 1 340px; min-width: 140px; }
+  & .topbar .crumb { color: var(--fg-muted); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
+  & .topbar .crumb:hover { color: var(--fg); }
+  & .topbar .crumb-avatar { padding: 0; border-radius: 999px; transition: box-shadow .14s ease; }
+  & .topbar .crumb-avatar:hover { box-shadow: 0 0 0 2px var(--border-strong); }
   & .topbar .ep { font-family: var(--font-mono); font-size: 11px; color: var(--accent-soft-fg); background: var(--accent-soft);
     padding: 2px 7px; border-radius: 5px; flex: none; }
 
@@ -536,6 +544,11 @@
   & .eprow.watched { opacity: 0.45; }
   & .eprow.watched:hover { opacity: 1; }
   & .eprow.watched .epn, & .eprow.watched .ept { color: var(--fg-subtle); }
+  /* Watch-progress bar along the bottom edge of the row (width set inline). */
+  & .eprow { position: relative; overflow: hidden; }
+  & .eprow .epprog { position: absolute; left: 0; bottom: 0; height: 2px;
+    background: var(--accent); border-radius: 0 2px 2px 0; pointer-events: none; }
+  & .eprow.watched .epprog { background: var(--fg-subtle); }
 
   @media (max-width: 980px) {
     & .wrap { grid-template-columns: minmax(0, 1fr); }
