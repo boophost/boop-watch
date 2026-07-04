@@ -579,6 +579,7 @@
 
 /* Theater mode: fill the viewport in-page (no real fullscreen). Toggled on <body>. */
 body.theater { overflow: hidden; }
+body.theater .app-version { display: none; } /* fixed badge, z-index above the overlay */
 body.theater .player .topbar { display: none; }
 body.theater .player .wrap { display: block; max-width: none; margin: 0; padding: 0; height: 100vh; }
 body.theater .player .col-eps { display: none; }
@@ -589,8 +590,21 @@ body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; backg
    the right of the full-width video and drag the canvas off-screen, so fill the
    video by absolute positioning instead. */
 body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow: none; position: relative; }
-body.theater .player .vds-player { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; }
+/* aspect-ratio: the player carries an inline 16/9 (React prop), and on an
+   absolutely-positioned box the ratio wins over width — on a portrait phone it
+   derives ~1500px from the viewport height and crops the frame. Filling the
+   viewport, the ratio is moot: clear it (!important beats the inline style)
+   and let object-fit letterbox the video. */
+body.theater .player .vds-player { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; aspect-ratio: auto !important; }
 body.theater .player video { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; object-fit: contain; }
 body.theater .player .vds-player[data-controls] .skip-btn { bottom: 96px; }
 body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
   background: oklch(0.145 0.008 285 / 94%); border-top: 1px solid var(--border); }
+
+/* Pseudo-fullscreen (iPhone): element fullscreen doesn't exist there and native
+   video fullscreen drops the JASSUB subtitle overlay, so the Watch page toggles
+   body.fs *with* body.theater — the theater layout does the filling, and this
+   hides the control bar so only the player remains. Exit via the player's own
+   fullscreen button. */
+body.fs .player .pbar { display: none; }
+body.fs .player .vds-player[data-controls] .skip-btn { bottom: 86px; }
