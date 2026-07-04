@@ -47,24 +47,36 @@ non-file GETs (the SPA router).
 
 ## Run / build / deploy
 
-**Deploy is automated via GitHub → GHCR → k3s.** Merging to `main` triggers
-`.github/workflows/docker-publish.yml`: the `build` job installs + `npm run build:all` and pushes
-`ghcr.io/n0es/boop-watch:latest`, then the `deploy` job rolls the k3s Deployment. **You don't run a
-manual build to deploy — open a PR, merge it, and the new image rolls out on its own.** Every PR
-also builds (no push) as a CI check.
+**Deploy is automated via GitHub → GHCR → k3s, with two environments.** Pushing to `main` **or**
+`dev` triggers `.github/workflows/docker-publish.yml`: the `build` job installs + `npm run build:all`
+and pushes the image (every push gets a `type=sha` tag; `:latest` is pushed **only** from the default
+branch `main`). Then a branch-scoped deploy job rolls the matching k3s Deployment:
+
+| Branch | Image tag | Deploy job | k3s Deployment | Environment |
+|---|---|---|---|---|
+| `main` | `:latest` (+ sha) | `deploy` | `boop-watch` | production (`watch.boopurno.es`) |
+| `dev` | sha only | `deploy-dev` | `boop-watch-dev` | dev/staging |
+
+**You don't run a manual build to deploy — open a PR, merge it, and the new image rolls out on its
+own.** The normal flow is **feature branch → PR into `dev`** (rolls the `boop-watch-dev` staging
+env), then **`dev` → PR into `main`** to promote to production. Every PR (into `main` or `dev`) also
+builds with no push, as a CI check.
 
 The app now runs on a **k3s cluster** (control plane `k8s-cp`, `[redacted-lan-ip]`), provisioned by the
-`n0es/link` platform: Deployment/Service `boop-watch` live in the **`link-apps`** namespace with
-`link.boopurno.es/app: boop-watch` labels. link sets `imagePullPolicy: Always` + a changing
-`link.dev/deployed-at` pod annotation, but a *running* pod never re-pulls a moved `:latest` on its
-own — so the `deploy` job runs `kubectl rollout restart` (same effect as link's redeploy) to force
-the new pod to pull the freshly pushed image. It is **not** a Watchtower/compose deploy anymore (the
-old `boop-watch` compose service on `boopurnoes` is retired/stopped).
+`n0es/link` platform: the `boop-watch` (prod) and `boop-watch-dev` (staging) Deployments/Services
+live in the **`link-apps`** namespace with `link.boopurno.es/app` labels. link sets
+`imagePullPolicy: Always` + a changing `link.dev/deployed-at` pod annotation, but a *running* pod
+never re-pulls a moved tag on its own — so the deploy job runs `kubectl rollout restart` (same effect
+as link's redeploy) to force the new pod to pull the freshly pushed image. It is **not** a
+Watchtower/compose deploy anymore (the old `boop-watch` compose service on `boopurnoes` is
+retired/stopped).
 
-The `deploy` job runs on a **self-hosted runner on `k8s-cp`** (label `k3s-cp`) because the k3s API is
-LAN-only. It authenticates with a token scoped (RBAC `Role` in `link-apps`) to `get/list/watch/patch`
+Both `deploy` (prod) and `deploy-dev` run on the **self-hosted runner on `k8s-cp`** (label `k3s-cp`)
+because the k3s API is LAN-only, and each is gated by `github.ref` so only the matching branch's job
+runs. They authenticate with a token scoped (RBAC `Role` in `link-apps`) to `get/list/watch/patch`
 deployments — not cluster-admin — via kubeconfig `$HOME/.kube/boop-watch-deployer.yaml` on that host.
-Manual roll if ever needed: `kubectl -n link-apps rollout restart deployment/boop-watch`.
+Manual roll if ever needed: `kubectl -n link-apps rollout restart deployment/boop-watch` (or
+`deployment/boop-watch-dev`).
 
 ```bash
 npm run build:all     # tsc -b && vite build  +  tsc -p server/tsconfig.json  (CI does this)
@@ -161,6 +173,8 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
    `src/version.ts` re-exports it and the portal footer renders it as `v<version>`, so a bump is how
    a deploy becomes visibly identifiable. One bump per PR.
 4. **Always commit your changes** when work is complete — don't leave the tree dirty. Use a
-   **branch-and-PR flow**: feature branch, commit, push to `origin`, open a PR into `main`
-   (`gh pr create`). **Don't commit directly to `main`.** If the tree already had unrelated pending
-   changes, call that out rather than bundling them. Remote: `github.com/n0es/boop-watch` (private).
+   **branch-and-PR flow**: feature branch, commit, push to `origin`, open a PR into **`dev`**
+   (`gh pr create --base dev`), which rolls the `boop-watch-dev` staging env; promoting to production
+   is a separate `dev` → `main` PR. **Don't commit directly to `dev` or `main`.** If the tree already
+   had unrelated pending changes, call that out rather than bundling them. Remote:
+   `github.com/n0es/boop-watch` (private).

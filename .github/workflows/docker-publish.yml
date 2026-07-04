@@ -1,8 +1,10 @@
 name: Build and Publish
 
-# Build the image on every PR (validation, no push). On pushes to main, build and
-# push ghcr.io/n0es/boop-watch:latest, then roll the k3s Deployment so the new
-# image actually rolls out (see the `deploy` job — the old Watchtower flow is gone).
+# Build the image on every PR (validation, no push). On pushes to main or dev, build
+# and push the image (main also moves ghcr.io/n0es/boop-watch:latest; dev pushes a
+# sha tag), then roll the matching k3s Deployment so the new image actually rolls out:
+# main -> `deploy` (boop-watch, prod), dev -> `deploy-dev` (boop-watch-dev, staging).
+# The old Watchtower flow is gone.
 
 on:
   push:
