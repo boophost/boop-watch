@@ -22,6 +22,7 @@
   --accent-fg:     oklch(0.145 0.008 285);
   --accent-soft:   oklch(0.72 0.18 310 / 12%);
   --accent-soft-fg:oklch(0.82 0.18 310);
+  --accent-deep:   oklch(0.45 0.21 310);
   --success:       oklch(0.78 0.17 160);
   --info:          oklch(0.75 0.14 240);
 }
@@ -466,12 +467,24 @@
     width: 100% !important; height: 100% !important; pointer-events: none;
   }
 
-  /* Skip intro/outro button, overlaid above the player controls. */
-  & .skip-btn { position: absolute; right: 20px; bottom: 86px; z-index: 50;
+  /* Intro/outro marks on the seek bar. --seg-marks is a linear-gradient set
+     inline by the Watch page (stops per segment); painted as an overlay pinned
+     to the track's box so the buffered/fill bars can't wash it out. */
+  & .vds-time-slider { position: relative; }
+  & .vds-time-slider::after { content: ""; position: absolute; left: 0; right: 0; top: 50%;
+    height: var(--media-slider-track-height, 5px); transform: translateY(-50%); border-radius: 2px;
+    background-image: var(--seg-marks, none); pointer-events: none; z-index: 1; }
+  & .vds-time-slider .vds-slider-thumb { z-index: 2; }
+
+  /* Skip intro/outro button: rides above the control bar while controls are
+     shown, drops to the bottom edge of the video when they auto-hide. */
+  & .skip-btn { position: absolute; right: 20px; bottom: 20px; z-index: 50;
     display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 16px; border-radius: 10px;
     background: var(--bg-elev-2); border: 1px solid var(--border-strong); color: var(--fg);
     font: 600 13px var(--font-sans); cursor: pointer; backdrop-filter: blur(8px);
-    box-shadow: 0 8px 24px -8px oklch(0 0 0 / 70%); transition: background .14s, border-color .14s, transform .14s; }
+    box-shadow: 0 8px 24px -8px oklch(0 0 0 / 70%);
+    transition: background .14s, border-color .14s, transform .14s, bottom .25s ease; }
+  & .vds-player[data-controls] .skip-btn { bottom: 86px; }
   & .skip-btn:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); transform: translateY(-1px); }
 
   & .pbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
@@ -544,6 +557,6 @@ body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; backg
 body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow: none; position: relative; }
 body.theater .player .vds-player { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; }
 body.theater .player video { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; object-fit: contain; }
-body.theater .player .skip-btn { bottom: 96px; }
+body.theater .player .vds-player[data-controls] .skip-btn { bottom: 96px; }
 body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
   background: oklch(0.145 0.008 285 / 94%); border-top: 1px solid var(--border); }
