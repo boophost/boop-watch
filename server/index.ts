@@ -207,7 +207,11 @@ app.delete('/api/series/:id', requireAuth, (req, res) => {
 })
 
 app.get('/config.js', (req, res) => {
+  // Dynamic per-request env dump — a CDN in front of this (e.g. Cloudflare)
+  // will otherwise cache it by its .js extension and serve stale credentials
+  // long after a Supabase URL/key rotation.
   res.setHeader('Content-Type', 'application/javascript')
+  res.setHeader('Cache-Control', 'no-store')
   res.send(`window.ENV = {
     SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
     SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)}
