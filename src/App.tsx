@@ -10,6 +10,7 @@ import Watch from './pages/Watch'
 import SchedulePage from './pages/SchedulePage'
 import Signup from './pages/Signup'
 import Profile from './pages/Profile'
+import PersonalLibrary from './pages/PersonalLibrary'
 
 function RequireAuth() {
   const { user, loading } = useAuth()
@@ -23,6 +24,21 @@ function RequireAuth() {
   }
 
   if (!user) return <Navigate to="/login" replace />
+  return <Outlet />
+}
+
+function RequireAuthSignup() {
+  const { user, loading } = useAuth()
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <div className="text-muted-foreground">Loading...</div>
+      </div>
+    )
+  }
+
+  if (!user) return <Navigate to="/signup" replace />
   return <Outlet />
 }
 
@@ -57,6 +73,10 @@ export default function App() {
         <Route path="/signup" element={<Signup />} />
         <Route path="/profile" element={<RequireAuth />}>
           <Route index element={<Profile />} />
+        </Route>
+        
+        <Route element={<RequireAuthSignup />}>
+          <Route path="/library" element={<PersonalLibrary />} />
         </Route>
 
         {/* Admin routes */}
