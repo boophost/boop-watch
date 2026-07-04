@@ -15,3 +15,4 @@ Quick rules:
   `api_key` stripping.
 - Deploy is automated: merge to `main` → GHCR → the workflow's `deploy` job rolls the k3s Deployment
   (`link-apps` ns) via `kubectl rollout restart`. Don't build manually to deploy.
+- **Workflow:** Always commit your changes, push to a feature branch, and open a PR into `main`. Do not commit directly to `main`.

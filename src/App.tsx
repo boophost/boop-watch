@@ -6,10 +6,9 @@ import Dashboard from './pages/Dashboard'
 import AdminSeriesDetail from './pages/SeriesDetail'
 import Browse from './pages/Browse'
 import Title from './pages/Title'
-import Watch from './pages/Watch'
 import SchedulePage from './pages/SchedulePage'
-
 import Signup from './pages/Signup'
+import Profile from './pages/Profile'
 
 function RequireAuth() {
   const { user, loading } = useAuth()
@@ -26,6 +25,21 @@ function RequireAuth() {
   return <Outlet />
 }
 
+function RequireAdmin() {
+  const { user, loading } = useAuth()
+
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <div className="text-muted-foreground">Loading...</div>
+      </div>
+    )
+  }
+
+  if (!user || !user.isAdmin) return <Navigate to="/profile" replace />
+  return <Outlet />
+}
+
 export default function App() {
   return (
     <>
@@ -37,10 +51,15 @@ export default function App() {
         <Route path="/watch/:id" element={<Watch />} />
         <Route path="/schedule" element={<SchedulePage />} />
 
-        {/* Authenticated library manager */}
+        {/* Authenticated routes */}
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
-        <Route path="/manage" element={<RequireAuth />}>
+        <Route path="/profile" element={<RequireAuth />}>
+          <Route index element={<Profile />} />
+        </Route>
+
+        {/* Admin routes */}
+        <Route path="/manage" element={<RequireAdmin />}>
           <Route index element={<Dashboard />} />
           <Route path="series/:seriesId" element={<AdminSeriesDetail />} />
         </Route>
