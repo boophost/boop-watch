@@ -268,6 +268,29 @@
     backdrop-filter: blur(6px); border: 1px solid oklch(1 0 0 / 10%);
   }
 
+  /* Home page: recently-updated rail above the full library */
+  & .home-section { margin-bottom: 44px; }
+  & .home-section:last-child { margin-bottom: 0; }
+  & .grid-recent { grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); }
+  & .poster-card .ep-tag {
+    position: absolute; top: 7px; left: 7px;
+    display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+    background: var(--accent); color: var(--accent-fg);
+    box-shadow: 0 2px 10px -2px oklch(0 0 0 / 60%);
+  }
+  & .poster-card .play-hint {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: var(--fg); opacity: 0; transition: opacity .16s ease;
+    background: oklch(0.1 0 0 / 35%); pointer-events: none;
+  }
+  & .poster-card .play-hint .icon {
+    width: 44px; height: 44px; padding: 13px; border-radius: 999px;
+    background: var(--accent); color: var(--accent-fg);
+    box-shadow: 0 10px 30px -8px oklch(0 0 0 / 70%);
+  }
+  & .poster-card:hover .play-hint { opacity: 1; }
+
   /* Badges + dots */
   & .badge { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border-radius: 999px;
     font-size: 11px; font-weight: 500; background: var(--bg-elev-2); color: var(--fg-muted); border: 1px solid var(--border); }

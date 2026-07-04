@@ -23,6 +23,18 @@ export async function fetchAuth(url: string, options: RequestInit = {}) {
   return fetch(url, { ...options, headers })
 }
 
+// A "recently added" home-page entry. `id` is always directly playable
+// (episode or movie), so cards link straight to /watch/:id.
+export interface RecentItem {
+  id: string
+  seriesId: string | null
+  type: 'episode' | 'movie'
+  name: string
+  epLabel: string
+  epName: string
+  addedAt: string | null
+}
+
 export interface SeriesEpisode { id: string; name: string; num: string }
 export interface SeriesDetail {
   type: 'series'
@@ -95,6 +107,7 @@ export const getCatalog = () => getJSON<Catalog>('/api/catalog')
 // The browse grid and the header search palette both need the catalog; share one fetch.
 let catalogPromise: Promise<Catalog> | null = null
 export const loadCatalog = (): Promise<Catalog> => (catalogPromise ??= getCatalog())
+export const getRecent = () => getJSON<{ items: RecentItem[] }>('/api/recent')
 export const getTitle = (id: string) => getJSON<TitleDetail>(`/api/catalog/${encodeURIComponent(id)}`)
 export const getWatch = (id: string) => getJSON<WatchData>(`/api/watch/${encodeURIComponent(id)}`)
 export const getSchedule = (weekParam: string) =>
