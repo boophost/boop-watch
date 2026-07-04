@@ -18,6 +18,21 @@ import {
 import '@vidstack/react/player/styles/default/theme.css'
 import '@vidstack/react/player/styles/default/layouts/video.css'
 
+// Main player header: brand (icon-only on phones) · centered search · account
+// crumb. The series back-link + episode title live in the .subbar row below it.
+function PlayerTopbar() {
+  return (
+    <header className="topbar">
+      <Link className="brand" to="/">
+        <span className="brand-mark">B</span>
+        <span className="label">boopurnoes <span className="sub">· watch</span></span>
+      </Link>
+      <SearchBar />
+      <UserCrumb />
+    </header>
+  )
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 declare global {
   interface Window { JASSUB?: any }
@@ -381,10 +396,10 @@ export default function Watch() {
   }, [])
 
   if (error) {
-    return <div className="kagura player"><div className="topbar"><Link className="back" to="/"><Icon name="back" size={15} /> All titles</Link><SearchBar /><UserCrumb /></div><p style={{ padding: 20 }}>{error}</p></div>
+    return <div className="kagura player"><PlayerTopbar /><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></div>
   }
   if (!data) {
-    return <div className="kagura player"><div className="topbar"><span className="t">Loading…</span><SearchBar /><UserCrumb /></div></div>
+    return <div className="kagura player"><PlayerTopbar /><div className="subbar"><span className="t">Loading…</span></div></div>
   }
 
   const closeMenu = (e: React.MouseEvent) => (e.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')
@@ -395,13 +410,11 @@ export default function Watch() {
 
   return (
     <div className="kagura player">
-      <div className="topbar">
+      <PlayerTopbar />
+      <div className="subbar">
         <Link className="back" to={data.back.href}><Icon name="back" size={15} /><span className="bl">{data.back.label}</span></Link>
-        <span className="sep">/</span>
         {data.epNum && <span className="ep">{data.epNum}</span>}
         <span className="t">{data.title}</span>
-        <SearchBar />
-        <UserCrumb />
       </div>
 
       <div className={`wrap${data.episodes.length ? '' : ' no-eps'}`}>
