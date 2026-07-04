@@ -82,3 +82,15 @@ jobs:
         run: |
           kubectl -n link-apps rollout restart deployment/boop-watch
           kubectl -n link-apps rollout status deployment/boop-watch --timeout=180s
+
+  deploy-dev:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+    runs-on: [self-hosted, k3s-cp]
+    steps:
+      - name: Roll boop-watch-dev deployment
+        env:
+          KUBECONFIG: /home/ethan/.kube/boop-watch-deployer.yaml
+        run: |
+          kubectl -n link-apps rollout restart deployment/boop-watch-dev
+          kubectl -n link-apps rollout status deployment/boop-watch-dev --timeout=180s
