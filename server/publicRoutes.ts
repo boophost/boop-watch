@@ -43,9 +43,9 @@ publicRouter.get('/api/catalog', async (_req, res) => {
   res.json({ items, genres })
 })
 
-// Home page rail: the most recently added watchables, newest first — one card
-// per series (its latest-added episode), movies as their own entries. Clicking
-// an entry goes straight to /watch/:id, so id is always a *playable* id.
+// Home page rail: every recently added watchable, newest first — each episode
+// is its own entry, movies too. Clicking an entry goes straight to /watch/:id,
+// so id is always a *playable* id.
 publicRouter.get('/api/recent', async (_req, res) => {
   if (!ensureConfigured(res)) return
   try {
@@ -58,43 +58,90 @@ publicRouter.get('/api/recent', async (_req, res) => {
     (ep.ParentIndexNumber != null && ep.IndexNumber != null)
       ? `S${ep.ParentIndexNumber}·E${ep.IndexNumber}`
       : (ep.IndexNumber != null ? `E${ep.IndexNumber}` : '')
-
-  // Newest episode per series wins; ties in DateCreated (bulk imports) break by
-  // episode order so the card advertises the furthest-along episode.
-  const latestBySeries = new Map<string, JfItem>()
-  for (const ep of getScopeEpisodes()) {
-    const key = ep.SeriesId || ep.Id
-    const prev = latestBySeries.get(key)
-    const t = Date.parse(ep.DateCreated || '') || 0
-    const pt = prev ? (Date.parse(prev.DateCreated || '') || 0) : -1
-    if (!prev || t > pt || (t === pt &&
-      ((ep.ParentIndexNumber || 0) - (prev.ParentIndexNumber || 0) || (ep.IndexNumber || 0) - (prev.IndexNumber || 0)) > 0)) {
-      latestBySeries.set(key, ep)
-    }
-  }
+  // Bulk imports share one DateCreated; break those ties by episode order so
+  // the furthest-along episode leads.
+  const epOrd = (ep: JfItem) => (ep.ParentIndexNumber || 0) * 10000 + (ep.IndexNumber || 0)
 
   const entries = [
-    ...[...latestBySeries.values()].map((ep) => ({
-      id: ep.Id,
-      seriesId: ep.SeriesId || null,
-      type: 'episode' as const,
-      name: ep.SeriesName || ep.Name || '',
-      epLabel: epLabel(ep),
-      epName: ep.Name || '',
-      addedAt: ep.DateCreated || null,
+    ...getScopeEpisodes().map((ep) => ({
+      t: Date.parse(ep.DateCreated || '') || 0,
+      o: epOrd(ep),
+      item: {
+        id: ep.Id,
+        seriesId: ep.SeriesId || null,
+        type: 'episode' as const,
+        name: ep.SeriesName || ep.Name || '',
+        epLabel: epLabel(ep),
+        epName: ep.Name || '',
+        addedAt: ep.DateCreated || null,
+      },
     })),
     ...getCollectionItems().filter((it) => it.Type !== 'Series').map((it) => ({
-      id: it.Id,
-      seriesId: null,
-      type: 'movie' as const,
-      name: it.Name || '',
-      epLabel: '',
-      epName: '',
-      addedAt: it.DateCreated || null,
+      t: Date.parse(it.DateCreated || '') || 0,
+      o: 0,
+      item: {
+        id: it.Id,
+        seriesId: null,
+        type: 'movie' as const,
+        name: it.Name || '',
+        epLabel: '',
+        epName: '',
+        addedAt: it.DateCreated || null,
+      },
     })),
   ]
-  entries.sort((a, b) => (Date.parse(b.addedAt || '') || 0) - (Date.parse(a.addedAt || '') || 0))
-  res.json({ items: entries.slice(0, 18) })
+  entries.sort((a, b) => (b.t - a.t) || (b.o - a.o))
+  res.json({ items: entries.slice(0, 24).map((e) => e.item) })
+})
+
+// Home page spotlight: the five most recently updated titles, with enough
+// metadata to render the featured banner. `watchId` jumps straight into the
+// title — the first regular episode for series (S0 specials sort last), the
+// movie itself otherwise.
+publicRouter.get('/api/featured', async (_req, res) => {
+  if (!ensureConfigured(res)) return
+  try {
+    await ensureScope()
+  } catch {
+    res.status(502).json({ error: 'Library unavailable' })
+    return
+  }
+  const epOrd = (ep: JfItem) =>
+    (ep.ParentIndexNumber ? ep.ParentIndexNumber : 999) * 10000 + (ep.IndexNumber ?? 9999)
+
+  const newestBySeries = new Map<string, number>()
+  const firstEp = new Map<string, JfItem>()
+  const epCount = new Map<string, number>()
+  for (const ep of getScopeEpisodes()) {
+    const sid = ep.SeriesId
+    if (!sid) continue
+    const t = Date.parse(ep.DateCreated || '') || 0
+    if (t > (newestBySeries.get(sid) ?? -1)) newestBySeries.set(sid, t)
+    epCount.set(sid, (epCount.get(sid) || 0) + 1)
+    const prev = firstEp.get(sid)
+    if (!prev || epOrd(ep) < epOrd(prev)) firstEp.set(sid, ep)
+  }
+
+  const entries = getCollectionItems().flatMap((it) => {
+    const isSeries = it.Type === 'Series'
+    const watchId = isSeries ? firstEp.get(it.Id)?.Id : it.Id
+    if (!watchId) return []
+    return [{
+      t: isSeries ? (newestBySeries.get(it.Id) ?? 0) : (Date.parse(it.DateCreated || '') || 0),
+      item: {
+        id: it.Id,
+        type: isSeries ? ('series' as const) : ('movie' as const),
+        name: it.Name || '',
+        overview: it.Overview || '',
+        year: it.ProductionYear || null,
+        genres: (it.Genres || []).slice(0, 3),
+        epCount: isSeries ? (epCount.get(it.Id) || 0) : null,
+        watchId,
+      },
+    }]
+  })
+  entries.sort((a, b) => b.t - a.t)
+  res.json({ items: entries.slice(0, 5).map((e) => e.item) })
 })
 
 // Title detail — series (with episode list) or movie.
@@ -212,6 +259,19 @@ publicRouter.get('/img/:id', async (req, res) => {
     return
   }
   await proxy(req, res, jfUrl(`/Items/${id}/Images/Primary`, { maxWidth: '400', quality: '90' }))
+})
+
+// Wide backdrop art for the featured banner (top-level titles only; the client
+// falls back to the poster when a title has no backdrop).
+publicRouter.get('/img/:id/backdrop', async (req, res) => {
+  if (!ensureConfigured(res)) return
+  await ensureScope().catch(() => {})
+  const { id } = req.params
+  if (!isCollectionItem(id)) {
+    res.status(404).end()
+    return
+  }
+  await proxy(req, res, jfUrl(`/Items/${id}/Images/Backdrop/0`, { maxWidth: '1600', quality: '80' }))
 })
 
 // HLS entry point: build the master playlist request with transcode params.

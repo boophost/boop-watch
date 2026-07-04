@@ -35,6 +35,19 @@ export interface RecentItem {
   addedAt: string | null
 }
 
+// A featured-banner slide. `watchId` is directly playable (first episode /
+// the movie); `id` is the title for detail links + artwork.
+export interface FeaturedItem {
+  id: string
+  type: 'series' | 'movie'
+  name: string
+  overview: string
+  year: number | null
+  genres: string[]
+  epCount: number | null
+  watchId: string
+}
+
 export interface SeriesEpisode { id: string; name: string; num: string }
 export interface SeriesDetail {
   type: 'series'
@@ -108,9 +121,11 @@ export const getCatalog = () => getJSON<Catalog>('/api/catalog')
 let catalogPromise: Promise<Catalog> | null = null
 export const loadCatalog = (): Promise<Catalog> => (catalogPromise ??= getCatalog())
 export const getRecent = () => getJSON<{ items: RecentItem[] }>('/api/recent')
+export const getFeatured = () => getJSON<{ items: FeaturedItem[] }>('/api/featured')
 export const getTitle = (id: string) => getJSON<TitleDetail>(`/api/catalog/${encodeURIComponent(id)}`)
 export const getWatch = (id: string) => getJSON<WatchData>(`/api/watch/${encodeURIComponent(id)}`)
 export const getSchedule = (weekParam: string) =>
   getJSON<SchedulePayload>('/api/schedule' + (weekParam ? `?${weekParam}` : ''))
 
 export const imgUrl = (id: string) => `/img/${encodeURIComponent(id)}`
+export const backdropUrl = (id: string) => `/img/${encodeURIComponent(id)}/backdrop`
