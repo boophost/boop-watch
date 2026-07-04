@@ -192,7 +192,7 @@
     & .cal-day-head { background: var(--bg-elev); }
   }
 
-  & main { max-width: 1240px; margin: 0 auto; padding: 36px 32px 120px; }
+  & main { width: 100%; max-width: 1240px; margin: 0 auto; padding: 36px 32px 120px; }
 
   /* Section head */
   & .h-eyebrow { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-subtle); }
