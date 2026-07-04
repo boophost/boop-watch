@@ -66,7 +66,7 @@ export function UserCrumb() {
 
 /** Profile photo (Google/Discord OAuth) when we have one, else the user's
  * initial, else a generic user icon. */
-export function Avatar({ user, size = 26 }: { user: { username: string; avatarUrl: string | null }; size?: number }) {
+export function Avatar({ user, size = 34 }: { user: { username: string; avatarUrl: string | null }; size?: number }) {
   const [broken, setBroken] = useState(false)
   if (user.avatarUrl && !broken) {
     return (
