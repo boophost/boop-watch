@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { PortalLayout } from '@/components/PortalLayout'
-import { loadCatalog, getRecent, imgUrl, type CatalogItem, type RecentItem } from '@/lib/api'
+import { loadCatalog, getRecent, getFeatured, imgUrl, backdropUrl, type CatalogItem, type RecentItem, type FeaturedItem } from '@/lib/api'
 
 const initials = (n: string) =>
   String(n || '?').split(/[^a-z0-9]/i).filter(Boolean).slice(0, 2).map((s) => s[0]).join('').toUpperCase()
@@ -23,6 +23,66 @@ function ago(iso: string | null): string {
 }
 
 type SortKey = 'name' | 'year' | 'type'
+
+function FeaturedBanner({ items }: { items: FeaturedItem[] }) {
+  const [idx, setIdx] = useState(0)
+  // Auto-advance; depending on idx restarts the timer after a manual dot click.
+  useEffect(() => {
+    if (items.length < 2) return
+    const t = setInterval(() => setIdx((i) => (i + 1) % items.length), 6500)
+    return () => clearInterval(t)
+  }, [items.length, idx])
+
+  return (
+    <section className="feat" aria-roledescription="carousel" aria-label="Featured titles">
+      {items.map((it, i) => (
+        <div className="feat-slide" key={it.id} data-active={i === idx} aria-hidden={i !== idx}>
+          <div className="feat-bg">
+            <img
+              src={backdropUrl(it.id)} alt="" loading={i === 0 ? 'eager' : 'lazy'}
+              onError={(e) => {
+                const img = e.currentTarget
+                if (img.dataset.fallback) { img.remove(); return }
+                img.dataset.fallback = '1'
+                img.src = imgUrl(it.id)
+              }}
+            />
+          </div>
+          <div className="feat-scrim" />
+          <div className="feat-body">
+            <div className="feat-rank font-mono">#{i + 1} Spotlight</div>
+            <h2 className="feat-title">{it.name}</h2>
+            <div className="feat-meta">
+              <span className="badge badge-accent">{it.type === 'series' ? 'Series' : 'Movie'}</span>
+              {it.year != null && <span className="badge badge-mono">{it.year}</span>}
+              {it.epCount != null && it.epCount > 0 && <span className="badge">{it.epCount} episodes</span>}
+              {it.genres.map((g) => <span className="badge" key={g}>{g}</span>)}
+            </div>
+            {it.overview && <p className="feat-desc">{it.overview}</p>}
+            <div className="feat-actions">
+              <Link className="btn btn-primary" to={`/watch/${it.watchId}`}>
+                <Icon name="play" size={15} />Watch now
+              </Link>
+              <Link className="btn btn-secondary" to={`/${it.type === 'series' ? 'series' : 'movie'}/${it.id}`}>
+                Details
+              </Link>
+            </div>
+          </div>
+        </div>
+      ))}
+      {items.length > 1 && (
+        <div className="feat-dots">
+          {items.map((it, i) => (
+            <button
+              key={it.id} className="feat-dot" type="button" data-active={i === idx}
+              aria-label={`Show ${it.name}`} onClick={() => setIdx(i)}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
 
 function RecentCard({ it }: { it: RecentItem }) {
   const posterId = it.seriesId || it.id
@@ -68,6 +128,7 @@ export default function Browse() {
   const [items, setItems] = useState<CatalogItem[]>([])
   const [genres, setGenres] = useState<string[]>([])
   const [recent, setRecent] = useState<RecentItem[]>([])
+  const [featured, setFeatured] = useState<FeaturedItem[]>([])
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
 
@@ -81,8 +142,9 @@ export default function Browse() {
       .then((c) => { setItems(c.items); setGenres(c.genres) })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoaded(true))
-    // The rail is a bonus — if it fails, the library below still renders.
+    // The banner and rail are bonuses — if they fail, the library still renders.
     getRecent().then((r) => setRecent(r.items)).catch(() => {})
+    getFeatured().then((r) => setFeatured(r.items)).catch(() => {})
   }, [])
 
   const visible = useMemo(() => {
@@ -109,6 +171,8 @@ export default function Browse() {
   return (
     <PortalLayout>
       <main>
+        {featured.length > 0 && <FeaturedBanner items={featured} />}
+
         {error && <p className="empty">{error}</p>}
         {!error && loaded && items.length === 0 && (
           <p className="empty">Nothing here yet. Add titles to the “Public” collection in Jellyfin.</p>

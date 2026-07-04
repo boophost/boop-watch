@@ -86,7 +86,7 @@ async function refreshScope(): Promise<void> {
     ParentId: COLLECTION_ID,
     Recursive: 'true',
     IncludeItemTypes: 'Movie,Series',
-    Fields: 'PrimaryImageAspectRatio,ProductionYear,Genres,OriginalTitle,DateCreated',
+    Fields: 'PrimaryImageAspectRatio,ProductionYear,Genres,OriginalTitle,DateCreated,Overview',
   })
   const items = children.Items || []
   const playable = new Set<string>()
