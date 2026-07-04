@@ -43,9 +43,15 @@ publicRouter.get('/api/catalog', async (_req, res) => {
   res.json({ items, genres })
 })
 
-// Home page rail: every recently added watchable, newest first — each episode
-// is its own entry, movies too. Clicking an entry goes straight to /watch/:id,
-// so id is always a *playable* id.
+// Recency = the actual release/air date (PremiereDate), so a bulk-imported
+// back-catalog doesn't flood the rail; DateCreated (file added) is the
+// fallback for items with no premiere metadata.
+const releasedAt = (it: JfItem): string | null => it.PremiereDate || it.DateCreated || null
+const releasedTs = (it: JfItem): number => Date.parse(releasedAt(it) || '') || 0
+
+// Home page rail: every recently released watchable, newest first — each
+// episode is its own entry, movies too. Clicking an entry goes straight to
+// /watch/:id, so id is always a *playable* id.
 publicRouter.get('/api/recent', async (_req, res) => {
   if (!ensureConfigured(res)) return
   try {
@@ -58,13 +64,13 @@ publicRouter.get('/api/recent', async (_req, res) => {
     (ep.ParentIndexNumber != null && ep.IndexNumber != null)
       ? `S${ep.ParentIndexNumber}·E${ep.IndexNumber}`
       : (ep.IndexNumber != null ? `E${ep.IndexNumber}` : '')
-  // Bulk imports share one DateCreated; break those ties by episode order so
-  // the furthest-along episode leads.
+  // Same-day drops share a premiere date; break those ties by episode order
+  // so the furthest-along episode leads.
   const epOrd = (ep: JfItem) => (ep.ParentIndexNumber || 0) * 10000 + (ep.IndexNumber || 0)
 
   const entries = [
     ...getScopeEpisodes().map((ep) => ({
-      t: Date.parse(ep.DateCreated || '') || 0,
+      t: releasedTs(ep),
       o: epOrd(ep),
       item: {
         id: ep.Id,
@@ -73,11 +79,11 @@ publicRouter.get('/api/recent', async (_req, res) => {
         name: ep.SeriesName || ep.Name || '',
         epLabel: epLabel(ep),
         epName: ep.Name || '',
-        addedAt: ep.DateCreated || null,
+        addedAt: releasedAt(ep),
       },
     })),
     ...getCollectionItems().filter((it) => it.Type !== 'Series').map((it) => ({
-      t: Date.parse(it.DateCreated || '') || 0,
+      t: releasedTs(it),
       o: 0,
       item: {
         id: it.Id,
@@ -86,7 +92,7 @@ publicRouter.get('/api/recent', async (_req, res) => {
         name: it.Name || '',
         epLabel: '',
         epName: '',
-        addedAt: it.DateCreated || null,
+        addedAt: releasedAt(it),
       },
     })),
   ]
@@ -115,7 +121,7 @@ publicRouter.get('/api/featured', async (_req, res) => {
   for (const ep of getScopeEpisodes()) {
     const sid = ep.SeriesId
     if (!sid) continue
-    const t = Date.parse(ep.DateCreated || '') || 0
+    const t = releasedTs(ep)
     if (t > (newestBySeries.get(sid) ?? -1)) newestBySeries.set(sid, t)
     epCount.set(sid, (epCount.get(sid) || 0) + 1)
     const prev = firstEp.get(sid)
@@ -127,7 +133,7 @@ publicRouter.get('/api/featured', async (_req, res) => {
     const watchId = isSeries ? firstEp.get(it.Id)?.Id : it.Id
     if (!watchId) return []
     return [{
-      t: isSeries ? (newestBySeries.get(it.Id) ?? 0) : (Date.parse(it.DateCreated || '') || 0),
+      t: isSeries ? (newestBySeries.get(it.Id) ?? 0) : releasedTs(it),
       item: {
         id: it.Id,
         type: isSeries ? ('series' as const) : ('movie' as const),

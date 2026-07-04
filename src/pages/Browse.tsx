@@ -181,7 +181,7 @@ export default function Browse() {
         {recent.length > 0 && (
           <section className="home-section">
             <div className="section-head">
-              <div className="h-eyebrow">Just added</div>
+              <div className="h-eyebrow">New releases</div>
               <h1 className="k-h1">Recently updated</h1>
             </div>
             <div className="grid grid-recent">
