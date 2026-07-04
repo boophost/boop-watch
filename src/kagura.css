@@ -98,7 +98,7 @@
   & .chrome .chrome-right { grid-column: 3; justify-self: end; display: flex; align-items: center; gap: 16px; }
   & .chrome .crumb { color: var(--fg-muted); font-size: 13px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
   & .chrome .crumb:hover { color: var(--fg); }
-  & .chrome .crumb-avatar { padding: 2px; border-radius: 999px; transition: box-shadow .14s ease; }
+  & .chrome .crumb-avatar { padding: 0; border-radius: 999px; transition: box-shadow .14s ease; }
   & .chrome .crumb-avatar:hover { box-shadow: 0 0 0 2px var(--border-strong); }
   & .avatar-img { border-radius: 999px; object-fit: cover; display: block; }
   & .avatar-fallback {
