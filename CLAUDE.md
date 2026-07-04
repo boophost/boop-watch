@@ -49,18 +49,21 @@ non-file GETs (the SPA router).
 
 **Deploy is automated via GitHub → GHCR → k3s, with two environments.** Pushing to `main` **or**
 `dev` triggers `.github/workflows/docker-publish.yml`: the `build` job installs + `npm run build:all`
-and pushes the image (every push gets a `type=sha` tag; `:latest` is pushed **only** from the default
-branch `main`). Then a branch-scoped deploy job rolls the matching k3s Deployment:
+and pushes the image with a moving tag per branch (plus a per-commit `type=sha` tag). Then a
+branch-scoped deploy job rolls the matching k3s Deployment, which is pinned to that moving tag:
 
 | Branch | Image tag | Deploy job | k3s Deployment | Environment |
 |---|---|---|---|---|
 | `main` | `:latest` (+ sha) | `deploy` | `boop-watch` | production (`watch.boopurno.es`) |
-| `dev` | sha only | `deploy-dev` | `boop-watch-dev` | dev/staging |
+| `dev` | `:dev` (+ sha) | `deploy-dev` | `boop-watch-dev` | dev/staging (`kubectl` only, no public URL yet) |
 
-**You don't run a manual build to deploy — open a PR, merge it, and the new image rolls out on its
-own.** The normal flow is **feature branch → PR into `dev`** (rolls the `boop-watch-dev` staging
-env), then **`dev` → PR into `main`** to promote to production. Every PR (into `main` or `dev`) also
-builds with no push, as a CI check.
+**`dev` is the integration/staging trunk — commit feature work straight to `dev` and push.** That
+builds `:dev` and rolls `boop-watch-dev`, where you then **verify it works** (see below) before
+promoting to production with a reviewed **`dev` → `main` PR**. You don't run a manual build to
+deploy. Every push to `dev`/`main` deploys; PRs (e.g. the `dev` → `main` promotion) build as a CI
+check with no push. **Both moving tags must exist for the pods to pull** — `:latest` comes from a
+`main` push, `:dev` from a `dev` push (a Deployment pinned to a tag that was never published
+`ImagePullBackOff`s).
 
 The app now runs on a **k3s cluster** (control plane `k8s-cp`, `192.168.50.61`), provisioned by the
 `n0es/link` platform: the `boop-watch` (prod) and `boop-watch-dev` (staging) Deployments/Services
@@ -83,9 +86,26 @@ npm run build:all     # tsc -b && vite build  +  tsc -p server/tsconfig.json  (C
 npm run dev           # Vite dev server (proxies /api + /img to the backend)
 npm run server:dev    # tsx watch server/index.ts  (backend on :3001)
 
-# smoke test the running pod (the app listens on :3000 in-container)
-kubectl -n link-apps exec deploy/boop-watch -- wget -qO- http://localhost:3000/health   # -> ok
+# smoke test a running pod (the app listens on :3000 in-container)
+kubectl -n link-apps exec deploy/boop-watch     -- wget -qO- http://localhost:3000/health   # prod
+kubectl -n link-apps exec deploy/boop-watch-dev -- wget -qO- http://localhost:3000/health   # staging
 ```
+
+**Verify a change on staging after pushing to `dev`** (the host has `kubectl` access to the LAN
+cluster — you don't need the self-hosted runner to *check*):
+
+```bash
+kubectl -n link-apps rollout status deployment/boop-watch-dev --timeout=180s   # wait for the roll
+kubectl -n link-apps get pods -l link.boopurno.es/app=boop-watch-dev           # expect 1/1 Running
+kubectl -n link-apps exec deploy/boop-watch-dev -- wget -qO- http://localhost:3000/health   # -> ok
+# exercise the real APIs against staging without a public URL:
+kubectl -n link-apps port-forward deploy/boop-watch-dev 8080:3000 &            # then curl :8080/api/…
+```
+
+`boop-watch-dev` has **no ingress yet** (ClusterIP only), so it's reachable via `exec`/`port-forward`,
+not a browser URL. Give it its own `JELLYFIN_API_KEY` / `WATCH_COLLECTION_ID` (portal routes 503
+without them). A public `dev.watch.boopurno.es`-style route would be a follow-up (add an ingress in
+the `link` platform).
 
 `watch.boopurno.es` is served through the `link`/k3s ingress path (MetalLB), not the old
 `boopurnoes` Traefik route. The public DNS record is **grey-clouded** (Cloudflare proxy off) so video
@@ -168,13 +188,18 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
    `better-sqlite3` is glibc-native so `node dist-server/index.js` runs locally. The public JSON
    APIs and a headless browser (Playwright) screenshot are the way to verify UI; you can't rely on
    server-rendered HTML anymore (it's a client-rendered SPA).
-3. **Bump the version in every PR.** Increment `version` in `package.json` (semver: patch for
-   fixes, minor for features, major for breaking changes). This is the single source of truth —
-   `src/version.ts` re-exports it and the portal footer renders it as `v<version>`, so a bump is how
-   a deploy becomes visibly identifiable. One bump per PR.
-4. **Always commit your changes** when work is complete — don't leave the tree dirty. Use a
-   **branch-and-PR flow**: feature branch, commit, push to `origin`, open a PR into **`dev`**
-   (`gh pr create --base dev`), which rolls the `boop-watch-dev` staging env; promoting to production
-   is a separate `dev` → `main` PR. **Don't commit directly to `dev` or `main`.** If the tree already
-   had unrelated pending changes, call that out rather than bundling them. Remote:
-   `github.com/n0es/boop-watch` (private).
+3. **Bump the version with every change that ships.** Increment `version` in `package.json` (semver:
+   patch for fixes, minor for features, major for breaking changes). This is the single source of
+   truth — `src/version.ts` re-exports it and the portal footer renders it as `v<version>`, so a bump
+   is how a deploy becomes visibly identifiable. One bump per shipped change.
+4. **Commit and push feature work straight to `dev`, then verify it on staging.** `dev` is the
+   integration/staging trunk: commit your change (bump included), push to `dev`, and the CI builds
+   `:dev` + rolls `boop-watch-dev`. Then **confirm it actually works on staging** — wait for the
+   rollout, check the pod is `1/1 Running`, and smoke-test `/health` + the relevant APIs against the
+   `boop-watch-dev` pod (see "Verify a change on staging" above). Don't consider the change done until
+   staging is green. A short-lived feature branch is fine for larger work, but it lands on `dev`, not
+   `main`.
+5. **Promote to production with a `dev` → `main` PR.** Once staging looks good, open
+   `gh pr create --base main --head dev` to ship to prod (`watch.boopurno.es`). **Never commit
+   directly to `main`.** Don't leave the tree dirty. If it already had unrelated pending changes,
+   call that out rather than bundling them. Remote: `github.com/n0es/boop-watch` (private).

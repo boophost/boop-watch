@@ -1,10 +1,11 @@
 name: Build and Publish
 
 # Build the image on every PR (validation, no push). On pushes to main or dev, build
-# and push the image (main also moves ghcr.io/n0es/boop-watch:latest; dev pushes a
-# sha tag), then roll the matching k3s Deployment so the new image actually rolls out:
-# main -> `deploy` (boop-watch, prod), dev -> `deploy-dev` (boop-watch-dev, staging).
-# The old Watchtower flow is gone.
+# and push the image with a moving tag (main -> ghcr.io/n0es/boop-watch:latest,
+# dev -> :dev; plus a per-commit sha tag), then roll the matching k3s Deployment so the
+# new image rolls out: main -> `deploy` (boop-watch, prod), dev -> `deploy-dev`
+# (boop-watch-dev, staging). Each Deployment is pinned to its moving tag (:latest / :dev),
+# so `rollout restart` re-pulls the freshly pushed image. The old Watchtower flow is gone.
 
 on:
   push:
@@ -53,6 +54,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,prefix=
 
       - name: Build and push
