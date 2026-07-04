@@ -29,6 +29,7 @@ export interface JfItem {
   Name?: string
   Type?: string
   DateCreated?: string
+  PremiereDate?: string
   ProductionYear?: number
   Genres?: string[]
   OriginalTitle?: string
@@ -86,14 +87,14 @@ async function refreshScope(): Promise<void> {
     ParentId: COLLECTION_ID,
     Recursive: 'true',
     IncludeItemTypes: 'Movie,Series',
-    Fields: 'PrimaryImageAspectRatio,ProductionYear,Genres,OriginalTitle,DateCreated,Overview',
+    Fields: 'PrimaryImageAspectRatio,ProductionYear,Genres,OriginalTitle,DateCreated,PremiereDate,Overview',
   })
   const items = children.Items || []
   const playable = new Set<string>()
   const episodes: JfItem[] = []
   for (const it of items) {
     if (it.Type === 'Series') {
-      const eps = await jfJson<{ Items?: JfItem[] }>(`/Shows/${it.Id}/Episodes`, { Fields: 'Overview,DateCreated' })
+      const eps = await jfJson<{ Items?: JfItem[] }>(`/Shows/${it.Id}/Episodes`, { Fields: 'Overview,DateCreated,PremiereDate' })
       for (const ep of eps.Items || []) {
         playable.add(ep.Id)
         episodes.push({ ...ep, SeriesId: ep.SeriesId || it.Id, SeriesName: ep.SeriesName || it.Name })
