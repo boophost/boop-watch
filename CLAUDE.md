@@ -112,6 +112,30 @@ the `link` platform).
 bypasses CF's free-tier video ToS. The SQLite DB needs a persistent volume (the k3s app `Volume` /
 PVC, mounted at `DATA_DIR`).
 
+### Library-import flow (custom indexer → library)
+
+The **"Library import"** seed flow (`server/flowsDb.ts`) takes over where the "Missing videos"
+flow stops: it turns completed qBittorrent downloads into files in the media library. Chain:
+`source.qbittorrent` (completed) → `transform.expand-files` (torrent → per-episode video files) →
+`enrich.indexer-match` (release → catalog `mal_id`) → `enrich.metadata` (MAL metadata into our own
+catalog DB + `production_year` for the path) → `enrich.media-probe` (ffprobe subtitle facts) →
+`filter.compare` on `sub_langs` → `enrich.extract-subs` (keep the embedded ASS) **or**
+`enrich.fetch-subs` (Jimaku replacement) → `sink.library-import` (hardlink into `LIBRARY_DIR`,
+sidecars alongside) → `sink.jellyfin-scan`. Run it on a schedule (files finish *after* the magnet is
+queued). Sorting/scoring/branching is done with the general `filter.compare` / `filter.sort` /
+`transform.compute` / `combine.group-pick` nodes — **don't hardcode that logic into domain nodes.**
+
+**This flow needs two dirs mounted into the pod** (not wired in the `link` deploy yet — TODO):
+- the qBittorrent completed-downloads dir **read-only** (qBit reports paths under `/data/downloads`;
+  the `source.qbittorrent` node's `pathFrom`/`pathTo` remaps that prefix to wherever the pod mounts
+  it, e.g. `/downloads`),
+- the Jellyfin media library dir **read-write** at `LIBRARY_DIR` (`/library`).
+
+`sink.library-import` **hardlinks** (falling back to a copy across filesystems), so for no-copy
+imports both dirs must be the **same filesystem/export**. `ffmpeg`/`ffprobe` are in the image for the
+probe/extract nodes. The `mcp/` CLI (see `mcp/README.md`) drives flows against a port-forwarded
+staging backend for iteration.
+
 ### Environment variables
 - `JELLYFIN_URL` — base URL (default `http://jellyfin:8096`)
 - `JELLYFIN_API_KEY` — admin key, server-side only. **Required** for the public portal; if unset the
@@ -125,6 +149,10 @@ PVC, mounted at `DATA_DIR`).
   (unset ⇒ the "Send to qBittorrent" node errors at run time; dry runs still work)
 - `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
+- `LIBRARY_DIR` — where the **library-import** flow places files (default `/library`);
+  point at the Jellyfin media library dir mounted into the pod (see below)
+- `JIMAKU_API_KEY`, `JIMAKU_URL` — external subtitle fallback (`enrich.fetch-subs`);
+  unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `NODE_ENV=production` — serve the built `dist/`
 - `PORT` — default `3000` (the Dockerfile sets it; the dev backend defaults to `3001`)
 

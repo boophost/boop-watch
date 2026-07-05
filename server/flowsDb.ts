@@ -96,9 +96,51 @@ const MISSING_VIDEOS_GRAPH: FlowGraph = {
   ],
 }
 
+// Completed qBittorrent downloads → placed in the media library. Expands each
+// torrent into its files, matches back to the catalog for a mal_id, pulls
+// metadata (year → import path), probes for a wanted-language subtitle and
+// branches: keep the embedded sub (extract) or fetch a replacement, then
+// hardlink the file into the library and refresh Jellyfin. Needs the downloads
+// + library dirs mounted into the pod (see mcp/README.md / CLAUDE.md).
+const LIBRARY_IMPORT_GRAPH: FlowGraph = {
+  nodes: [
+    { id: 'qb', type: 'source.qbittorrent', position: { x: 0, y: 200 }, config: { category: 'anime', completedOnly: true, pathFrom: '/data/downloads', pathTo: '/downloads' } },
+    { id: 'exp', type: 'transform.expand-files', position: { x: 260, y: 200 }, config: { pathField: 'content_path', extensions: 'mkv,mp4' } },
+    { id: 'match', type: 'enrich.indexer-match', position: { x: 520, y: 200 }, config: { setField: 'mal_id', fromField: 'mal_id' } },
+    { id: 'meta', type: 'enrich.metadata', position: { x: 780, y: 120 }, config: { malField: 'mal_id', writeDb: true, maxItems: 0 } },
+    { id: 'probe', type: 'enrich.media-probe', position: { x: 1060, y: 200 }, config: { fileField: 'file_path' } },
+    { id: 'cmp', type: 'filter.compare', position: { x: 1320, y: 200 }, config: { field: 'sub_langs', op: 'contains', value: 'eng' } },
+    { id: 'ext', type: 'enrich.extract-subs', position: { x: 1580, y: 120 }, config: { fileField: 'file_path', lang: 'eng' } },
+    { id: 'fetch', type: 'enrich.fetch-subs', position: { x: 1580, y: 300 }, config: { queryField: 'title', episodeField: 'torrent_episode', lang: 'eng' } },
+    { id: 'mg', type: 'combine.merge', position: { x: 1860, y: 220 }, config: {} },
+    { id: 'imp', type: 'sink.library-import', position: { x: 2120, y: 220 }, config: { fileField: 'file_path', libraryRoot: '/library', method: 'hardlink' } },
+    { id: 'scan', type: 'sink.jellyfin-scan', position: { x: 2400, y: 220 }, config: {} },
+  ],
+  edges: [
+    { id: 'e1', source: 'qb', sourceHandle: 'items', target: 'exp', targetHandle: 'in' },
+    { id: 'e2', source: 'exp', sourceHandle: 'files', target: 'match', targetHandle: 'in' },
+    { id: 'e3', source: 'match', sourceHandle: 'matched', target: 'meta', targetHandle: 'in' },
+    // Unmatched files still import (just without our metadata / clean year).
+    { id: 'e4', source: 'match', sourceHandle: 'unmatched', target: 'probe', targetHandle: 'in' },
+    { id: 'e5', source: 'meta', sourceHandle: 'enriched', target: 'probe', targetHandle: 'in' },
+    { id: 'e6', source: 'meta', sourceHandle: 'skipped', target: 'probe', targetHandle: 'in' },
+    { id: 'e7', source: 'probe', sourceHandle: 'probed', target: 'cmp', targetHandle: 'in' },
+    // Has a wanted-language track → extract it; otherwise fetch a replacement.
+    { id: 'e8', source: 'cmp', sourceHandle: 'pass', target: 'ext', targetHandle: 'in' },
+    { id: 'e9', source: 'cmp', sourceHandle: 'fail', target: 'fetch', targetHandle: 'in' },
+    // Every branch converges on import — never drop a file just because subs failed.
+    { id: 'e10', source: 'ext', sourceHandle: 'extracted', target: 'mg', targetHandle: 'in' },
+    { id: 'e11', source: 'ext', sourceHandle: 'none', target: 'mg', targetHandle: 'in' },
+    { id: 'e12', source: 'fetch', sourceHandle: 'found', target: 'mg', targetHandle: 'in' },
+    { id: 'e13', source: 'fetch', sourceHandle: 'missed', target: 'mg', targetHandle: 'in' },
+    { id: 'e14', source: 'mg', sourceHandle: 'items', target: 'imp', targetHandle: 'in' },
+    { id: 'e15', source: 'imp', sourceHandle: 'imported', target: 'scan', targetHandle: 'in' },
+  ],
+}
+
 // Seeds are versioned via SQLite's user_version so later releases can add
 // flows to existing databases without re-creating deleted ones.
-const SEED_VERSION = 2
+const SEED_VERSION = 3
 
 function seedFlows(instance: ReturnType<typeof getDb>) {
   const insert = instance.prepare('INSERT INTO flows (name, description, graph) VALUES (?, ?, ?)')
@@ -116,6 +158,13 @@ function seedFlows(instance: ReturnType<typeof getDb>) {
       'Missing videos',
       'Finds indexer titles with no matching portal item, picks a 1080p dual-audio release (season pack if finished, recent episodes if airing) with live seeders, and queues it in qBittorrent.',
       JSON.stringify(MISSING_VIDEOS_GRAPH),
+    )
+  }
+  if (version < 3) {
+    insert.run(
+      'Library import',
+      'Places completed qBittorrent downloads into the media library: expand to files, match the catalog for metadata, keep or fetch a subtitle, hardlink into the library, refresh Jellyfin. Needs the downloads + library dirs mounted into the pod.',
+      JSON.stringify(LIBRARY_IMPORT_GRAPH),
     )
   }
   if (version < SEED_VERSION) instance.pragma(`user_version = ${SEED_VERSION}`)
