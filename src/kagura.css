@@ -75,7 +75,23 @@
   &.shell[data-collapsed="true"] .snav-inner { padding: 14px 13px; }
   &.shell[data-collapsed="true"] .snav-link { justify-content: center; padding: 0; }
   &.shell[data-collapsed="true"] .snav-head { padding: 2px 0 14px; display: flex; justify-content: center; }
-  @media (max-width: 767px) { & .snav { display: none; } }
+  
+  & .mob-nav { display: none; }
+  @media (max-width: 767px) { 
+    & .snav { display: none; } 
+    & .shell-main { padding-bottom: 56px; }
+    & .mob-nav {
+      display: flex; position: fixed; bottom: 0; left: 0; right: 0; height: 56px;
+      background: oklch(0.145 0.008 285 / 90%); backdrop-filter: blur(10px);
+      border-top: 1px solid var(--border); z-index: 50;
+      justify-content: space-around; align-items: center;
+    }
+    & .mob-link {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 4px; font-size: 10px; color: var(--fg-muted); flex: 1; height: 100%;
+    }
+    & .mob-link[aria-current="page"] { color: var(--accent); }
+  }
 
   /* Chrome / header — brand left, centered search, crumb right */
   & .chrome {

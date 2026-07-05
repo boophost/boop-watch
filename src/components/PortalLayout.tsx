@@ -47,6 +47,17 @@ export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children:
         <Chrome crumb={crumb} />
         {children}
       </div>
+      <nav className="mob-nav">
+        <NavLink to="/" end className="mob-link" title="All titles">
+          <Icon name="film" size={20} /><span>Home</span>
+        </NavLink>
+        <NavLink to="/schedule" className="mob-link" title="Schedule">
+          <Icon name="calendar" size={20} /><span>Schedule</span>
+        </NavLink>
+        <NavLink to="/library" className="mob-link" title="Library">
+          <Icon name="bookmark" size={20} /><span>Library</span>
+        </NavLink>
+      </nav>
     </div>
   )
 }
