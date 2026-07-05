@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { Link, NavLink } from 'react-router-dom'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { Chrome } from './Chrome'
 import { Icon } from './Icon'
 import { useAuth } from '@/lib/AuthContext'
@@ -63,18 +63,74 @@ export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children:
 }
 
 export function UserCrumb() {
-  const { user } = useAuth()
-  if (user) {
+  const { user, logout } = useAuth()
+  const navigate = useNavigate()
+  const ref = useRef<HTMLDetailsElement>(null)
+
+  // Close the menu on outside click or Escape.
+  useEffect(() => {
+    const close = (e: Event) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) ref.current.open = false
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && ref.current) ref.current.open = false
+    }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  if (!user) {
     return (
-      <Link className="crumb crumb-avatar" to="/profile" title={user.username} aria-label={user.username}>
-        <Avatar user={user} />
+      <Link className="crumb" to="/login">
+        <Icon name="user" size={15} /> Log in
       </Link>
     )
   }
+
+  const go = (to: string) => {
+    if (ref.current) ref.current.open = false
+    navigate(to)
+  }
+
   return (
-    <Link className="crumb" to="/login">
-      <Icon name="user" size={15} /> Log in
-    </Link>
+    <details className="umenu" ref={ref}>
+      <summary className="crumb crumb-avatar" title={user.username} aria-label={user.username}>
+        <Avatar user={user} />
+      </summary>
+      <div className="umenu-pop">
+        <div className="umenu-head">
+          <Avatar user={user} size={30} />
+          <span className="umenu-name">{user.username}</span>
+        </div>
+        <button className="popitem" type="button" onClick={() => go('/profile')}>
+          <Icon name="user" size={15} /><span className="pi-main">Profile</span>
+        </button>
+        <button className="popitem" type="button" onClick={() => go('/library')}>
+          <Icon name="bookmark" size={15} /><span className="pi-main">My library</span>
+        </button>
+        {user.isAdmin && (
+          <button className="popitem" type="button" onClick={() => go('/manage')}>
+            <Icon name="gear" size={15} /><span className="pi-main">Manage</span>
+          </button>
+        )}
+        <div className="umenu-sep" />
+        <button
+          className="popitem"
+          type="button"
+          onClick={async () => {
+            if (ref.current) ref.current.open = false
+            await logout()
+            navigate('/')
+          }}
+        >
+          <Icon name="logout" size={15} /><span className="pi-main">Log out</span>
+        </button>
+      </div>
+    </details>
   )
 }
 
