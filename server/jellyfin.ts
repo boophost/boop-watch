@@ -2,6 +2,8 @@
 // All Jellyfin access is server-side; the api_key never reaches the browser.
 import { Readable } from 'node:stream'
 import type { Request, Response } from 'express'
+import { syncJellyfinToPortal } from './sync.js'
+import { getPortalCollectionItems, getPortalScopeEpisodes, getPortalPlayableIds, PortalItem } from './portalDb.js'
 
 const JF = (process.env.JELLYFIN_URL || 'http://jellyfin:8096').replace(/\/+$/, '')
 const KEY = process.env.JELLYFIN_API_KEY
@@ -79,33 +81,33 @@ let playableIds = new Set<string>()
 let scopeLoadedAt = 0
 let scopeLoading: Promise<void> | null = null
 
+function mapPortalToJf(p: PortalItem): JfItem {
+  return {
+    Id: p.id,
+    Name: p.name,
+    Type: p.type,
+    DateCreated: p.date_created || undefined,
+    PremiereDate: p.premiere_date || undefined,
+    ProductionYear: p.production_year || undefined,
+    Genres: p.genres ? JSON.parse(p.genres) : undefined,
+    OriginalTitle: p.original_title || undefined,
+    Overview: p.overview || undefined,
+    RunTimeTicks: p.runtime_ticks || undefined,
+    IndexNumber: p.index_number ?? undefined,
+    ParentIndexNumber: p.parent_index_number ?? undefined,
+    SeriesId: p.series_id || undefined,
+    SeriesName: p.series_name || undefined,
+  }
+}
+
 async function refreshScope(): Promise<void> {
   if (!jellyfinConfigured) throw new Error('Jellyfin not configured')
-  // BoxSet membership only resolves with Recursive=true; constrain to the
-  // top-level member types so we get Movies/Series, not their episodes.
-  const children = await jfJson<{ Items?: JfItem[] }>('/Items', {
-    ParentId: COLLECTION_ID,
-    Recursive: 'true',
-    IncludeItemTypes: 'Movie,Series',
-    Fields: 'PrimaryImageAspectRatio,ProductionYear,Genres,OriginalTitle,DateCreated,PremiereDate,Overview',
-  })
-  const items = children.Items || []
-  const playable = new Set<string>()
-  const episodes: JfItem[] = []
-  for (const it of items) {
-    if (it.Type === 'Series') {
-      const eps = await jfJson<{ Items?: JfItem[] }>(`/Shows/${it.Id}/Episodes`, { Fields: 'Overview,DateCreated,PremiereDate' })
-      for (const ep of eps.Items || []) {
-        playable.add(ep.Id)
-        episodes.push({ ...ep, SeriesId: ep.SeriesId || it.Id, SeriesName: ep.SeriesName || it.Name })
-      }
-    } else {
-      playable.add(it.Id) // Movie (or any directly-playable leaf)
-    }
-  }
-  collectionItems = items
-  scopeEpisodes = episodes
-  playableIds = playable
+  
+  await syncJellyfinToPortal()
+
+  collectionItems = getPortalCollectionItems().map(mapPortalToJf)
+  scopeEpisodes = getPortalScopeEpisodes().map(mapPortalToJf)
+  playableIds = getPortalPlayableIds()
   scopeLoadedAt = Date.now()
 }
 
