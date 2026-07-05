@@ -7,6 +7,7 @@ import { jfJson, jellyfinConfigured, JfItem } from './jellyfin.js'
 import { listSeries } from './db.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
+import { blacklistedHashes } from './blacklist.js'
 
 export type FlowItem = Record<string, unknown>
 
@@ -869,7 +870,12 @@ const torrentSearch: NodeImpl = {
                 : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
               : []
         }
-        const cands = relevant.filter((c) => passesFilters(c, opts))
+        const blocked = blacklistedHashes()
+        const cands = relevant
+          .filter((c) => !c.hash || !blocked.has(c.hash.toLowerCase()))
+          .filter((c) => passesFilters(c, opts))
+        const blacklistedOut = relevant.length - relevant.filter((c) => !c.hash || !blocked.has(c.hash.toLowerCase())).length
+        if (blacklistedOut > 0) ctx.notes.push(`skipped ${blacklistedOut} blacklisted release(s) for "${q}"`)
 
         if (cands.length === 0) {
           missed.push(item)

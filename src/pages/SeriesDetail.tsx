@@ -1,9 +1,78 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ChevronLeft, ExternalLink } from 'lucide-react'
+import { Ban, ChevronLeft, ExternalLink, Play, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
 import { fetchAuth } from '@/lib/api'
+
+interface SeriesDownload {
+  hash: string
+  name: string
+  state: string
+  progress: number
+  dlspeed: number
+  size: number
+  numSeeds: number
+  eta: number
+  isBatch: boolean
+  episode: number | null
+}
+
+interface BlacklistRow {
+  id: number
+  info_hash: string
+  name: string | null
+  reason: string | null
+  created_at: string
+}
+
+interface DownloadStatus {
+  qbitConfigured: boolean
+  qbitError: string | null
+  torrents: SeriesDownload[]
+  siteEpisodes: Record<string, string>
+  blacklist: BlacklistRow[]
+}
+
+// The best torrent covering a given episode: a batch (covers all) or a
+// single-episode release matching that number; most-complete wins.
+function episodeDownload(
+  epNum: number | null,
+  torrents: SeriesDownload[],
+): SeriesDownload | null {
+  if (epNum == null) return null
+  const covering = torrents.filter((t) => t.isBatch || t.episode === epNum)
+  return covering.sort((a, b) => b.progress - a.progress)[0] ?? null
+}
+
+function formatBytes(n: number): string {
+  if (!n || n < 0) return '—'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
+}
+
+// qBittorrent states → short label + tone.
+function stateLabel(state: string, progress: number): { text: string; tone: string } {
+  if (progress >= 1) {
+    if (state.includes('UP') || state === 'uploading' || state === 'stalledUP')
+      return { text: 'Complete · seeding', tone: 'text-emerald-500' }
+    return { text: 'Complete', tone: 'text-emerald-500' }
+  }
+  if (state.startsWith('stalled')) return { text: 'Stalled (no peers)', tone: 'text-amber-500' }
+  if (state.includes('DL') || state === 'downloading')
+    return { text: 'Downloading', tone: 'text-sky-500' }
+  if (state.includes('paused') || state.includes('stopped'))
+    return { text: 'Paused', tone: 'text-muted-foreground' }
+  if (state === 'error' || state === 'missingFiles')
+    return { text: 'Error', tone: 'text-destructive' }
+  return { text: state, tone: 'text-muted-foreground' }
+}
 
 interface MalImages {
   jpg?: { large_image_url?: string | null; image_url?: string | null }
@@ -80,6 +149,58 @@ export default function SeriesDetail() {
   const [epLoading, setEpLoading] = useState(false)
   const [epError, setEpError] = useState('')
 
+  const [dl, setDl] = useState<DownloadStatus | null>(null)
+  const [busyHash, setBusyHash] = useState<string | null>(null)
+
+  const loadDownloads = useCallback(async () => {
+    if (!Number.isFinite(id)) return
+    try {
+      const r = await fetchAuth(`/api/series/${id}/downloads`)
+      if (!r.ok) return
+      setDl((await r.json()) as DownloadStatus)
+    } catch {
+      /* leave prior state */
+    }
+  }, [id])
+
+  const removeDownload = async (hash: string, deleteFiles: boolean) => {
+    setBusyHash(hash)
+    try {
+      await fetchAuth(`/api/series/${id}/downloads/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hash, deleteFiles }),
+      })
+      await loadDownloads()
+    } finally {
+      setBusyHash(null)
+    }
+  }
+
+  const blacklistSource = async (t: SeriesDownload) => {
+    setBusyHash(t.hash)
+    try {
+      await fetchAuth(`/api/series/${id}/blacklist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          info_hash: t.hash,
+          name: t.name,
+          alsoDelete: true,
+          deleteFiles: true,
+        }),
+      })
+      await loadDownloads()
+    } finally {
+      setBusyHash(null)
+    }
+  }
+
+  const unblacklist = async (entryId: number) => {
+    await fetchAuth(`/api/blacklist/${entryId}`, { method: 'DELETE' })
+    await loadDownloads()
+  }
+
   useEffect(() => {
     if (!Number.isFinite(id)) {
       navigate('/manage', { replace: true })
@@ -150,6 +271,19 @@ export default function SeriesDetail() {
     void loadEpisodes(1, true)
   }, [series, loadEpisodes])
 
+  // Load downloads once, then poll while a torrent is actively downloading.
+  useEffect(() => {
+    if (!series) return
+    void loadDownloads()
+  }, [series, loadDownloads])
+
+  useEffect(() => {
+    const active = dl?.torrents.some((t) => t.progress < 1 && !t.state.includes('paused'))
+    if (!active) return
+    const h = setInterval(() => void loadDownloads(), 5000)
+    return () => clearInterval(h)
+  }, [dl, loadDownloads])
+
   if (detailLoading || !series) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
@@ -186,9 +320,11 @@ export default function SeriesDetail() {
 
       <main className="mx-auto max-w-5xl space-y-10 p-4 md:p-6">
         <section className="flex flex-col gap-6 md:flex-row md:gap-8">
-          <div className="mx-auto w-48 shrink-0 overflow-hidden rounded-lg border border-border bg-muted md:mx-0 md:w-56">
+          <div className="mx-auto w-48 shrink-0 self-start overflow-hidden rounded-lg border border-border bg-muted md:mx-0 md:w-56">
             {img ? (
-              <img src={img} alt="" className="aspect-[2/3] w-full object-cover" />
+              // Natural aspect ratio — posters aren't all exactly 2:3, and
+              // object-cover was cropping them.
+              <img src={img} alt="" className="block h-auto w-full" />
             ) : (
               <div className="flex aspect-[2/3] items-center justify-center text-sm text-muted-foreground">
                 No poster
@@ -275,6 +411,118 @@ export default function SeriesDetail() {
         </section>
 
         <section>
+          <h2 className="mb-4 text-lg font-semibold">Downloads</h2>
+          {!dl ? (
+            <p className="text-sm text-muted-foreground">Loading downloads…</p>
+          ) : !dl.qbitConfigured ? (
+            <p className="text-sm text-muted-foreground">
+              qBittorrent isn’t configured, so download status is unavailable.
+            </p>
+          ) : dl.qbitError ? (
+            <p className="text-sm text-amber-600 dark:text-amber-500">
+              qBittorrent: {dl.qbitError}
+            </p>
+          ) : dl.torrents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No downloads for this series. The “Missing videos” flow queues them
+              in qBittorrent.
+            </p>
+          ) : (
+            <ul className="space-y-3">
+              {dl.torrents.map((t) => {
+                const st = stateLabel(t.state, t.progress)
+                const busy = busyHash === t.hash
+                return (
+                  <li
+                    key={t.hash}
+                    className="rounded-lg border border-border bg-card p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium" title={t.name}>
+                          {t.name}
+                        </p>
+                        <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                          <span className={st.tone}>{st.text}</span>
+                          <span>·</span>
+                          <span>{(t.progress * 100).toFixed(t.progress >= 1 ? 0 : 1)}%</span>
+                          <span>·</span>
+                          <span>{formatBytes(t.size)}</span>
+                          <span>·</span>
+                          <span>{t.numSeeds} seeds</span>
+                          <span>·</span>
+                          <span>{t.isBatch ? 'Batch' : t.episode != null ? `Ep ${t.episode}` : 'Single'}</span>
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1 px-2 text-amber-600 dark:text-amber-500"
+                          disabled={busy}
+                          title="Blacklist this source and remove it — the flow won't pick it again"
+                          onClick={() => void blacklistSource(t)}
+                        >
+                          <Ban className="size-3.5" />
+                          <span className="hidden sm:inline">Blacklist</span>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1 px-2 text-destructive"
+                          disabled={busy}
+                          title="Remove this download and its files"
+                          onClick={() => void removeDownload(t.hash, true)}
+                        >
+                          <Trash2 className="size-3.5" />
+                          <span className="hidden sm:inline">Remove</span>
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className={`h-full rounded-full ${t.progress >= 1 ? 'bg-emerald-500' : 'bg-sky-500'}`}
+                        style={{ width: `${Math.round(t.progress * 100)}%` }}
+                      />
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+
+          {dl && dl.blacklist.length > 0 ? (
+            <div className="mt-4">
+              <h3 className="mb-2 text-sm font-medium text-muted-foreground">
+                Blacklisted sources
+              </h3>
+              <ul className="space-y-1.5">
+                {dl.blacklist.map((b) => (
+                  <li
+                    key={b.id}
+                    className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5 text-xs"
+                  >
+                    <Ban className="size-3.5 shrink-0 text-amber-500" />
+                    <span className="min-w-0 flex-1 truncate" title={b.name ?? b.info_hash}>
+                      {b.name ?? b.info_hash}
+                    </span>
+                    <button
+                      type="button"
+                      className="shrink-0 text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                      onClick={() => void unblacklist(b.id)}
+                    >
+                      Un-blacklist
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </section>
+
+        <section>
           <h2 className="mb-4 text-lg font-semibold">Episodes</h2>
           {epError ? (
             <p className="text-sm text-destructive">{epError}</p>
@@ -286,8 +534,10 @@ export default function SeriesDetail() {
                 <tr>
                   <th className="w-14 px-3 py-2 font-medium">Ep</th>
                   <th className="px-3 py-2 font-medium">Title</th>
-                  <th className="w-36 px-3 py-2 font-medium">Aired</th>
-                  <th className="w-24 px-3 py-2 font-medium" />
+                  <th className="w-28 px-3 py-2 font-medium">Aired</th>
+                  <th className="w-24 px-3 py-2 font-medium">On site</th>
+                  <th className="w-44 px-3 py-2 font-medium">Download</th>
+                  <th className="w-16 px-3 py-2 font-medium" />
                 </tr>
               </thead>
               <tbody>
@@ -323,6 +573,41 @@ export default function SeriesDetail() {
                     </td>
                     <td className="px-3 py-2 align-top text-muted-foreground">
                       {formatAired(ep.aired)}
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      {dl?.siteEpisodes[String(ep.episode)] ? (
+                        <a
+                          href={`/watch/${dl.siteEpisodes[String(ep.episode)]}`}
+                          className="inline-flex items-center gap-1 text-emerald-600 underline-offset-4 hover:underline dark:text-emerald-500"
+                        >
+                          <Play className="size-3" />
+                          Watch
+                        </a>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      {(() => {
+                        const t = episodeDownload(ep.episode, dl?.torrents ?? [])
+                        if (!t) return <span className="text-muted-foreground">—</span>
+                        const st = stateLabel(t.state, t.progress)
+                        return (
+                          <div className="min-w-0">
+                            <span className={`text-xs ${st.tone}`}>
+                              {t.progress >= 1 ? st.text : `${(t.progress * 100).toFixed(0)}%`}
+                            </span>
+                            {t.progress < 1 ? (
+                              <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
+                                <div
+                                  className="h-full rounded-full bg-sky-500"
+                                  style={{ width: `${Math.round(t.progress * 100)}%` }}
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        )
+                      })()}
                     </td>
                     <td className="px-3 py-2 align-top">
                       <a
@@ -367,6 +652,30 @@ export default function SeriesDetail() {
                 <p className="mt-1 text-xs text-muted-foreground">
                   {formatAired(ep.aired)}
                 </p>
+                {(() => {
+                  const t = episodeDownload(ep.episode, dl?.torrents ?? [])
+                  const watchId = dl?.siteEpisodes[String(ep.episode)]
+                  if (!t && !watchId) return null
+                  const st = t ? stateLabel(t.state, t.progress) : null
+                  return (
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                      {watchId ? (
+                        <a
+                          href={`/watch/${watchId}`}
+                          className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-500"
+                        >
+                          <Play className="size-3" />
+                          Watch on site
+                        </a>
+                      ) : null}
+                      {t && st ? (
+                        <span className={st.tone}>
+                          {t.progress >= 1 ? st.text : `Downloading ${(t.progress * 100).toFixed(0)}%`}
+                        </span>
+                      ) : null}
+                    </div>
+                  )
+                })()}
               </li>
             ))}
           </ul>
