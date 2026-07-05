@@ -4,71 +4,94 @@ import { Chrome } from './Chrome'
 import { Icon } from './Icon'
 import { useAuth } from '@/lib/AuthContext'
 
-/** Public portal shell: Kagura-scoped side nav + header. The side nav sticks
- * to the viewport and collapses to an icon rail (remembered per browser). */
-export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children: ReactNode }) {
-  const { user } = useAuth()
+/** Collapse state for the side nav, remembered per browser. Lives on the shell
+ * root (via data-collapsed) so both the portal and the player can share it. */
+export function useSidebarCollapsed() {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('snav-collapsed') === '1')
   useEffect(() => {
     localStorage.setItem('snav-collapsed', collapsed ? '1' : '0')
   }, [collapsed])
+  return [collapsed, setCollapsed] as const
+}
+
+/** The Kagura-scoped side nav: sticky brand + links, collapses to an icon rail.
+ * Shared by the portal shell and the player page. */
+export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  const { user } = useAuth()
+  return (
+    <aside className="snav">
+      <div className="snav-inner">
+        <div className="snav-head">
+          <Link className="snav-brand" to="/" title="boopurnoes · watch">
+            <span className="brand-mark">B</span>
+            <span className="snav-label">boopurnoes <span className="sub">· watch</span></span>
+          </Link>
+        </div>
+        <nav className="snav-nav">
+          <NavLink to="/" end className="snav-link" title="All titles">
+            <Icon name="film" size={16} /><span className="snav-label">All titles</span>
+          </NavLink>
+          <NavLink to="/schedule" className="snav-link" title="Schedule">
+            <Icon name="calendar" size={16} /><span className="snav-label">Schedule</span>
+          </NavLink>
+          <NavLink to="/library" className="snav-link" title="Library">
+            <Icon name="bookmark" size={16} /><span className="snav-label">Library</span>
+          </NavLink>
+          {user?.isAdmin && (
+            <NavLink to="/manage" className="snav-link" title="Manage">
+              <Icon name="gear" size={16} /><span className="snav-label">Manage</span>
+            </NavLink>
+          )}
+        </nav>
+        <button
+          className="snav-link snav-collapse" type="button"
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          onClick={onToggle}
+        >
+          <Icon name="back" size={15} /><span className="snav-label">Collapse</span>
+        </button>
+      </div>
+    </aside>
+  )
+}
+
+/** Bottom tab bar shown on phones (where the side nav is hidden). Shared. */
+export function MobileNav() {
+  const { user } = useAuth()
+  return (
+    <nav className="mob-nav">
+      <NavLink to="/" end className="mob-link" title="All titles">
+        <Icon name="film" size={20} /><span>Home</span>
+      </NavLink>
+      <NavLink to="/schedule" className="mob-link" title="Schedule">
+        <Icon name="calendar" size={20} /><span>Schedule</span>
+      </NavLink>
+      <NavLink to="/library" className="mob-link" title="Library">
+        <Icon name="bookmark" size={20} /><span>Library</span>
+      </NavLink>
+      {user?.isAdmin && (
+        <NavLink to="/manage" className="mob-link" title="Manage">
+          <Icon name="gear" size={20} /><span>Manage</span>
+        </NavLink>
+      )}
+    </nav>
+  )
+}
+
+/** Public portal shell: Kagura-scoped side nav + header. The side nav sticks
+ * to the viewport and collapses to an icon rail (remembered per browser). */
+export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children: ReactNode }) {
+  const [collapsed, setCollapsed] = useSidebarCollapsed()
 
   return (
     <div className="kagura shell" data-collapsed={collapsed}>
-      <aside className="snav">
-        <div className="snav-inner">
-          <div className="snav-head">
-            <Link className="snav-brand" to="/" title="boopurnoes · watch">
-              <span className="brand-mark">B</span>
-              <span className="snav-label">boopurnoes <span className="sub">· watch</span></span>
-            </Link>
-          </div>
-          <nav className="snav-nav">
-            <NavLink to="/" end className="snav-link" title="All titles">
-              <Icon name="film" size={16} /><span className="snav-label">All titles</span>
-            </NavLink>
-            <NavLink to="/schedule" className="snav-link" title="Schedule">
-              <Icon name="calendar" size={16} /><span className="snav-label">Schedule</span>
-            </NavLink>
-            <NavLink to="/library" className="snav-link" title="Library">
-              <Icon name="bookmark" size={16} /><span className="snav-label">Library</span>
-            </NavLink>
-            {user?.isAdmin && (
-              <NavLink to="/manage" className="snav-link" title="Manage">
-                <Icon name="gear" size={16} /><span className="snav-label">Manage</span>
-              </NavLink>
-            )}
-          </nav>
-          <button
-            className="snav-link snav-collapse" type="button"
-            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            onClick={() => setCollapsed((c) => !c)}
-          >
-            <Icon name="back" size={15} /><span className="snav-label">Collapse</span>
-          </button>
-        </div>
-      </aside>
+      <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       <div className="shell-main">
         <Chrome crumb={crumb} />
         {children}
       </div>
-      <nav className="mob-nav">
-        <NavLink to="/" end className="mob-link" title="All titles">
-          <Icon name="film" size={20} /><span>Home</span>
-        </NavLink>
-        <NavLink to="/schedule" className="mob-link" title="Schedule">
-          <Icon name="calendar" size={20} /><span>Schedule</span>
-        </NavLink>
-        <NavLink to="/library" className="mob-link" title="Library">
-          <Icon name="bookmark" size={20} /><span>Library</span>
-        </NavLink>
-        {user?.isAdmin && (
-          <NavLink to="/manage" className="mob-link" title="Manage">
-            <Icon name="gear" size={20} /><span>Manage</span>
-          </NavLink>
-        )}
-      </nav>
+      <MobileNav />
     </div>
   )
 }
