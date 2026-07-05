@@ -1910,7 +1910,10 @@ const metadataEnrich: NodeImpl = {
           episodes_total: meta.episodes,
           mal_status: meta.status,
           score: meta.score,
-          season: meta.season,
+          // MAL's "season" is the airing cour name ("fall"), not a season
+          // number — expose it as mal_season so it never lands in the numeric
+          // {season} slot of the library path template.
+          mal_season: meta.season,
           // Feed the import path template; only set when known so it doesn't
           // clobber an existing production_year.
           ...(meta.year != null ? { production_year: meta.year, year: meta.year } : {}),
@@ -2046,7 +2049,14 @@ function fillPathTemplate(tpl: string, item: FlowItem): string {
 function sanitizeSegments(rel: string): string {
   return rel
     .split('/')
-    .map((seg) => seg.replace(/[<>:"\\|?*\x00-\x1f]/g, '').replace(/\s+/g, ' ').trim().replace(/\.+$/, ''))
+    .map((seg) =>
+      seg
+        .replace(/[<>:"\\|?*\x00-\x1f]/g, '')
+        .replace(/\(\s*\)/g, '') // drop empty "()" left by a missing {production_year}
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\.+$/, ''),
+    )
     .filter(Boolean)
     .join('/')
 }
@@ -2095,7 +2105,9 @@ const libraryImport: NodeImpl = {
   async run(inputs, config, ctx) {
     const fileField = str(config, 'fileField', 'file_path')
     const root = str(config, 'libraryRoot', '') || LIBRARY_DIR()
-    const tpl = str(config, 'pathTemplate', '{show}/{show} - S{season:2}E{torrent_episode:2}')
+    // Keep this fallback identical to the spec's pathTemplate default so a node
+    // that doesn't set it still gets the full Jellyfin layout.
+    const tpl = str(config, 'pathTemplate', '{show} ({production_year})/Season {season:2}/{show} - S{season:2}E{torrent_episode:2}')
     const showField = str(config, 'showField', 'title')
     const defaultSeason = num(config, 'defaultSeason', 1)
     const method = str(config, 'method', 'hardlink')
