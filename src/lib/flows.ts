@@ -7,7 +7,7 @@ import { fetchAuth } from './api'
 export interface ConfigField {
   key: string
   label: string
-  kind: 'text' | 'number' | 'select' | 'boolean'
+  kind: 'text' | 'number' | 'select' | 'boolean' | 'password'
   options?: { value: string; label: string }[]
   default?: string | number | boolean
   help?: string

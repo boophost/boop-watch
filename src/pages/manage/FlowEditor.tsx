@@ -78,7 +78,9 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
   const configLines = spec.config
     .map((f) => {
       const v = data.config[f.key] ?? f.default
-      return v === undefined || v === '' ? null : `${f.label}: ${String(v)}`
+      if (v === undefined || v === '') return null
+      // Secrets never render on the canvas.
+      return `${f.label}: ${f.kind === 'password' ? '••••••' : String(v)}`
     })
     .filter(Boolean)
     .slice(0, 3)
@@ -94,15 +96,14 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
       }`}
     >
       <div className="relative flex items-center gap-2 border-b border-border px-3 py-2">
-        {spec.inputs.map((port) => (
+        {spec.inputs.length === 1 ? (
           <Handle
-            key={port.id}
-            id={port.id}
+            id={spec.inputs[0].id}
             type="target"
             position={Position.Left}
             className="!size-2.5 !border-border !bg-muted-foreground"
           />
-        ))}
+        ) : null}
         <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[spec.category]}`} />
         <span className="truncate text-xs font-medium">{spec.label}</span>
         {report?.status === 'ok' ? (
@@ -111,6 +112,22 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
           <AlertTriangle className="ml-auto size-3.5 shrink-0 text-destructive" />
         ) : null}
       </div>
+      {spec.inputs.length > 1 ? (
+        <div className="border-b border-border py-1">
+          {spec.inputs.map((port) => (
+            <div key={port.id} className="relative flex items-center gap-2 px-3 py-0.5">
+              <Handle
+                id={port.id}
+                type="target"
+                position={Position.Left}
+                className="!size-2.5 !border-border !bg-muted-foreground"
+                style={{ top: '50%' }}
+              />
+              <span className="text-[10px] text-muted-foreground">{port.label}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {configLines.length > 0 ? (
         <div className="space-y-0.5 border-b border-border px-3 py-1.5">
           {configLines.map((line) => (
@@ -659,7 +676,14 @@ function FlowEditorInner() {
                           <Input
                             id={`cfg-${f.key}`}
                             className="h-8"
-                            type={f.kind === 'number' ? 'number' : 'text'}
+                            type={
+                              f.kind === 'number'
+                                ? 'number'
+                                : f.kind === 'password'
+                                  ? 'password'
+                                  : 'text'
+                            }
+                            autoComplete={f.kind === 'password' ? 'new-password' : undefined}
                             value={String(value)}
                             onChange={(e) =>
                               setConfigValue(

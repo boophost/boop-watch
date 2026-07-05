@@ -38,7 +38,7 @@ function db() {
       );
     `)
     ready = true
-    seedIfEmpty(instance)
+    seedFlows(instance)
   }
   return instance
 }
@@ -70,16 +70,51 @@ const SEED_GRAPH: FlowGraph = {
   ],
 }
 
-function seedIfEmpty(instance: ReturnType<typeof getDb>) {
+// Indexer titles that Jellyfin doesn't have → torrent search → qBittorrent
+// (added paused for review). Ends at qbit; never touches the portal DB.
+const MISSING_VIDEOS_GRAPH: FlowGraph = {
+  nodes: [
+    { id: 'idx', type: 'source.indexer', position: { x: 0, y: 0 }, config: {} },
+    { id: 'por', type: 'source.portal', position: { x: 0, y: 220 }, config: { type: '' } },
+    { id: 'diff', type: 'combine.diff', position: { x: 300, y: 90 }, config: { fieldA: 'title', fieldB: 'name', fieldB2: 'original_title' } },
+    { id: 'tpl', type: 'transform.template', position: { x: 600, y: 40 }, config: { field: 'torrent_query', template: '{title} 1080p' } },
+    { id: 'lim', type: 'filter.limit', position: { x: 900, y: 40 }, config: { count: 3 } },
+    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1200, y: 40 }, config: { provider: 'animetosho', queryField: 'torrent_query', preferBatch: true, maxItems: 5 } },
+    { id: 'qb', type: 'sink.qbittorrent', position: { x: 1500, y: 90 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: true } },
+  ],
+  edges: [
+    { id: 'e1', source: 'idx', sourceHandle: 'items', target: 'diff', targetHandle: 'a' },
+    { id: 'e2', source: 'por', sourceHandle: 'items', target: 'diff', targetHandle: 'b' },
+    { id: 'e3', source: 'diff', sourceHandle: 'missing', target: 'tpl', targetHandle: 'in' },
+    { id: 'e4', source: 'tpl', sourceHandle: 'items', target: 'lim', targetHandle: 'in' },
+    { id: 'e5', source: 'lim', sourceHandle: 'items', target: 'tor', targetHandle: 'in' },
+    { id: 'e6', source: 'tor', sourceHandle: 'found', target: 'qb', targetHandle: 'in' },
+  ],
+}
+
+// Seeds are versioned via SQLite's user_version so later releases can add
+// flows to existing databases without re-creating deleted ones.
+const SEED_VERSION = 2
+
+function seedFlows(instance: ReturnType<typeof getDb>) {
+  const insert = instance.prepare('INSERT INTO flows (name, description, graph) VALUES (?, ?, ?)')
   const count = (instance.prepare('SELECT COUNT(*) AS c FROM flows').get() as { c: number }).c
-  if (count > 0) return
-  instance
-    .prepare('INSERT INTO flows (name, description, graph) VALUES (?, ?, ?)')
-    .run(
+  const version = instance.pragma('user_version', { simple: true }) as number
+  if (count === 0 && version < 1) {
+    insert.run(
       'Image sourcing',
       'How portal artwork is filled in: Jellyfin first, then the indexer catalog, then Jikan. Mirrors the built-in sync.',
       JSON.stringify(SEED_GRAPH),
     )
+  }
+  if (version < 2) {
+    insert.run(
+      'Missing videos',
+      'Finds indexer titles with no matching portal item, searches a torrent index, and queues the best match in qBittorrent (paused).',
+      JSON.stringify(MISSING_VIDEOS_GRAPH),
+    )
+  }
+  if (version < SEED_VERSION) instance.pragma(`user_version = ${SEED_VERSION}`)
 }
 
 export function listFlows(): FlowSummary[] {
