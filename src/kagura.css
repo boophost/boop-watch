@@ -475,7 +475,9 @@
      scope, so the page root carries both classes. */
   & .topbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 520px) minmax(0, 1fr);
     gap: 14px; align-items: center; padding: 12px 22px; border-bottom: 1px solid var(--border);
+    position: relative; z-index: 60;
     background: oklch(0.145 0.008 285 / 70%); backdrop-filter: blur(10px); }
+  & .topbar .umenu { grid-column: 3; justify-self: end; }
   & .topbar .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px;
     font-weight: 600; font-size: 14px; color: var(--fg); min-width: 0; }
   & .topbar .brand-mark { width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
