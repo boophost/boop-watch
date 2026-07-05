@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState } from 'react'
-import type { Session } from '@supabase/supabase-js'
+import type { Session, UserIdentity } from '@supabase/supabase-js'
 import { supabase } from './supabase'
 
 interface User {
@@ -7,6 +7,7 @@ interface User {
   id: string
   isAdmin: boolean
   avatarUrl: string | null
+  identities: UserIdentity[]
 }
 
 // Emails granted admin regardless of Supabase metadata. Admin is only enforced
@@ -28,6 +29,7 @@ function toUser(session: Session | null): User | null {
       session.user.app_metadata?.role === 'admin' ||
       ADMIN_EMAILS.includes(email.toLowerCase()),
     avatarUrl: meta.avatar_url || meta.picture || null,
+    identities: session.user.identities ?? [],
   }
 }
 
@@ -37,6 +39,8 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>
   signup: (email: string, password: string) => Promise<void>
   loginWithProvider: (provider: 'google' | 'discord') => Promise<void>
+  linkProvider: (provider: 'google' | 'discord') => Promise<void>
+  unlinkProvider: (identity: UserIdentity) => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -46,6 +50,8 @@ const AuthContext = createContext<AuthContextType>({
   login: async () => {},
   signup: async () => {},
   loginWithProvider: async () => {},
+  linkProvider: async () => {},
+  unlinkProvider: async () => {},
   logout: async () => {},
 })
 
@@ -95,13 +101,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (error) throw error
   }
 
+  const linkProvider = async (provider: 'google' | 'discord') => {
+    const { error } = await supabase.auth.linkIdentity({
+      provider,
+      options: {
+        redirectTo: window.location.origin + '/profile',
+      },
+    })
+    if (error) throw error
+  }
+
+  const unlinkProvider = async (identity: UserIdentity) => {
+    const { error } = await supabase.auth.unlinkIdentity(identity)
+    if (error) throw error
+    const { data: { session } } = await supabase.auth.getSession()
+    setUser(toUser(session))
+  }
+
   const logout = async () => {
     await supabase.auth.signOut()
     setUser(null)
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, signup, loginWithProvider, logout }}>
+    <AuthContext.Provider
+      value={{ user, loading, login, signup, loginWithProvider, linkProvider, unlinkProvider, logout }}
+    >
       {children}
     </AuthContext.Provider>
   )
