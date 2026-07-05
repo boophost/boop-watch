@@ -70,25 +70,29 @@ const SEED_GRAPH: FlowGraph = {
   ],
 }
 
-// Indexer titles that Jellyfin doesn't have → torrent search → qBittorrent
-// (added paused for review). Ends at qbit; never touches the portal DB.
+// Indexer titles that Jellyfin doesn't have → look up airing status → torrent
+// search (season pack if finished, recent episodes if airing; 1080p, dual audio
+// preferred, seeded) → qBittorrent. Ends at qbit; never touches the portal DB.
 const MISSING_VIDEOS_GRAPH: FlowGraph = {
   nodes: [
     { id: 'idx', type: 'source.indexer', position: { x: 0, y: 0 }, config: {} },
-    { id: 'por', type: 'source.portal', position: { x: 0, y: 220 }, config: { type: '' } },
-    { id: 'diff', type: 'combine.diff', position: { x: 300, y: 90 }, config: { fieldA: 'title', fieldB: 'name', fieldB2: 'original_title' } },
-    { id: 'tpl', type: 'transform.template', position: { x: 600, y: 40 }, config: { field: 'torrent_query', template: '{title} 1080p' } },
-    { id: 'lim', type: 'filter.limit', position: { x: 900, y: 40 }, config: { count: 3 } },
-    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1200, y: 40 }, config: { provider: 'animetosho', queryField: 'torrent_query', preferBatch: true, maxItems: 5 } },
-    { id: 'qb', type: 'sink.qbittorrent', position: { x: 1500, y: 90 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
+    { id: 'por', type: 'source.portal', position: { x: 0, y: 240 }, config: { type: '' } },
+    { id: 'diff', type: 'combine.diff', position: { x: 280, y: 110 }, config: { fieldA: 'title', fieldB: 'name', fieldB2: 'original_title' } },
+    { id: 'lim', type: 'filter.limit', position: { x: 560, y: 60 }, config: { count: 5 } },
+    { id: 'st', type: 'enrich.anime-status', position: { x: 820, y: 60 }, config: { malField: 'mal_id', maxItems: 0 } },
+    { id: 'tpl', type: 'transform.template', position: { x: 1100, y: 20 }, config: { field: 'torrent_query', template: '{title} 1080p' } },
+    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1380, y: 20 }, config: { provider: 'animetosho', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, minSeeders: 1, minTitleMatch: 0.5, maxEpisodes: 26, maxItems: 0 } },
+    { id: 'qb', type: 'sink.qbittorrent', position: { x: 1680, y: 90 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
   ],
   edges: [
     { id: 'e1', source: 'idx', sourceHandle: 'items', target: 'diff', targetHandle: 'a' },
     { id: 'e2', source: 'por', sourceHandle: 'items', target: 'diff', targetHandle: 'b' },
-    { id: 'e3', source: 'diff', sourceHandle: 'missing', target: 'tpl', targetHandle: 'in' },
-    { id: 'e4', source: 'tpl', sourceHandle: 'items', target: 'lim', targetHandle: 'in' },
-    { id: 'e5', source: 'lim', sourceHandle: 'items', target: 'tor', targetHandle: 'in' },
-    { id: 'e6', source: 'tor', sourceHandle: 'found', target: 'qb', targetHandle: 'in' },
+    { id: 'e3', source: 'diff', sourceHandle: 'missing', target: 'lim', targetHandle: 'in' },
+    { id: 'e4', source: 'lim', sourceHandle: 'items', target: 'st', targetHandle: 'in' },
+    { id: 'e5', source: 'st', sourceHandle: 'out', target: 'tpl', targetHandle: 'in' },
+    { id: 'e6', source: 'st', sourceHandle: 'unknown', target: 'tpl', targetHandle: 'in' },
+    { id: 'e7', source: 'tpl', sourceHandle: 'items', target: 'tor', targetHandle: 'in' },
+    { id: 'e8', source: 'tor', sourceHandle: 'found', target: 'qb', targetHandle: 'in' },
   ],
 }
 
@@ -110,7 +114,7 @@ function seedFlows(instance: ReturnType<typeof getDb>) {
   if (version < 2) {
     insert.run(
       'Missing videos',
-      'Finds indexer titles with no matching portal item, searches a torrent index, and queues the best match in qBittorrent (paused).',
+      'Finds indexer titles with no matching portal item, picks a 1080p dual-audio release (season pack if finished, recent episodes if airing) with live seeders, and queues it in qBittorrent.',
       JSON.stringify(MISSING_VIDEOS_GRAPH),
     )
   }
