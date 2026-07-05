@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ReactFlow,
+  ReactFlowProvider,
   Background,
   Controls,
   Handle,
   Position,
   useNodesState,
   useEdgesState,
+  useReactFlow,
   addEdge,
   type Node,
   type Edge,
@@ -19,11 +21,13 @@ import {
   AlertTriangle,
   Check,
   ChevronLeft,
+  Copy,
   Loader2,
   Play,
   Plus,
   Save,
   Trash2,
+  Unlink,
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -179,7 +183,15 @@ function fromRF(nodes: RFNode[], edges: RFEdge[]): FlowGraph {
 
 // ---- editor page ------------------------------------------------------------
 
-export default function FlowEditor() {
+/** Right-click menu state: where it opened and what it targets. */
+interface MenuState {
+  kind: 'pane' | 'node' | 'edge'
+  x: number
+  y: number
+  targetId?: string
+}
+
+function FlowEditorInner() {
   const { flowId } = useParams<{ flowId: string }>()
   const navigate = useNavigate()
   const id = Number(flowId)
@@ -193,10 +205,12 @@ export default function FlowEditor() {
   const [report, setReport] = useState<RunReport | null>(null)
   const [error, setError] = useState('')
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [menu, setMenu] = useState<MenuState | null>(null)
 
   const [nodes, setNodes, onNodesChange] = useNodesState<RFNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<RFEdge>([])
   const addAt = useRef(0)
+  const { screenToFlowPosition } = useReactFlow()
 
   useEffect(() => {
     if (!Number.isFinite(id)) {
@@ -238,14 +252,14 @@ export default function FlowEditor() {
     [setEdges],
   )
 
-  const addNode = (spec: NodeSpec) => {
+  const addNode = (spec: NodeSpec, position?: { x: number; y: number }) => {
     const n = addAt.current++
     setNodes((ns) => [
-      ...ns,
+      ...ns.map((node) => ({ ...node, selected: false })),
       {
         id: `n${Date.now().toString(36)}${n}`,
-        type: 'flow',
-        position: { x: 80 + n * 24, y: 80 + n * 24 },
+        type: 'flow' as const,
+        position: position ?? { x: 80 + n * 24, y: 80 + n * 24 },
         data: {
           specType: spec.type,
           config: Object.fromEntries(
@@ -256,14 +270,49 @@ export default function FlowEditor() {
       },
     ])
     setPaletteOpen(false)
+    setMenu(null)
     setDirty(true)
   }
 
-  const removeSelected = () => {
-    if (!selected) return
-    setNodes((ns) => ns.filter((n) => n.id !== selected.id))
-    setEdges((es) => es.filter((e) => e.source !== selected.id && e.target !== selected.id))
+  const removeNode = (nodeId: string) => {
+    setNodes((ns) => ns.filter((n) => n.id !== nodeId))
+    setEdges((es) => es.filter((e) => e.source !== nodeId && e.target !== nodeId))
+    setMenu(null)
     setDirty(true)
+  }
+
+  const duplicateNode = (nodeId: string) => {
+    const src = nodes.find((n) => n.id === nodeId)
+    if (!src) return
+    const n = addAt.current++
+    setNodes((ns) => [
+      ...ns.map((node) => ({ ...node, selected: false })),
+      {
+        ...src,
+        id: `n${Date.now().toString(36)}${n}`,
+        position: { x: src.position.x + 32, y: src.position.y + 32 },
+        data: { specType: src.data.specType, config: { ...src.data.config } },
+        selected: true,
+      },
+    ])
+    setMenu(null)
+    setDirty(true)
+  }
+
+  const removeEdge = (edgeId: string) => {
+    setEdges((es) => es.filter((e) => e.id !== edgeId))
+    setMenu(null)
+    setDirty(true)
+  }
+
+  const openMenu = (
+    event: MouseEvent | React.MouseEvent,
+    kind: MenuState['kind'],
+    targetId?: string,
+  ) => {
+    event.preventDefault()
+    setPaletteOpen(false)
+    setMenu({ kind, x: event.clientX, y: event.clientY, targetId })
   }
 
   const setConfigValue = (key: string, value: unknown) => {
@@ -452,6 +501,11 @@ export default function FlowEditor() {
             if (changes.some((c) => c.type === 'remove')) markDirty()
           }}
           onConnect={onConnect}
+          onPaneContextMenu={(e) => openMenu(e, 'pane')}
+          onNodeContextMenu={(e, node) => openMenu(e, 'node', node.id)}
+          onEdgeContextMenu={(e, edge) => openMenu(e, 'edge', edge.id)}
+          onPaneClick={() => setMenu(null)}
+          onMoveStart={() => setMenu(null)}
           colorMode="dark"
           fitView
           proOptions={{ hideAttribution: true }}
@@ -459,6 +513,84 @@ export default function FlowEditor() {
           <Background gap={24} />
           <Controls className="!bottom-4 !left-4" showInteractive={false} />
         </ReactFlow>
+
+        {menu ? (
+          <>
+            <button
+              type="button"
+              className="fixed inset-0 z-30 cursor-default"
+              aria-label="Close context menu"
+              onClick={() => setMenu(null)}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                setMenu(null)
+              }}
+            />
+            <div
+              className="fixed z-40 w-56 rounded-md border border-border bg-popover p-1 shadow-md"
+              style={{
+                left: Math.min(menu.x, window.innerWidth - 232),
+                top: Math.min(menu.y, window.innerHeight - (menu.kind === 'pane' ? 340 : 120)),
+              }}
+              role="menu"
+            >
+              {menu.kind === 'pane' ? (
+                <div className="max-h-80 overflow-auto">
+                  <p className="px-2 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Add node here
+                  </p>
+                  {grouped.map((g) =>
+                    g.specs.map((s) => (
+                      <button
+                        key={s.type}
+                        type="button"
+                        role="menuitem"
+                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                        onClick={() =>
+                          addNode(s, screenToFlowPosition({ x: menu.x, y: menu.y }))
+                        }
+                      >
+                        <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
+                        {s.label}
+                      </button>
+                    )),
+                  )}
+                </div>
+              ) : menu.kind === 'node' ? (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                    onClick={() => duplicateNode(menu.targetId!)}
+                  >
+                    <Copy className="size-3.5 text-muted-foreground" />
+                    Duplicate node
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-destructive hover:bg-muted"
+                    onClick={() => removeNode(menu.targetId!)}
+                  >
+                    <Trash2 className="size-3.5" />
+                    Delete node
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-destructive hover:bg-muted"
+                  onClick={() => removeEdge(menu.targetId!)}
+                >
+                  <Unlink className="size-3.5" />
+                  Delete connection
+                </button>
+              )}
+            </div>
+          </>
+        ) : null}
 
         {selected && selectedSpec ? (
           <aside className="absolute inset-x-0 bottom-0 z-20 max-h-[45%] overflow-auto border-t border-border bg-card/95 backdrop-blur md:inset-x-auto md:inset-y-0 md:right-0 md:max-h-none md:w-80 md:border-l md:border-t-0">
@@ -472,7 +604,7 @@ export default function FlowEditor() {
                 size="sm"
                 className="h-7 px-2"
                 aria-label="Delete node"
-                onClick={removeSelected}
+                onClick={() => removeNode(selected.id)}
               >
                 <Trash2 className="size-3.5" />
               </Button>
@@ -592,5 +724,15 @@ export default function FlowEditor() {
         ) : null}
       </div>
     </div>
+  )
+}
+
+// useReactFlow (screenToFlowPosition for the context menu) needs a provider
+// above the component that calls it.
+export default function FlowEditor() {
+  return (
+    <ReactFlowProvider>
+      <FlowEditorInner />
+    </ReactFlowProvider>
   )
 }
