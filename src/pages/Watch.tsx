@@ -33,15 +33,12 @@ function PlayerShell({ children }: { children: ReactNode }) {
   )
 }
 
-// Main player header: brand (icon-only on phones) · centered search · account
-// crumb. The series back-link + episode title live in the .subbar row below it.
+// Main player header: centered search · account crumb. The brand lives in the
+// side nav now, so the topbar drops it to avoid a duplicate wordmark. The series
+// back-link + episode title live in the .subbar row below it.
 function PlayerTopbar() {
   return (
     <header className="topbar">
-      <Link className="brand" to="/">
-        <span className="brand-mark">B</span>
-        <span className="label">boopurnoes <span className="sub">· watch</span></span>
-      </Link>
       <SearchBar />
       <UserCrumb />
     </header>
