@@ -117,6 +117,27 @@
   & .chrome .crumb:hover { color: var(--fg); }
   & .chrome .crumb-avatar { padding: 0; border-radius: 999px; transition: box-shadow .14s ease; }
   & .chrome .crumb-avatar:hover { box-shadow: 0 0 0 2px var(--border-strong); }
+  /* User menu dropdown (avatar in the header opens a menu) */
+  & .umenu { position: relative; display: inline-flex; }
+  & .umenu > summary { list-style: none; cursor: pointer; }
+  & .umenu > summary::-webkit-details-marker { display: none; }
+  & .umenu[open] > summary.crumb-avatar { box-shadow: 0 0 0 2px var(--accent); }
+  & .umenu-pop {
+    position: absolute; top: calc(100% + 10px); right: 0; min-width: 220px; z-index: 140;
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 11px; padding: 6px;
+    box-shadow: 0 30px 80px -20px oklch(0 0 0 / 75%);
+  }
+  & .umenu-head { display: flex; align-items: center; gap: 10px; padding: 8px 10px 10px; }
+  & .umenu-head .umenu-name { font-size: 12.5px; color: var(--fg-muted); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  & .umenu-sep { height: 1px; background: var(--border); margin: 6px 4px; }
+  & .umenu-pop .popitem { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    padding: 8px 10px; border: none; border-radius: 7px; background: transparent; color: var(--fg);
+    font: 13px var(--font-sans); cursor: pointer; }
+  & .umenu-pop .popitem:hover { background: var(--bg-hover); }
+  & .umenu-pop .popitem .icon { color: var(--fg-subtle); flex: none; }
+  & .umenu-pop .popitem:hover .icon { color: var(--fg); }
+  & .umenu-pop .pi-main { flex: 1; min-width: 0; }
   & .avatar-img { border-radius: 999px; object-fit: cover; display: block; }
   & .avatar-fallback {
     display: inline-flex; align-items: center; justify-content: center; border-radius: 999px;
