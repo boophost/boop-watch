@@ -94,10 +94,10 @@ export default function PersonalLibrary() {
             <div className="empty"><p>No watch history.</p></div>
           ) : (
             <div className="grid">
-              {historyItems.map(it => {
+              {historyItems.filter(it => it.watched || (it.duration > 0 && (it.position / it.duration) > 0.05)).map(it => {
                 const data = historyDetails[it.id]
                 const title = data ? (data.isEpisode ? data.back.label : data.title) : 'Loading...'
-                const epText = data && data.isEpisode ? (data.epNum ? `Episode ${data.epNum}: ${data.title}` : data.title) : 'Movie'
+                const epText = data && data.isEpisode ? (data.epNum || 'Episode') : 'Movie'
                 const pct = it.watched ? 100 : (it.duration > 0 ? Math.min(100, (it.position / it.duration) * 100) : 0)
 
                 return (
