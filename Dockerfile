@@ -22,12 +22,14 @@ RUN npm run build:server
 
 # Final production stage
 FROM node:20-alpine
-RUN apk add --no-cache python3 make g++
+# ffmpeg/ffprobe are used by the library-import flow nodes (probe + subtitle
+# extraction). python3/make/g++ are only needed to rebuild better-sqlite3.
+RUN apk add --no-cache python3 make g++ ffmpeg
 WORKDIR /app
 COPY --from=build-frontend /app/dist ./dist
 COPY --from=build-backend /app/dist-server ./dist-server
 COPY --from=deps /app/package*.json ./
-# Use npm ci from deps layer without dev dependencies
+# Use npm ci from deps layer without dev dependencies (keep ffmpeg)
 RUN npm ci --omit=dev && apk del python3 make g++
 EXPOSE 3000
 ENV PORT=3000
