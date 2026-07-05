@@ -12,6 +12,7 @@ import {
 } from './jikan.js'
 import * as seriesDb from './db.js'
 import { publicRouter } from './publicRoutes.js'
+import { flowRouter } from './flowRoutes.js'
 import { warmScope } from './jellyfin.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -48,6 +49,7 @@ async function requireAuth(
       if (resp.ok) {
         const user = await resp.json()
         res.locals.username = user.id
+        res.locals.email = typeof user.email === 'string' ? user.email : ''
         return next()
       }
     } catch (e) {
@@ -62,11 +64,36 @@ async function requireAuth(
   try {
     const payload = jwt.verify(token, JWT_SECRET) as { username?: string, email?: string }
     res.locals.username = payload.email || payload.username || 'admin'
+    res.locals.email = payload.email || ''
     next()
   } catch {
     res.status(401).json({ error: 'Unauthorized' })
   }
 }
+
+// Same allowlist idea as ADMIN_EMAILS in src/lib/AuthContext.tsx, but enforced
+// server-side for the APIs that can mutate the portal or hammer upstreams.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? 'admin@example.com')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean)
+
+function requireAdmin(
+  _req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+) {
+  const email = String(res.locals.email ?? '').toLowerCase()
+  if (!email || !ADMIN_EMAILS.includes(email)) {
+    res.status(403).json({ error: 'Admin only' })
+    return
+  }
+  next()
+}
+
+// Flow editor APIs (admin-only: flows run external fetches + portal writes).
+app.use('/api/flows', requireAuth, requireAdmin)
+app.use(flowRouter)
 
 app.get('/api/me', requireAuth, (_req, res) => {
   res.json({ username: res.locals.username as string })
@@ -253,7 +280,9 @@ if (IS_PROD) {
   app.use(express.static(distPath))
   app.use((req, res) => {
     if (req.method === 'GET' && !req.path.startsWith('/api')) {
-      res.sendFile(path.join(distPath, 'index.html'))
+      // root-relative so send()'s dotfile check doesn't 404 when the checkout
+      // itself lives under a dot-directory (e.g. a .claude worktree)
+      res.sendFile('index.html', { root: distPath })
       return
     }
     res.status(404).end()
