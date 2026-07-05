@@ -835,26 +835,39 @@ const torrentSearch: NodeImpl = {
       const titleNorm = norm(showTitle)
       const qTokens = significantTokens(showTitle + ' ' + q)
 
+      // Authoritative AniDB season id (set by the Anime status node from the
+      // MAL id). AnimeTosho tags every release with series.anidb_aid, so this
+      // pins the exact season — the only reliable way to tell e.g. Frieren S1
+      // (aid 17617) from S2 (aid 18886), which share a title.
+      const knownAid = Number(item.anidb_id)
+      const haveAid = Number.isFinite(knownAid) && knownAid > 0
+
       try {
         const raw =
           provider === 'tsukihime'
             ? await tsukiCandidates(q, base)
             : await toshoCandidates(q, base)
 
-        // Anchor on the single most title-relevant release, then trust
-        // AnimeTosho's canonical AniDB id to gather that exact show's other
-        // releases (English + romaji variants), discarding look-alikes.
-        let best = { c: null as Candidate | null, rel: 0 }
-        for (const c of raw) {
-          const rel = relevanceScore(c, titleNorm, qTokens)
-          if (rel > best.rel) best = { c, rel }
-        }
-        let relevant: Candidate[] = []
-        if (best.c && best.rel >= minTitleMatch) {
+        let relevant: Candidate[]
+        if (haveAid && raw.some((c) => c.aid === knownAid)) {
+          // Exact season match — discard everything else, including
+          // higher-seeded releases of adjacent seasons.
+          relevant = raw.filter((c) => c.aid === knownAid)
+        } else {
+          // No AniDB id (unknown status, or TsukiHime provider): anchor on the
+          // most title-relevant release, then trust its AniDB id to gather that
+          // show's other releases (English + romaji variants).
+          let best = { c: null as Candidate | null, rel: 0 }
+          for (const c of raw) {
+            const rel = relevanceScore(c, titleNorm, qTokens)
+            if (rel > best.rel) best = { c, rel }
+          }
           relevant =
-            best.c.aid != null
-              ? raw.filter((c) => c.aid === best.c!.aid)
-              : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
+            best.c && best.rel >= minTitleMatch
+              ? best.c.aid != null
+                ? raw.filter((c) => c.aid === best.c!.aid)
+                : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
+              : []
         }
         const cands = relevant.filter((c) => passesFilters(c, opts))
 
@@ -948,6 +961,9 @@ const animeStatus: NodeImpl = {
           total_episodes: a.total_episodes ?? null,
           is_movie: isMovie,
           want_mode: wantMode,
+          // Authoritative AniDB id for this exact season — lets torrent search
+          // disambiguate seasons that share a title (Frieren S1 vs S2).
+          anidb_id: a.anidb != null ? Number(a.anidb) : null,
         })
       } catch {
         // Unknown status → default to batch downstream, but route separately.
