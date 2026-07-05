@@ -262,6 +262,18 @@ export default function Watch() {
     if (p && activeSeg) { p.currentTime = activeSeg.end; setActiveSeg(null) }
   }
 
+  const goNext = () => {
+    if (!data || !data.nextId) return
+    const p = playerRef.current
+    if (p) {
+      const prog: Progress = { position: p.currentTime, duration: p.duration || 0, watched: true }
+      saveLocalProgress(data.id, prog)
+      if (user) saveAccountProgress(user.id, data.id, prog).catch(() => {})
+      setProgMap((m) => ({ ...m, [data.id]: prog }))
+    }
+    navigate(`/watch/${data.nextId}`)
+  }
+
   // Intro/outro marks on the timeline: a gradient with a stop pair per segment,
   // painted over the seek bar by kagura.css (.vds-time-slider::after).
   const segMarksStyle = useMemo(() => {
@@ -451,11 +463,18 @@ export default function Watch() {
               >
                 <MediaProvider />
                 <DefaultVideoLayout icons={defaultLayoutIcons} />
-                {activeSeg && (
-                  <button type="button" className="skip-btn" onClick={skip}>
-                    Skip {activeSeg.type === 'intro' ? 'Intro' : 'Outro'} <Icon name="next" size={15} />
-                  </button>
-                )}
+                <div className="vds-overlay-btns">
+                  {activeSeg && (
+                    <button type="button" className="skip-btn" onClick={skip}>
+                      Skip {activeSeg.type === 'intro' ? 'Intro' : 'Outro'} <Icon name="next" size={15} />
+                    </button>
+                  )}
+                  {data.nextId && (
+                    <button type="button" className="skip-btn" onClick={goNext}>
+                      Next Episode <Icon name="next" size={15} />
+                    </button>
+                  )}
+                </div>
               </MediaPlayer>
             )}
           </div>
