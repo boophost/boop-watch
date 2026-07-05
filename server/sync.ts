@@ -12,7 +12,7 @@ export async function syncJellyfinToPortal() {
     ParentId: COLLECTION_ID,
     Recursive: 'true',
     IncludeItemTypes: 'Movie,Series',
-    Fields: 'PrimaryImageAspectRatio,ProductionYear,Genres,OriginalTitle,DateCreated,PremiereDate,Overview,RunTimeTicks',
+    Fields: 'PrimaryImageAspectRatio,BackdropImageTags,ProductionYear,Genres,OriginalTitle,DateCreated,PremiereDate,Overview,RunTimeTicks',
   })
   
   const items = children.Items || []
@@ -57,7 +57,8 @@ export async function syncJellyfinToPortal() {
       series_id: it.SeriesId || null,
       series_name: it.SeriesName || null,
       image_url: imageUrl,
-      backdrop_url: backdropUrl
+      backdrop_url: backdropUrl,
+      has_backdrop: (it.BackdropImageTags && it.BackdropImageTags.length > 0) ? 1 : 0
     }
     upsertPortalItem(pItem)
 
@@ -81,7 +82,8 @@ export async function syncJellyfinToPortal() {
           series_id: it.Id,
           series_name: it.Name || null,
           image_url: epExisting?.image_url || null,
-          backdrop_url: epExisting?.backdrop_url || null
+          backdrop_url: epExisting?.backdrop_url || null,
+          has_backdrop: (ep.BackdropImageTags && ep.BackdropImageTags.length > 0) ? 1 : 0
         }
         upsertPortalItem(pEp)
       }

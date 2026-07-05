@@ -23,6 +23,7 @@ export interface PortalItem {
   series_name: string | null
   image_url: string | null
   backdrop_url: string | null
+  has_backdrop: number | null
 }
 
 let db: Database.Database | null = null
@@ -54,6 +55,11 @@ export function getPortalDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_portal_type ON portal_items(type);
     CREATE INDEX IF NOT EXISTS idx_portal_series_id ON portal_items(series_id);
   `)
+  try {
+    instance.exec('ALTER TABLE portal_items ADD COLUMN has_backdrop INTEGER DEFAULT 1');
+  } catch (e) {
+    // ignore if already exists
+  }
   db = instance
   return instance
 }
@@ -88,11 +94,11 @@ export function upsertPortalItem(item: PortalItem) {
     INSERT INTO portal_items (
       id, type, name, original_title, overview, date_created, premiere_date,
       production_year, genres, runtime_ticks, index_number, parent_index_number,
-      series_id, series_name, image_url, backdrop_url
+      series_id, series_name, image_url, backdrop_url, has_backdrop
     ) VALUES (
       @id, @type, @name, @original_title, @overview, @date_created, @premiere_date,
       @production_year, @genres, @runtime_ticks, @index_number, @parent_index_number,
-      @series_id, @series_name, @image_url, @backdrop_url
+      @series_id, @series_name, @image_url, @backdrop_url, @has_backdrop
     )
     ON CONFLICT(id) DO UPDATE SET
       type = excluded.type,
@@ -109,7 +115,8 @@ export function upsertPortalItem(item: PortalItem) {
       series_id = excluded.series_id,
       series_name = excluded.series_name,
       image_url = COALESCE(portal_items.image_url, excluded.image_url),
-      backdrop_url = COALESCE(portal_items.backdrop_url, excluded.backdrop_url)
+      backdrop_url = COALESCE(portal_items.backdrop_url, excluded.backdrop_url),
+      has_backdrop = excluded.has_backdrop
   `)
   stmt.run(item)
 }
