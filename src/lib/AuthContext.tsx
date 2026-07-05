@@ -9,15 +9,24 @@ interface User {
   avatarUrl: string | null
 }
 
+// Emails granted admin regardless of Supabase metadata. Admin is only enforced
+// client-side (the /manage guard + sidebar link), so this allowlist is the
+// source of truth alongside user_metadata.admin / app_metadata.role.
+const ADMIN_EMAILS = ['admin@example.com']
+
 // Google and Discord (via Supabase OAuth) both land the profile photo under
 // one of these user_metadata keys depending on provider.
 function toUser(session: Session | null): User | null {
   if (!session?.user) return null
   const meta = session.user.user_metadata || {}
+  const email = session.user.email ?? ''
   return {
-    username: session.user.email ?? '',
+    username: email,
     id: session.user.id,
-    isAdmin: meta.admin === true || session.user.app_metadata?.role === 'admin',
+    isAdmin:
+      meta.admin === true ||
+      session.user.app_metadata?.role === 'admin' ||
+      ADMIN_EMAILS.includes(email.toLowerCase()),
     avatarUrl: meta.avatar_url || meta.picture || null,
   }
 }
