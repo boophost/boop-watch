@@ -8,9 +8,9 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
-import { listSeries } from './db.js'
+import { listSeries, upsertSeriesMetadata } from './db.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
-import { searchAnime, pickPosterUrl } from './jikan.js'
+import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
 
 const execFileP = promisify(execFile)
@@ -1803,6 +1803,92 @@ const fetchSubs: NodeImpl = {
   },
 }
 
+const metadataEnrich: NodeImpl = {
+  spec: {
+    type: 'enrich.metadata',
+    label: 'Fetch metadata (MAL)',
+    category: 'enrich',
+    description:
+      'Pulls full MyAnimeList metadata by mal_id (titles, year, episodes, status, score, studios, genres) into our own catalog DB, and sets those fields on the item (e.g. production_year for the import path). Rate-limited ~1 item/sec.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'enriched', label: 'enriched' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      { key: 'malField', label: 'MAL id field', kind: 'text', default: 'mal_id' },
+      { key: 'writeDb', label: 'Write to catalog DB', kind: 'boolean', default: true, help: 'Upsert the metadata into our series catalog (the Jellyfin-independent source of truth).' },
+      { key: 'maxItems', label: 'Max lookups', kind: 'number', default: 25, help: '0 = unlimited. Jikan is rate-limited.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const malField = str(config, 'malField', 'mal_id')
+    const writeDb = bool(config, 'writeDb', true)
+    const maxItems = num(config, 'maxItems', 25)
+    const items = allInputs(inputs)
+    const enriched: FlowItem[] = []
+    const skipped: FlowItem[] = []
+    let looked = 0
+    for (const item of items) {
+      const mal = Number(item[malField])
+      if (!Number.isFinite(mal) || mal <= 0 || (maxItems > 0 && looked >= maxItems)) {
+        skipped.push(item)
+        continue
+      }
+      looked++
+      try {
+        const a = await fetchAnimeFull(mal)
+        const studios = JSON.stringify((a.studios ?? []).map((s) => s.name))
+        const genres = JSON.stringify((a.genres ?? []).map((g) => g.name))
+        const meta = {
+          title_english: a.title_english ?? null,
+          title_japanese: a.title_japanese ?? null,
+          type: a.type ?? null,
+          episodes: a.episodes ?? null,
+          status: a.status ?? null,
+          score: a.score ?? null,
+          year: a.year ?? null,
+          season: a.season ?? null,
+          aired: a.aired?.string ?? null,
+          studios,
+          genres,
+        }
+        if (writeDb && !ctx.dryRun) {
+          upsertSeriesMetadata(
+            { mal_id: mal, title: a.title, synopsis: a.synopsis ?? null, image_url: pickPosterUrl(a as unknown as Parameters<typeof pickPosterUrl>[0]), url: a.url },
+            meta,
+          )
+        }
+        enriched.push({
+          ...item,
+          title_english: meta.title_english,
+          title_japanese: meta.title_japanese,
+          mal_type: meta.type,
+          episodes_total: meta.episodes,
+          mal_status: meta.status,
+          score: meta.score,
+          season: meta.season,
+          // Feed the import path template; only set when known so it doesn't
+          // clobber an existing production_year.
+          ...(meta.year != null ? { production_year: meta.year, year: meta.year } : {}),
+          studios,
+          genres,
+        })
+      } catch (e) {
+        ctx.notes.push(`metadata lookup failed for mal ${mal}: ${e instanceof Error ? e.message : String(e)}`)
+        skipped.push(item)
+      }
+      await new Promise((r) => setTimeout(r, 1000)) // Jikan rate limit
+    }
+    ctx.notes.push(
+      ctx.dryRun
+        ? `dry run — resolved ${enriched.length} metadata record(s)${writeDb ? ' (not written)' : ''}`
+        : `enriched ${enriched.length}${writeDb ? ' (written to catalog)' : ''}, skipped ${skipped.length}`,
+    )
+    return { enriched, skipped }
+  },
+}
+
 const qbittorrentSink: NodeImpl = {
   spec: {
     type: 'sink.qbittorrent',
@@ -2184,6 +2270,7 @@ const IMPLS: NodeImpl[] = [
   mediaProbe,
   extractSubs,
   fetchSubs,
+  metadataEnrich,
   dedupe,
   limit,
   indexerMatch,
