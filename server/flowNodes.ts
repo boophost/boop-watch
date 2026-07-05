@@ -1689,6 +1689,120 @@ const extractSubs: NodeImpl = {
   },
 }
 
+// External subtitle fallback via Jimaku (jimaku.cc) — for releases with no good
+// embedded sub in the target language. Keys on AniList id when available, else a
+// title query. Needs JIMAKU_API_KEY; without it the node passes items straight
+// to "missed" so the graph can route them elsewhere.
+const JIMAKU_URL = process.env.JIMAKU_URL ?? 'https://jimaku.cc/api'
+
+const fetchSubs: NodeImpl = {
+  spec: {
+    type: 'enrich.fetch-subs',
+    label: 'Fetch subtitles (Jimaku)',
+    category: 'enrich',
+    description:
+      'Downloads an external subtitle from Jimaku for the item’s episode when the release has none in the wanted language. Sets subtitle_path/lang/codec like the extractor, so import handles it identically. Needs JIMAKU_API_KEY.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'found', label: 'found' },
+      { id: 'missed', label: 'missed' },
+    ],
+    config: [
+      { key: 'apiKey', label: 'Jimaku API key', kind: 'password', default: '', help: 'Empty = JIMAKU_API_KEY env.' },
+      { key: 'baseUrl', label: 'API base URL', kind: 'text', default: '', help: 'Empty = jimaku.cc default.' },
+      { key: 'anilistField', label: 'AniList id field', kind: 'text', default: 'anilist_id', help: 'Preferred lookup key when present.' },
+      { key: 'queryField', label: 'Title query field', kind: 'text', default: 'title', help: 'Fallback lookup when no AniList id.' },
+      { key: 'episodeField', label: 'Episode field', kind: 'text', default: 'torrent_episode' },
+      { key: 'lang', label: 'Language tag', kind: 'text', default: 'eng', help: 'Recorded as subtitle_lang on the sidecar.' },
+      { key: 'outDir', label: 'Output dir', kind: 'text', default: '', help: 'Empty = DATA_DIR/work.' },
+      { key: 'maxItems', label: 'Max lookups', kind: 'number', default: 25, help: '0 = unlimited.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const apiKey = str(config, 'apiKey', '') || process.env.JIMAKU_API_KEY || ''
+    const base = (str(config, 'baseUrl', '') || JIMAKU_URL).replace(/\/$/, '')
+    const anilistField = str(config, 'anilistField', 'anilist_id')
+    const queryField = str(config, 'queryField', 'title')
+    const episodeField = str(config, 'episodeField', 'torrent_episode')
+    const lang = str(config, 'lang', 'eng')
+    const outDir = str(config, 'outDir', '') || path.join(WORK_DIR(), 'work')
+    const maxItems = num(config, 'maxItems', 25)
+
+    const items = allInputs(inputs)
+    const found: FlowItem[] = []
+    const missed: FlowItem[] = []
+
+    if (!apiKey) {
+      ctx.notes.push('no Jimaku API key (config or JIMAKU_API_KEY) — passing all items to "missed"')
+      return { found, missed: items }
+    }
+
+    const jimaku = async (path: string): Promise<unknown> => {
+      const res = await fetch(base + path, {
+        headers: { Authorization: apiKey, Accept: 'application/json', 'User-Agent': USER_AGENT },
+        signal: AbortSignal.timeout(20_000),
+      })
+      if (!res.ok) throw new Error(`Jimaku ${res.status} ${res.statusText}`)
+      return res.json()
+    }
+
+    let looked = 0
+    for (const item of items) {
+      const ep = Number(item[episodeField])
+      const anilist = Number(item[anilistField])
+      const query = String(item[queryField] ?? '').trim()
+      if ((maxItems > 0 && looked >= maxItems) || (!Number.isFinite(anilist) && !query)) {
+        missed.push(item)
+        continue
+      }
+      looked++
+      try {
+        const search =
+          Number.isFinite(anilist) && anilist > 0
+            ? `/entries/search?anilist_id=${anilist}`
+            : `/entries/search?query=${encodeURIComponent(query)}`
+        const entries = (await jimaku(search)) as { id: number; name?: string }[]
+        if (!Array.isArray(entries) || entries.length === 0) {
+          missed.push(item)
+          ctx.notes.push(`no Jimaku entry for "${query || anilist}"`)
+          continue
+        }
+        const files = (await jimaku(`/entries/${entries[0].id}/files`)) as { name: string; url: string }[]
+        // Match the file to this episode; if the item has no episode (movie /
+        // batch), take the only/first file.
+        const pickFile =
+          Number.isFinite(ep)
+            ? files.find((f) => parseEpisode(f.name) === ep)
+            : files.length === 1
+              ? files[0]
+              : undefined
+        if (!pickFile) {
+          missed.push(item)
+          ctx.notes.push(`no Jimaku file for "${query || anilist}"${Number.isFinite(ep) ? ` ep ${ep}` : ''}`)
+          continue
+        }
+        const codec = /\.srt$/i.test(pickFile.name) ? 'srt' : /\.vtt$/i.test(pickFile.name) ? 'vtt' : 'ass'
+        const baseName = String(item.file_name ? path.basename(String(item.file_name), path.extname(String(item.file_name))) : (query || `entry-${entries[0].id}`))
+        const subDir = path.join(outDir, baseName)
+        const subPath = path.join(subDir, `${baseName}.${lang}.${codec}`)
+        if (!ctx.dryRun) {
+          const dl = await fetch(pickFile.url, { signal: AbortSignal.timeout(30_000) })
+          if (!dl.ok) throw new Error(`download ${dl.status}`)
+          fs.mkdirSync(subDir, { recursive: true })
+          fs.writeFileSync(subPath, Buffer.from(await dl.arrayBuffer()))
+        }
+        found.push({ ...item, subtitle_path: subPath, subtitle_lang: lang, subtitle_codec: codec, subtitle_dir: subDir, subtitle_source: 'jimaku' })
+      } catch (e) {
+        ctx.notes.push(`Jimaku error for "${query || anilist}": ${e instanceof Error ? e.message : String(e)}`)
+        missed.push(item)
+      }
+      await new Promise((r) => setTimeout(r, 500)) // be polite to Jimaku
+    }
+    ctx.notes.push(ctx.dryRun ? `dry run — resolved ${found.length} Jimaku sub(s)` : `fetched ${found.length} sub(s), ${missed.length} missed`)
+    return { found, missed }
+  },
+}
+
 const qbittorrentSink: NodeImpl = {
   spec: {
     type: 'sink.qbittorrent',
@@ -2069,6 +2183,7 @@ const IMPLS: NodeImpl[] = [
   expandFiles,
   mediaProbe,
   extractSubs,
+  fetchSubs,
   dedupe,
   limit,
   indexerMatch,
