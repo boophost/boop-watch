@@ -24,7 +24,7 @@ export async function syncJellyfinToPortal() {
     let imageUrl = existing?.image_url || null
     let backdropUrl = existing?.backdrop_url || null
 
-    if (!imageUrl) {
+    if (!imageUrl && !it.PrimaryImageAspectRatio) {
       const match = dbSeries.find(s => norm(s.title) === norm(it.Name || '') || norm(s.title) === norm(it.OriginalTitle || ''))
       if (match && match.image_url) {
         imageUrl = match.image_url

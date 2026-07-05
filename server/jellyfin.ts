@@ -41,6 +41,7 @@ export interface JfItem {
   ParentIndexNumber?: number
   SeriesId?: string
   SeriesName?: string
+  PrimaryImageAspectRatio?: number
   MediaStreams?: JfMediaStream[]
   MediaSources?: { MediaStreams?: JfMediaStream[] }[]
 }
