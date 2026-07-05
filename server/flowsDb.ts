@@ -1,0 +1,137 @@
+// Flow persistence in series.sqlite. On first use the table is seeded with a
+// flow that mirrors the hardcoded image-sourcing chain in sync.ts, so the
+// editor opens onto something real instead of a blank canvas.
+
+import { getDb } from './db.js'
+import type { FlowGraph } from './flowExecutor.js'
+
+export interface FlowRow {
+  id: number
+  name: string
+  description: string | null
+  graph: string // JSON FlowGraph
+  created_at: string
+  updated_at: string
+}
+
+export interface FlowSummary {
+  id: number
+  name: string
+  description: string | null
+  node_count: number
+  updated_at: string
+}
+
+let ready = false
+
+function db() {
+  const instance = getDb()
+  if (!ready) {
+    instance.exec(`
+      CREATE TABLE IF NOT EXISTS flows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT,
+        graph TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `)
+    ready = true
+    seedIfEmpty(instance)
+  }
+  return instance
+}
+
+// The sync.ts image-sourcing chain as a graph: items missing art that Jellyfin
+// can't supply go through the indexer-title match, then Jikan, and every
+// branch converges on the portal write.
+const SEED_GRAPH: FlowGraph = {
+  nodes: [
+    { id: 'src', type: 'source.jellyfin', position: { x: 0, y: 160 }, config: { itemTypes: 'Movie,Series' } },
+    { id: 'noimg', type: 'filter.field', position: { x: 280, y: 60 }, config: { field: 'image_url', mode: 'empty', value: '' } },
+    { id: 'nojf', type: 'filter.field', position: { x: 560, y: 0 }, config: { field: 'has_primary_image', mode: 'equals', value: '0' } },
+    { id: 'match', type: 'enrich.indexer-match', position: { x: 840, y: 0 }, config: { setField: 'image_url', fromField: 'image_url' } },
+    { id: 'jikan', type: 'enrich.jikan', position: { x: 1120, y: 60 }, config: { setField: 'image_url', queryField: 'name', maxItems: 25 } },
+    { id: 'merge', type: 'combine.merge', position: { x: 1400, y: 220 }, config: {} },
+    { id: 'sink', type: 'sink.portal-upsert', position: { x: 1660, y: 220 }, config: {} },
+  ],
+  edges: [
+    { id: 'e1', source: 'src', sourceHandle: 'items', target: 'noimg', targetHandle: 'in' },
+    { id: 'e2', source: 'noimg', sourceHandle: 'pass', target: 'nojf', targetHandle: 'in' },
+    { id: 'e3', source: 'noimg', sourceHandle: 'fail', target: 'merge', targetHandle: 'in' },
+    { id: 'e4', source: 'nojf', sourceHandle: 'pass', target: 'match', targetHandle: 'in' },
+    { id: 'e5', source: 'nojf', sourceHandle: 'fail', target: 'merge', targetHandle: 'in' },
+    { id: 'e6', source: 'match', sourceHandle: 'matched', target: 'merge', targetHandle: 'in' },
+    { id: 'e7', source: 'match', sourceHandle: 'unmatched', target: 'jikan', targetHandle: 'in' },
+    { id: 'e8', source: 'jikan', sourceHandle: 'found', target: 'merge', targetHandle: 'in' },
+    { id: 'e9', source: 'jikan', sourceHandle: 'missed', target: 'merge', targetHandle: 'in' },
+    { id: 'e10', source: 'merge', sourceHandle: 'items', target: 'sink', targetHandle: 'in' },
+  ],
+}
+
+function seedIfEmpty(instance: ReturnType<typeof getDb>) {
+  const count = (instance.prepare('SELECT COUNT(*) AS c FROM flows').get() as { c: number }).c
+  if (count > 0) return
+  instance
+    .prepare('INSERT INTO flows (name, description, graph) VALUES (?, ?, ?)')
+    .run(
+      'Image sourcing',
+      'How portal artwork is filled in: Jellyfin first, then the indexer catalog, then Jikan. Mirrors the built-in sync.',
+      JSON.stringify(SEED_GRAPH),
+    )
+}
+
+export function listFlows(): FlowSummary[] {
+  const rows = db().prepare('SELECT * FROM flows ORDER BY updated_at DESC').all() as FlowRow[]
+  return rows.map((r) => {
+    let nodeCount = 0
+    try {
+      nodeCount = (JSON.parse(r.graph) as FlowGraph).nodes.length
+    } catch {
+      /* corrupt graph JSON — surfaced as 0 nodes */
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      node_count: nodeCount,
+      updated_at: r.updated_at,
+    }
+  })
+}
+
+export function getFlow(id: number): FlowRow | undefined {
+  return db().prepare('SELECT * FROM flows WHERE id = ?').get(id) as FlowRow | undefined
+}
+
+export function createFlow(name: string, description: string | null): FlowRow {
+  const empty: FlowGraph = { nodes: [], edges: [] }
+  const info = db()
+    .prepare('INSERT INTO flows (name, description, graph) VALUES (?, ?, ?)')
+    .run(name, description, JSON.stringify(empty))
+  return getFlow(Number(info.lastInsertRowid))!
+}
+
+export function updateFlow(
+  id: number,
+  patch: { name?: string; description?: string | null; graph?: FlowGraph },
+): FlowRow | undefined {
+  const existing = getFlow(id)
+  if (!existing) return undefined
+  db()
+    .prepare(
+      `UPDATE flows SET name = ?, description = ?, graph = ?, updated_at = datetime('now') WHERE id = ?`,
+    )
+    .run(
+      patch.name ?? existing.name,
+      patch.description === undefined ? existing.description : patch.description,
+      patch.graph ? JSON.stringify(patch.graph) : existing.graph,
+      id,
+    )
+  return getFlow(id)
+}
+
+export function deleteFlow(id: number): boolean {
+  return db().prepare('DELETE FROM flows WHERE id = ?').run(id).changes > 0
+}
