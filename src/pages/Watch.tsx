@@ -10,7 +10,7 @@ import { Icon, type IconName } from '@/components/Icon'
 import { SearchBar } from '@/components/SearchBar'
 import { UserCrumb } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
-import { getWatch, type Segment, type WatchData } from '@/lib/api'
+import { getWatch, addHistory, type Segment, type WatchData } from '@/lib/api'
 import {
   loadProgressMap, localProgress, saveLocalProgress, saveAccountProgress, backfillAccountProgress,
   type Progress,
@@ -140,7 +140,10 @@ export default function Watch() {
     if (!data || authLoading) return
     let alive = true
     const ids = [data.id, ...data.episodes.map((e) => e.id)]
-    if (user) backfillAccountProgress(user.id)
+    if (user) {
+      backfillAccountProgress(user.id)
+      addHistory(data.id).catch(() => {})
+    }
     loadProgressMap(ids, !!user).then((m) => {
       if (!alive) return
       setProgMap(m)
