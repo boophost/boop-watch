@@ -14,6 +14,9 @@ import * as seriesDb from './db.js'
 import { publicRouter } from './publicRoutes.js'
 import { flowRouter } from './flowRoutes.js'
 import { warmScope } from './jellyfin.js'
+import { getSeriesDownloadStatus } from './downloads.js'
+import { qbitConfigured, qbitDelete } from './qbit.js'
+import * as blacklist from './blacklist.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -239,6 +242,89 @@ app.delete('/api/series/:id', requireAuth, (req, res) => {
     return
   }
   if (!seriesDb.deleteSeries(id)) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  res.json({ ok: true })
+})
+
+// --- Series downloads / blacklist (manage series page) --------------------
+
+// Download status for a series: matched qBittorrent torrents + which episodes
+// are already live on the public portal + this series' blacklist.
+app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  try {
+    const status = await getSeriesDownloadStatus(id)
+    res.json({ ...status, blacklist: blacklist.listBlacklist(id) })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to load downloads' })
+  }
+})
+
+// Remove a download from qBittorrent (optionally its files).
+app.post('/api/series/:id/downloads/delete', requireAuth, requireAdmin, async (req, res) => {
+  const body = req.body as { hash?: unknown; deleteFiles?: unknown }
+  const hash = typeof body.hash === 'string' ? body.hash : ''
+  if (!hash) {
+    res.status(400).json({ error: 'hash required' })
+    return
+  }
+  if (!qbitConfigured()) {
+    res.status(503).json({ error: 'qBittorrent is not configured (QBIT_URL)' })
+    return
+  }
+  try {
+    await qbitDelete([hash], body.deleteFiles === true)
+    res.json({ ok: true })
+  } catch (e) {
+    console.error(e)
+    res.status(502).json({ error: e instanceof Error ? e.message : 'Delete failed' })
+  }
+})
+
+// Blacklist a source so the flow won't re-pick it; optionally remove it from
+// qBittorrent in the same action.
+app.post('/api/series/:id/blacklist', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id)
+  const body = req.body as {
+    info_hash?: unknown
+    name?: unknown
+    reason?: unknown
+    alsoDelete?: unknown
+    deleteFiles?: unknown
+  }
+  const info_hash = typeof body.info_hash === 'string' ? body.info_hash : ''
+  if (!info_hash) {
+    res.status(400).json({ error: 'info_hash required' })
+    return
+  }
+  const row = blacklist.addBlacklist({
+    info_hash,
+    name: typeof body.name === 'string' ? body.name : null,
+    series_id: Number.isFinite(id) ? id : null,
+    reason: typeof body.reason === 'string' ? body.reason : null,
+  })
+  let deleted = false
+  if (body.alsoDelete === true && qbitConfigured()) {
+    try {
+      await qbitDelete([info_hash], body.deleteFiles === true)
+      deleted = true
+    } catch (e) {
+      console.error('blacklist qbit delete failed', e)
+    }
+  }
+  res.status(201).json({ entry: row, deleted })
+})
+
+app.delete('/api/blacklist/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id) || !blacklist.removeBlacklist(id)) {
     res.status(404).json({ error: 'Not found' })
     return
   }
