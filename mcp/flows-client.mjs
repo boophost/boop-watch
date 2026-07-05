@@ -9,8 +9,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import jwt from 'jsonwebtoken'
+import { Agent, setGlobalDispatcher } from 'undici'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
+
+// A live flow run blocks the HTTP response until every node finishes — a big
+// batch (per-item Jikan rate limits + ffmpeg extraction) easily exceeds undici's
+// default 5-min headersTimeout, which would abort the client even though the run
+// completes server-side. Disable those idle timeouts (0) and let the per-request
+// AbortSignal below be the only bound.
+setGlobalDispatcher(new Agent({ headersTimeout: 0, bodyTimeout: 0 }))
 
 // Load mcp/flows.env (gitignored — holds the staging JWT secret) into the
 // environment without clobbering anything already set by the caller.
