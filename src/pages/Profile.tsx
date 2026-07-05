@@ -168,7 +168,9 @@ export default function Profile() {
               )}
               {presenceResult && presenceResult !== 'linked' && !presence.linked && (
                 <p className="text-sm text-red-400 mt-2">
-                  Discord link {presenceResult === 'denied' ? 'was cancelled' : 'failed'} — try again.
+                  Discord link failed
+                  {presenceResult === 'access_denied' ? ' (cancelled)' : ` (${presenceResult})`} — try
+                  again.
                 </p>
               )}
               {presenceError && <p className="text-sm text-red-400 mt-2">{presenceError}</p>}

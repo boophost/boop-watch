@@ -15,6 +15,11 @@ const DISCORD_API = 'https://discord.com/api/v10'
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? ''
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? ''
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
+// activities.write is the documented headless-sessions scope but is
+// approval-gated for ordinary apps; sdk.social_layer_presence is the
+// self-serve Social SDK equivalent. Overridable while we settle which one
+// Discord accepts for this app.
+const OAUTH_SCOPE = process.env.DISCORD_PRESENCE_SCOPE ?? 'identify sdk.social_layer_presence'
 
 // Re-post the headless session when it's older than this (TTL is 20 min).
 const SESSION_REFRESH_MS = 8 * 60_000
@@ -194,7 +199,7 @@ export function discordPresenceRouter(requireAuth: AuthedHandler): Router {
         client_id: CLIENT_ID,
         response_type: 'code',
         redirect_uri: redirectUri(reqOrigin(req)),
-        scope: 'identify activities.write',
+        scope: OAUTH_SCOPE,
         state,
       }).toString()
     res.json({ url })
@@ -204,7 +209,8 @@ export function discordPresenceRouter(requireAuth: AuthedHandler): Router {
     const back = (result: string) => res.redirect(`/profile?discord_presence=${result}`)
     const { code, state, error } = req.query
     if (error || typeof code !== 'string' || typeof state !== 'string') {
-      back('denied')
+      console.error('discord oauth callback error', req.query)
+      back(typeof error === 'string' && error ? encodeURIComponent(error) : 'denied')
       return
     }
     let username: string
