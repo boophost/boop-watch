@@ -2242,6 +2242,127 @@ const jellyfinScan: NodeImpl = {
   },
 }
 
+// Resolve a show name to a Jellyfin item id by searching + token-matching. The
+// scan is async, so callers poll until it surfaces.
+async function findJfItemByName(
+  name: string,
+  itemType: string,
+  threshold: number,
+): Promise<{ id: string; name: string } | null> {
+  const wanted = significantTokens(name)
+  if (wanted.length === 0) return null
+  // Search by the most distinctive word for good recall, then match locally.
+  const searchTerm = [...wanted].sort((a, b) => b.length - a.length)[0]
+  let res: { Items?: JfItem[] }
+  try {
+    res = await jfJson<{ Items?: JfItem[] }>('/Items', {
+      Recursive: 'true',
+      IncludeItemTypes: itemType,
+      SearchTerm: searchTerm,
+      Limit: 25,
+    })
+  } catch {
+    return null
+  }
+  let best: { id: string; name: string; score: number } | null = null
+  for (const it of res.Items ?? []) {
+    const hay = norm(it.Name)
+    const present = wanted.filter((t) => hay.includes(t)).length
+    const score = present / wanted.length
+    if (!best || score > best.score) best = { id: it.Id, name: it.Name || '', score }
+  }
+  return best && best.score >= threshold ? { id: best.id, name: best.name } : null
+}
+
+const jellyfinCollection: NodeImpl = {
+  spec: {
+    type: 'sink.jellyfin-collection',
+    label: 'Add to public collection',
+    category: 'sink',
+    description:
+      'Adds each item’s Jellyfin show to the public "Watch" collection — the last step that makes an imported title appear on the site. Resolves the show by name and waits for the library scan to surface it.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'added', label: 'added' },
+      { id: 'pending', label: 'not found yet' },
+    ],
+    config: [
+      { key: 'collectionId', label: 'Collection id', kind: 'text', default: '', help: 'Empty = WATCH_COLLECTION_ID env (the public "Watch" collection).' },
+      { key: 'nameField', label: 'Show name field', kind: 'text', default: 'title_english', help: 'Item field with the show title; falls back to name.' },
+      { key: 'itemType', label: 'Item type', kind: 'select', options: [
+        { value: 'Series', label: 'Series' },
+        { value: 'Movie', label: 'Movie' },
+      ], default: 'Series' },
+      { key: 'threshold', label: 'Name match (0-1)', kind: 'number', default: 0.6, help: 'Min word overlap between the item name and the Jellyfin title.' },
+      { key: 'waitSeconds', label: 'Wait for scan (s)', kind: 'number', default: 90, help: 'Poll this long for the newly-scanned show to appear. 0 = no wait.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const items = allInputs(inputs)
+    const collectionId = str(config, 'collectionId', '') || COLLECTION_ID || ''
+    const nameField = str(config, 'nameField', 'title_english')
+    const itemType = str(config, 'itemType', 'Series')
+    const threshold = num(config, 'threshold', 0.6)
+    const waitSeconds = num(config, 'waitSeconds', 90)
+
+    // Group items by show name (a 28-episode batch is one series to add).
+    const byName = new Map<string, FlowItem[]>()
+    for (const item of items) {
+      const name = String(item[nameField] ?? item.name ?? '').trim()
+      if (!name) continue
+      ;(byName.get(name) ?? byName.set(name, []).get(name)!).push(item)
+    }
+    if (byName.size === 0) {
+      ctx.notes.push('no items had a show name to resolve')
+      return { added: [], pending: items }
+    }
+    if (!collectionId) throw new Error('No collection id (config or WATCH_COLLECTION_ID env)')
+    if (!jellyfinConfigured) throw new Error('Jellyfin is not configured')
+
+    // Resolve each unique show to a Jellyfin id, polling for the async scan.
+    const resolved = new Map<string, { id: string; name: string }>()
+    const deadline = Date.now() + Math.max(0, waitSeconds) * 1000
+    const names = [...byName.keys()]
+    for (;;) {
+      for (const name of names) {
+        if (resolved.has(name)) continue
+        const hit = await findJfItemByName(name, itemType, threshold)
+        if (hit) resolved.set(name, hit)
+      }
+      if (resolved.size === names.length || Date.now() >= deadline) break
+      await new Promise((r) => setTimeout(r, 5000))
+    }
+
+    const added: FlowItem[] = []
+    const pending: FlowItem[] = []
+    for (const [name, group] of byName) {
+      if (resolved.has(name)) added.push(...group)
+      else {
+        pending.push(...group)
+        ctx.notes.push(`"${name}" not found in Jellyfin yet (scan may still be running)`)
+      }
+    }
+
+    const ids = [...resolved.values()].map((r) => r.id)
+    if (ids.length === 0) {
+      ctx.notes.push('resolved no shows to add')
+      return { added, pending }
+    }
+    if (ctx.dryRun) {
+      ctx.notes.push(`dry run — would add ${ids.length} show(s) to the collection: ${[...resolved.values()].map((r) => r.name).join(', ')}`)
+      return { added, pending }
+    }
+    // POST /Collections/{id}/Items?ids=… — adding an existing member is a no-op.
+    const res = await fetch(jfUrl(`/Collections/${collectionId}/Items`, { ids: ids.join(',') }), {
+      method: 'POST',
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!res.ok) throw new Error(`Jellyfin add-to-collection failed (${res.status})`)
+    ctx.notes.push(`added ${ids.length} show(s) to the collection: ${[...resolved.values()].map((r) => r.name).join(', ')}`)
+    return { added, pending }
+  },
+}
+
 const merge: NodeImpl = {
   spec: {
     type: 'combine.merge',
@@ -2339,6 +2460,7 @@ const IMPLS: NodeImpl[] = [
   qbittorrentSink,
   libraryImport,
   jellyfinScan,
+  jellyfinCollection,
 ]
 
 export const NODE_REGISTRY: Map<string, NodeImpl> = new Map(IMPLS.map((n) => [n.spec.type, n]))
