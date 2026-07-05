@@ -7,6 +7,7 @@ import { useAuth } from '@/lib/AuthContext'
 /** Public portal shell: Kagura-scoped side nav + header. The side nav sticks
  * to the viewport and collapses to an icon rail (remembered per browser). */
 export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children: ReactNode }) {
+  const { user } = useAuth()
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('snav-collapsed') === '1')
   useEffect(() => {
     localStorage.setItem('snav-collapsed', collapsed ? '1' : '0')
@@ -32,6 +33,11 @@ export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children:
             <NavLink to="/library" className="snav-link" title="Library">
               <Icon name="bookmark" size={16} /><span className="snav-label">Library</span>
             </NavLink>
+            {user?.isAdmin && (
+              <NavLink to="/manage" className="snav-link" title="Manage">
+                <Icon name="gear" size={16} /><span className="snav-label">Manage</span>
+              </NavLink>
+            )}
           </nav>
           <button
             className="snav-link snav-collapse" type="button"
@@ -57,6 +63,11 @@ export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children:
         <NavLink to="/library" className="mob-link" title="Library">
           <Icon name="bookmark" size={20} /><span>Library</span>
         </NavLink>
+        {user?.isAdmin && (
+          <NavLink to="/manage" className="mob-link" title="Manage">
+            <Icon name="gear" size={20} /><span>Manage</span>
+          </NavLink>
+        )}
       </nav>
     </div>
   )
