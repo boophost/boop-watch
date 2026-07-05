@@ -17,6 +17,7 @@ export function useSidebarCollapsed() {
 /** The Kagura-scoped side nav: sticky brand + links, collapses to an icon rail.
  * Shared by the portal shell and the player page. */
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  const { user } = useAuth()
   return (
     <aside className="snav">
       <div className="snav-inner">
@@ -36,6 +37,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <NavLink to="/library" className="snav-link" title="Library">
             <Icon name="bookmark" size={16} /><span className="snav-label">Library</span>
           </NavLink>
+          {user?.isAdmin && (
+            <NavLink to="/manage" className="snav-link" title="Manage">
+              <Icon name="gear" size={16} /><span className="snav-label">Manage</span>
+            </NavLink>
+          )}
         </nav>
         <button
           className="snav-link snav-collapse" type="button"
@@ -52,6 +58,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
 
 /** Bottom tab bar shown on phones (where the side nav is hidden). Shared. */
 export function MobileNav() {
+  const { user } = useAuth()
   return (
     <nav className="mob-nav">
       <NavLink to="/" end className="mob-link" title="All titles">
@@ -63,6 +70,11 @@ export function MobileNav() {
       <NavLink to="/library" className="mob-link" title="Library">
         <Icon name="bookmark" size={20} /><span>Library</span>
       </NavLink>
+      {user?.isAdmin && (
+        <NavLink to="/manage" className="mob-link" title="Manage">
+          <Icon name="gear" size={20} /><span>Manage</span>
+        </NavLink>
+      )}
     </nav>
   )
 }
