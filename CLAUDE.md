@@ -120,6 +120,11 @@ PVC, mounted at `DATA_DIR`).
 - `SCHEDULE_TZ` — schedule timezone (default `TZ` env, else `America/New_York`)
 - `DATA_DIR` — where `series.sqlite` lives (default `./data`; set to a mounted volume in prod)
 - `JWT_SECRET`, `AUTH_USERNAME`, `AUTH_PASSWORD` — `/manage` login (defaults are insecure dev values)
+- `ADMIN_EMAILS` — comma-separated emails allowed on the admin-only APIs (the flow editor)
+- `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD` — qBittorrent WebUI for the flow sink node
+  (unset ⇒ the "Send to qBittorrent" node errors at run time; dry runs still work)
+- `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
+  `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
 - `NODE_ENV=production` — serve the built `dist/`
 - `PORT` — default `3000` (the Dockerfile sets it; the dev backend defaults to `3001`)
 
