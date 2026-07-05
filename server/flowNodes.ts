@@ -13,7 +13,7 @@ export type FlowItem = Record<string, unknown>
 export interface ConfigField {
   key: string
   label: string
-  kind: 'text' | 'number' | 'select' | 'boolean'
+  kind: 'text' | 'number' | 'select' | 'boolean' | 'password'
   options?: { value: string; label: string }[]
   default?: string | number | boolean
   help?: string
@@ -58,6 +58,14 @@ const num = (config: Record<string, unknown>, key: string, fallback: number): nu
   return Number.isFinite(v) ? v : fallback
 }
 
+const bool = (config: Record<string, unknown>, key: string, fallback: boolean): boolean => {
+  const v = config[key]
+  if (typeof v === 'boolean') return v
+  if (v === 'true') return true
+  if (v === 'false') return false
+  return fallback
+}
+
 const norm = (s: unknown): string =>
   String(s ?? '')
     .toLowerCase()
@@ -66,6 +74,28 @@ const norm = (s: unknown): string =>
 
 const allInputs = (inputs: Record<string, FlowItem[]>): FlowItem[] =>
   Object.values(inputs).flat()
+
+const USER_AGENT = 'boop-watch-flows/1.0'
+
+async function fetchJson(url: string): Promise<unknown> {
+  const res = await fetch(url, {
+    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+    signal: AbortSignal.timeout(20_000),
+  })
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${new URL(url).host}`)
+  return res.json()
+}
+
+/** Resolves a dot path ("data.results") into a fetched JSON document. */
+function digPath(doc: unknown, path: string): unknown {
+  if (!path) return doc
+  let cur: unknown = doc
+  for (const key of path.split('.')) {
+    if (cur == null || typeof cur !== 'object') return undefined
+    cur = (cur as Record<string, unknown>)[key]
+  }
+  return cur
+}
 
 const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
 
@@ -175,6 +205,171 @@ const portalSource: NodeImpl = {
     const type = str(config, 'type', '')
     const items = getAllPortalItems().filter((it) => !type || it.type === type)
     return { items: items.map((it) => ({ ...it })) }
+  },
+}
+
+const httpSource: NodeImpl = {
+  spec: {
+    type: 'source.http',
+    label: 'Fetch JSON',
+    category: 'source',
+    description: 'GETs a URL and emits the JSON items found at a path in the response.',
+    inputs: [],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'url', label: 'URL', kind: 'text', default: '' },
+      {
+        key: 'itemsPath',
+        label: 'Items path',
+        kind: 'text',
+        default: '',
+        help: 'Dot path to the array in the response, e.g. "data" or "results". Empty = whole body.',
+      },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const url = str(config, 'url', '')
+    if (!url) throw new Error('URL is required')
+    const doc = await fetchJson(url)
+    const found = digPath(doc, str(config, 'itemsPath', ''))
+    const items = Array.isArray(found)
+      ? found.filter((v): v is FlowItem => typeof v === 'object' && v !== null)
+      : found && typeof found === 'object'
+        ? [found as FlowItem]
+        : []
+    if (!Array.isArray(found)) ctx.notes.push('response path was not an array')
+    return { items }
+  },
+}
+
+const template: NodeImpl = {
+  spec: {
+    type: 'transform.template',
+    label: 'Set field from template',
+    category: 'enrich',
+    description:
+      'Sets a field by filling a template with the item’s own values, e.g. "{title} 1080p".',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'field', label: 'Set field', kind: 'text', default: 'query' },
+      {
+        key: 'template',
+        label: 'Template',
+        kind: 'text',
+        default: '{title}',
+        help: '{name} placeholders are replaced with the item’s field values.',
+      },
+    ],
+  },
+  async run(inputs, config) {
+    const field = str(config, 'field', 'query')
+    const tpl = str(config, 'template', '{title}')
+    const items = allInputs(inputs).map((item) => ({
+      ...item,
+      [field]: tpl.replace(/\{([^}]+)\}/g, (_, key: string) => String(item[key] ?? '')).trim(),
+    }))
+    return { items }
+  },
+}
+
+const diff: NodeImpl = {
+  spec: {
+    type: 'combine.diff',
+    label: 'Difference',
+    category: 'combine',
+    description:
+      'Splits stream A on whether a matching item exists in stream B (titles are compared loosely).',
+    inputs: [
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' },
+    ],
+    outputs: [
+      { id: 'missing', label: 'missing from B' },
+      { id: 'present', label: 'present in B' },
+    ],
+    config: [
+      { key: 'fieldA', label: 'Match field (A)', kind: 'text', default: 'title' },
+      { key: 'fieldB', label: 'Match field (B)', kind: 'text', default: 'name' },
+      {
+        key: 'fieldB2',
+        label: 'Fallback field (B)',
+        kind: 'text',
+        default: 'original_title',
+        help: 'Second field on B items that also counts as a match.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fieldA = str(config, 'fieldA', 'title')
+    const fieldB = str(config, 'fieldB', 'name')
+    const fieldB2 = str(config, 'fieldB2', '')
+    const known = new Set<string>()
+    for (const item of inputs.b ?? []) {
+      const k1 = norm(item[fieldB])
+      const k2 = fieldB2 ? norm(item[fieldB2]) : ''
+      if (k1) known.add(k1)
+      if (k2) known.add(k2)
+    }
+    const missing: FlowItem[] = []
+    const present: FlowItem[] = []
+    for (const item of inputs.a ?? []) {
+      const key = norm(item[fieldA])
+      // Un-keyed items can't be proven missing — keep them out of the
+      // "missing" branch so nothing downstream acts on garbage.
+      ;(key && !known.has(key) ? missing : present).push(item)
+    }
+    ctx.notes.push(`${missing.length} of ${(inputs.a ?? []).length} A-items missing from B`)
+    return { missing, present }
+  },
+}
+
+const dedupe: NodeImpl = {
+  spec: {
+    type: 'filter.dedupe',
+    label: 'Deduplicate',
+    category: 'filter',
+    description: 'Drops items whose field value was already seen (first one wins).',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [{ key: 'field', label: 'Field', kind: 'text', default: 'id' }],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'id')
+    const seen = new Set<string>()
+    const items: FlowItem[] = []
+    let dropped = 0
+    for (const item of allInputs(inputs)) {
+      const key = String(item[field] ?? '')
+      if (key && seen.has(key)) {
+        dropped++
+        continue
+      }
+      if (key) seen.add(key)
+      items.push(item)
+    }
+    if (dropped > 0) ctx.notes.push(`dropped ${dropped} duplicates`)
+    return { items }
+  },
+}
+
+const limit: NodeImpl = {
+  spec: {
+    type: 'filter.limit',
+    label: 'Limit',
+    category: 'filter',
+    description: 'Passes the first N items through; the rest exit "overflow".',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'items', label: 'items' },
+      { id: 'overflow', label: 'overflow' },
+    ],
+    config: [{ key: 'count', label: 'Max items', kind: 'number', default: 10 }],
+  },
+  async run(inputs, config) {
+    const count = Math.max(0, num(config, 'count', 10))
+    const all = allInputs(inputs)
+    return { items: all.slice(0, count), overflow: all.slice(count) }
   },
 }
 
@@ -342,6 +537,248 @@ const jikanEnrich: NodeImpl = {
   },
 }
 
+// Torrent index base URLs, overridable for mirrors/self-hosted proxies.
+const TOSHO_URL = process.env.TORRENT_TOSHO_URL ?? 'https://feed.animetosho.xyz'
+const TSUKI_URL = process.env.TORRENT_TSUKI_URL ?? 'https://api.tsukihime.org'
+
+// Trackers appended when building a magnet from a bare info-hash (TsukiHime
+// results carry `btih` but no magnet). Same set Anime Tosho magnets embed.
+const MAGNET_TRACKERS = [
+  'http://nyaa.tracker.wf:7777/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://exodus.desync.com:6969/announce',
+]
+
+function magnetFromHash(btih: string, name: string): string {
+  const tr = MAGNET_TRACKERS.map((t) => `&tr=${encodeURIComponent(t)}`).join('')
+  return `magnet:?xt=urn:btih:${btih}&dn=${encodeURIComponent(name)}${tr}`
+}
+
+interface TorrentHit {
+  name: string
+  magnet: string
+  hash: string
+  size: number | null
+  seeders: number | null
+}
+
+async function searchTosho(q: string, preferBatch: boolean, base = TOSHO_URL): Promise<TorrentHit | null> {
+  const doc = (await fetchJson(
+    `${base}/json/v1/search?q=${encodeURIComponent(q)}`,
+  )) as { data?: Record<string, unknown>[] }
+  const rows = (doc.data ?? []).filter((r) => r.magnet || r.info_hash)
+  if (rows.length === 0) return null
+  const pool = preferBatch && rows.some((r) => r.is_batch) ? rows.filter((r) => r.is_batch) : rows
+  const best = [...pool].sort((x, y) => Number(y.seeders ?? 0) - Number(x.seeders ?? 0))[0]
+  const hash = String(best.info_hash ?? '')
+  return {
+    name: String(best.title ?? q),
+    magnet: String(best.magnet ?? magnetFromHash(hash, String(best.title ?? q))),
+    hash,
+    size: best.total_size != null ? Number(best.total_size) : null,
+    seeders: best.seeders != null ? Number(best.seeders) : null,
+  }
+}
+
+async function searchTsuki(q: string, base = TSUKI_URL): Promise<TorrentHit | null> {
+  const doc = (await fetchJson(
+    `${base}/v1/search/torrents?q=${encodeURIComponent(q)}&limit=25`,
+  )) as { results?: Record<string, unknown>[] }
+  const rows = (doc.results ?? []).filter((r) => r.btih && !r.is_adult)
+  if (rows.length === 0) return null
+  // No seeder counts here — prefer completed state, then the newest release.
+  const best = [...rows].sort((x, y) => {
+    const done = Number(y.state === 'completed') - Number(x.state === 'completed')
+    return done !== 0 ? done : Number(y.added_date ?? 0) - Number(x.added_date ?? 0)
+  })[0]
+  const name = String(best.name ?? q)
+  const hash = String(best.btih)
+  return {
+    name,
+    magnet: magnetFromHash(hash, name),
+    hash,
+    size: best.totalsize != null ? Number(best.totalsize) : null,
+    seeders: null,
+  }
+}
+
+const torrentSearch: NodeImpl = {
+  spec: {
+    type: 'enrich.torrent-search',
+    label: 'Torrent search',
+    category: 'enrich',
+    description:
+      'Searches a torrent index per item and attaches the best result as torrent_* fields.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'found', label: 'found' },
+      { id: 'missed', label: 'missed' },
+    ],
+    config: [
+      {
+        key: 'provider',
+        label: 'Provider',
+        kind: 'select',
+        options: [
+          { value: 'animetosho', label: 'Anime Tosho' },
+          { value: 'tsukihime', label: 'TsukiHime' },
+        ],
+        default: 'animetosho',
+      },
+      {
+        key: 'baseUrl',
+        label: 'Index base URL',
+        kind: 'text',
+        default: '',
+        help: 'Override the provider’s API host (mirror/self-hosted). Empty = default.',
+      },
+      { key: 'queryField', label: 'Query field', kind: 'text', default: 'torrent_query' },
+      {
+        key: 'preferBatch',
+        label: 'Prefer batch releases',
+        kind: 'boolean',
+        default: true,
+        help: 'Anime Tosho only — favor whole-season batches over single episodes.',
+      },
+      {
+        key: 'maxItems',
+        label: 'Max items',
+        kind: 'number',
+        default: 10,
+        help: 'Safety cap of searches per run. 0 = unlimited.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const provider = str(config, 'provider', 'animetosho')
+    const baseOverride = str(config, 'baseUrl', '').replace(/\/$/, '')
+    const queryField = str(config, 'queryField', 'torrent_query')
+    const preferBatch = bool(config, 'preferBatch', true)
+    const maxItems = num(config, 'maxItems', 10)
+    const items = allInputs(inputs)
+    const found: FlowItem[] = []
+    const missed: FlowItem[] = []
+    let queried = 0
+    for (const item of items) {
+      const q = String(item[queryField] ?? '').trim()
+      if (!q || (maxItems > 0 && queried >= maxItems)) {
+        missed.push(item)
+        continue
+      }
+      queried++
+      try {
+        const hit =
+          provider === 'tsukihime'
+            ? await searchTsuki(q, baseOverride || TSUKI_URL)
+            : await searchTosho(q, preferBatch, baseOverride || TOSHO_URL)
+        if (hit) {
+          found.push({
+            ...item,
+            torrent_name: hit.name,
+            torrent_magnet: hit.magnet,
+            torrent_hash: hit.hash,
+            torrent_size: hit.size,
+            torrent_seeders: hit.seeders,
+          })
+        } else {
+          missed.push(item)
+        }
+      } catch (e) {
+        ctx.notes.push(`search error for "${q}": ${e instanceof Error ? e.message : String(e)}`)
+        missed.push(item)
+      }
+      await new Promise((r) => setTimeout(r, 500)) // be polite to the index
+    }
+    if (maxItems > 0 && items.length > maxItems) {
+      ctx.notes.push(`capped at ${maxItems} of ${items.length} items`)
+    }
+    return { found, missed }
+  },
+}
+
+const qbittorrentSink: NodeImpl = {
+  spec: {
+    type: 'sink.qbittorrent',
+    label: 'Send to qBittorrent',
+    category: 'sink',
+    description:
+      'Adds each item’s magnet link to a qBittorrent instance via its WebUI API.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'sent', label: 'sent' }],
+    config: [
+      {
+        key: 'url',
+        label: 'qBittorrent URL',
+        kind: 'text',
+        default: '',
+        help: 'WebUI base URL, e.g. http://[redacted-lan-ip]:8080. Empty = QBIT_URL env.',
+      },
+      { key: 'username', label: 'Username', kind: 'text', default: '', help: 'Empty = QBIT_USERNAME env.' },
+      { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
+      { key: 'urlField', label: 'Magnet field', kind: 'text', default: 'torrent_magnet' },
+      { key: 'category', label: 'Category', kind: 'text', default: 'anime' },
+      { key: 'savepath', label: 'Save path', kind: 'text', default: '', help: 'Empty = qBittorrent default.' },
+      {
+        key: 'paused',
+        label: 'Add paused',
+        kind: 'boolean',
+        default: true,
+        help: 'Queue without starting so you can review in qBittorrent first.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const urlField = str(config, 'urlField', 'torrent_magnet')
+    const items = allInputs(inputs)
+    const withMagnet = items.filter((it) => String(it[urlField] ?? '').startsWith('magnet:'))
+    if (items.length > withMagnet.length) {
+      ctx.notes.push(`skipped ${items.length - withMagnet.length} items without a magnet link`)
+    }
+    if (withMagnet.length === 0) return { sent: [] }
+    if (ctx.dryRun) {
+      ctx.notes.push(`dry run — would send ${withMagnet.length} magnets to qBittorrent`)
+      return { sent: withMagnet }
+    }
+
+    // Node config wins; env vars are the fallback so credentials can be kept
+    // out of the stored graph when preferred.
+    const base = (str(config, 'url', '') || process.env.QBIT_URL || '').replace(/\/$/, '')
+    if (!base) throw new Error('qBittorrent URL is not set (node config or QBIT_URL env)')
+    const login = await fetch(`${base}/api/v2/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        username: str(config, 'username', '') || process.env.QBIT_USERNAME || 'admin',
+        password: str(config, 'password', '') || process.env.QBIT_PASSWORD || '',
+      }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    const cookie = login.headers.get('set-cookie')?.split(';')[0]
+    if (!login.ok || !cookie || !(await login.text()).includes('Ok')) {
+      throw new Error('qBittorrent login failed')
+    }
+
+    const form = new URLSearchParams({
+      urls: withMagnet.map((it) => String(it[urlField])).join('\n'),
+      category: str(config, 'category', 'anime'),
+      paused: String(bool(config, 'paused', true)),
+      stopped: String(bool(config, 'paused', true)), // qBit >= 5 renamed the flag
+    })
+    const savepath = str(config, 'savepath', '')
+    if (savepath) form.set('savepath', savepath)
+    const add = await fetch(`${base}/api/v2/torrents/add`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+      body: form,
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!add.ok) throw new Error(`qBittorrent add failed (${add.status})`)
+    ctx.notes.push(`sent ${withMagnet.length} magnets to qBittorrent`)
+    return { sent: withMagnet }
+  },
+}
+
 const merge: NodeImpl = {
   spec: {
     type: 'combine.merge',
@@ -414,11 +851,18 @@ const IMPLS: NodeImpl[] = [
   jellyfinSource,
   indexerSource,
   portalSource,
+  httpSource,
   fieldFilter,
+  dedupe,
+  limit,
   indexerMatch,
   jikanEnrich,
+  template,
+  torrentSearch,
+  diff,
   merge,
   portalSink,
+  qbittorrentSink,
 ]
 
 export const NODE_REGISTRY: Map<string, NodeImpl> = new Map(IMPLS.map((n) => [n.spec.type, n]))
