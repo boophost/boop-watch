@@ -117,6 +117,7 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
     // metadata node); falls back to the release name for unmatched files.
     { id: 'imp', type: 'sink.library-import', position: { x: 2120, y: 220 }, config: { fileField: 'file_path', libraryRoot: '', showField: 'title_english', method: 'hardlink' } },
     { id: 'scan', type: 'sink.jellyfin-scan', position: { x: 2400, y: 220 }, config: {} },
+    { id: 'coll', type: 'sink.jellyfin-collection', position: { x: 2680, y: 220 }, config: { nameField: 'title_english', itemType: 'Series', waitSeconds: 120 } },
   ],
   edges: [
     { id: 'e1', source: 'qb', sourceHandle: 'items', target: 'exp', targetHandle: 'in' },
@@ -137,6 +138,7 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
     { id: 'e13', source: 'fetch', sourceHandle: 'missed', target: 'mg', targetHandle: 'in' },
     { id: 'e14', source: 'mg', sourceHandle: 'items', target: 'imp', targetHandle: 'in' },
     { id: 'e15', source: 'imp', sourceHandle: 'imported', target: 'scan', targetHandle: 'in' },
+    { id: 'e16', source: 'scan', sourceHandle: 'items', target: 'coll', targetHandle: 'in' },
   ],
 }
 
