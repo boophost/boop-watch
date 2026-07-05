@@ -15,6 +15,7 @@ import {
   loadProgressMap, localProgress, saveLocalProgress, saveAccountProgress, backfillAccountProgress,
   type Progress,
 } from '@/lib/progress'
+import { presenceBeat, presenceStop } from '@/lib/presence'
 import '@vidstack/react/player/styles/default/theme.css'
 import '@vidstack/react/player/styles/default/layouts/video.css'
 
@@ -381,6 +382,44 @@ export default function Watch() {
     }
   }, [data, user])
 
+  // Discord watch status: logged-in users who opted in on the profile page get
+  // a "Watching …" activity while playing. The server throttles the actual
+  // Discord traffic, so this just ticks every 30s and reports play/pause edges
+  // promptly. Stopping lives in a separate unmount-only effect: on episode
+  // change the next beat *updates* the session in place instead (no flicker,
+  // and no stop/beat ordering race).
+  const presenceRef = useRef<(paused?: boolean) => void>(() => {})
+  useEffect(() => {
+    if (!data || !user) {
+      presenceRef.current = () => {}
+      return
+    }
+    const send = (pausedOverride?: boolean) => {
+      const p = playerRef.current
+      if (!p) return
+      const d = p.duration
+      if (!d || isNaN(d)) return
+      presenceBeat(data.id, p.currentTime || 0, d, pausedOverride ?? p.paused).catch(() => {})
+    }
+    presenceRef.current = send
+    const t0 = setTimeout(() => { const p = playerRef.current; if (p && !p.paused) send(false) }, 4000)
+    const iv = setInterval(() => { const p = playerRef.current; if (p && !p.paused) send(false) }, 30000)
+    return () => {
+      clearTimeout(t0)
+      clearInterval(iv)
+      presenceRef.current = () => {}
+    }
+  }, [data, user])
+
+  useEffect(() => {
+    const onHide = () => { presenceStop() }
+    window.addEventListener('pagehide', onHide)
+    return () => {
+      window.removeEventListener('pagehide', onHide)
+      presenceStop()
+    }
+  }, [])
+
   // Theater + pseudo-fullscreen reflect onto <body> (CSS targets body.theater /
   // body.fs; pseudo-fullscreen is the theater layout plus a hidden control bar).
   useEffect(() => {
@@ -469,6 +508,8 @@ export default function Watch() {
                 onCanPlay={onCanPlay}
                 onTimeUpdate={onTimeUpdate}
                 onEnded={onEnded}
+                onPlay={() => presenceRef.current(false)}
+                onPause={() => presenceRef.current(true)}
               >
                 <MediaProvider />
                 <DefaultVideoLayout icons={defaultLayoutIcons} />

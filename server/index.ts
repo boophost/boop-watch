@@ -13,6 +13,7 @@ import {
 import * as seriesDb from './db.js'
 import { publicRouter } from './publicRoutes.js'
 import { flowRouter } from './flowRoutes.js'
+import { discordPresenceRouter } from './discordPresence.js'
 import { warmScope } from './jellyfin.js'
 import { getSeriesDownloadStatus } from './downloads.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
@@ -97,6 +98,9 @@ function requireAdmin(
 // Flow editor APIs (admin-only: flows run external fetches + portal writes).
 app.use('/api/flows', requireAuth, requireAdmin)
 app.use(flowRouter)
+
+// Discord watch-status presence (opt-in OAuth link + playback heartbeats).
+app.use(discordPresenceRouter(requireAuth))
 
 app.get('/api/me', requireAuth, (_req, res) => {
   res.json({ username: res.locals.username as string })
