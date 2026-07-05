@@ -2,7 +2,8 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
-import { getTitle, imgUrl, type TitleDetail } from '@/lib/api'
+import { getTitle, imgUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
+import { useAuth } from '@/lib/AuthContext'
 
 const initials = (n: string) =>
   String(n || '?').split(/[^a-z0-9]/i).filter(Boolean).slice(0, 2).map((s) => s[0]).join('').toUpperCase()
@@ -10,6 +11,36 @@ const initials = (n: string) =>
 function DetailShell({
   id, name, badges, sub, overview, children,
 }: { id: string; name: string; badges: ReactNode; sub?: string; overview?: string; children: ReactNode }) {
+  const { user } = useAuth()
+  const [isSaved, setIsSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (user) {
+      getSavedAnimes().then(r => {
+        setIsSaved(r.saved.some(s => s.item_id === id))
+      }).catch(() => {})
+    }
+  }, [user, id])
+
+  const toggleSave = async () => {
+    if (!user) return
+    setSaving(true)
+    try {
+      if (isSaved) {
+        await unsaveAnime(id)
+        setIsSaved(false)
+      } else {
+        await saveAnime(id)
+        setIsSaved(true)
+      }
+    } catch (e) {
+      console.error('Failed to toggle save', e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <main>
       <div className="hero">
@@ -27,6 +58,12 @@ function DetailShell({
           <div className="series-meta-row">{badges}</div>
           <h1 className="k-h1" style={{ fontSize: 32 }}>{name}</h1>
           {sub && <div className="series-sub">{sub}</div>}
+          {user && (
+            <button className={`btn ${isSaved ? 'btn-secondary' : 'btn-primary'}`} style={{ marginTop: 12 }} onClick={toggleSave} disabled={saving}>
+              <Icon name="bookmark" size={15} fill={isSaved ? 'currentColor' : 'none'} />
+              {isSaved ? 'Saved in Library' : 'Save to Library'}
+            </button>
+          )}
         </div>
       </div>
       <div className="series-body">
@@ -121,3 +158,4 @@ export default function Title() {
     </PortalLayout>
   )
 }
+

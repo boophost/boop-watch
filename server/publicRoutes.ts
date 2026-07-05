@@ -7,8 +7,10 @@ import {
   jellyfinConfigured, ensureScope, jfItem, jfJson, jfUrl, proxy,
   getCollectionItems, getScopeEpisodes, getPlayableIds, isCollectionItem, type JfItem,
 } from './jellyfin.js'
-import { buildWatchData } from './watch.js'
+import { buildWatchData, type Segment } from './watch.js'
+import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
+import { getPortalItem, getPortalEpisodes } from './portalDb.js'
 
 export const publicRouter = Router()
 
@@ -129,6 +131,7 @@ publicRouter.get('/api/featured', async (_req, res) => {
   }
 
   const entries = getCollectionItems().flatMap((it) => {
+    if (!it.BackdropImageTags || it.BackdropImageTags.length === 0) return []
     const isSeries = it.Type === 'Series'
     const watchId = isSeries ? firstEp.get(it.Id)?.Id : it.Id
     if (!watchId) return []
@@ -164,40 +167,41 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
     res.status(403).json({ error: 'not available' })
     return
   }
-  const known = getCollectionItems().find((it) => it.Id === id)
+  const pItem = getPortalItem(id)
   try {
-    if (known?.Type === 'Series') {
-      const series = await jfItem(id, 'Overview,Genres,ProductionYear')
-      const eps = await jfJson<{ Items?: JfItem[] }>(`/Shows/${id}/Episodes`, { Fields: 'Overview' })
-      const episodes = (eps.Items || []).map((ep) => ({
-        id: ep.Id,
-        name: ep.Name || 'Episode',
-        num: (ep.ParentIndexNumber != null && ep.IndexNumber != null)
-          ? `S${ep.ParentIndexNumber}·E${ep.IndexNumber}`
-          : (ep.IndexNumber != null ? `E${ep.IndexNumber}` : '·'),
+    if (pItem?.type === 'Series') {
+      const eps = getPortalEpisodes(id)
+      const episodes = eps.map((ep) => ({
+        id: ep.id,
+        name: ep.name || 'Episode',
+        num: (ep.parent_index_number != null && ep.index_number != null)
+          ? `S${ep.parent_index_number}·E${ep.index_number}`
+          : (ep.index_number != null ? `E${ep.index_number}` : '·'),
       }))
       res.json({
         type: 'series',
         id,
-        name: series.Name || '',
-        overview: series.Overview || '',
-        genres: series.Genres || [],
-        year: series.ProductionYear || null,
+        name: pItem.name || '',
+        overview: pItem.overview || '',
+        genres: pItem.genres ? JSON.parse(pItem.genres) : [],
+        year: pItem.production_year || null,
         episodes,
       })
-    } else {
-      const item = await jfItem(id, 'Overview,Genres,ProductionYear,RunTimeTicks')
+    } else if (pItem) {
       res.json({
         type: 'movie',
         id,
-        name: item.Name || '',
-        overview: item.Overview || '',
-        genres: item.Genres || [],
-        year: item.ProductionYear || null,
-        runtimeMin: item.RunTimeTicks ? Math.round(item.RunTimeTicks / 600000000) : null,
+        name: pItem.name || '',
+        overview: pItem.overview || '',
+        genres: pItem.genres ? JSON.parse(pItem.genres) : [],
+        year: pItem.production_year || null,
+        runtimeMin: pItem.runtime_ticks ? Math.round(pItem.runtime_ticks / 600000000) : null,
       })
+    } else {
+      res.status(404).json({ error: 'not found' })
     }
-  } catch {
+  } catch (e) {
+    console.error(e)
     res.status(502).json({ error: 'unavailable' })
   }
 })
@@ -237,7 +241,21 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
       siblings = (e.Items || []).filter((ep) => getPlayableIds().has(ep.Id))
     } catch { /* sidebar is optional */ }
   }
-  res.json(buildWatchData(id, item, siblings, await segPromise))
+
+  // Fallback: when Jellyfin has no Media Segments provider, source community
+  // skip times from AniSkip (MAL-keyed, resolved by the episode's air date).
+  // Budgeted so a cold resolve (Jikan sequel-chain walk) can't stall the route —
+  // the walk keeps filling the cache in the background and the *next* load of
+  // the episode gets the button.
+  let segments = await segPromise
+  if (!segments.length && item.Type === 'Episode' && item.SeriesName) {
+    const epLenSec = item.RunTimeTicks ? item.RunTimeTicks / 1e7 : 0
+    segments = await Promise.race([
+      aniskipSegments(item.SeriesName, item.PremiereDate, epLenSec).catch(() => [] as Segment[]),
+      new Promise<Segment[]>((r) => setTimeout(() => r([]), 8000)),
+    ])
+  }
+  res.json(buildWatchData(id, item, siblings, segments))
 })
 
 // Weekly anime schedule, filtered to the library.
@@ -262,6 +280,11 @@ publicRouter.get('/img/:id', async (req, res) => {
   const { id } = req.params
   if (!getPlayableIds().has(id) && !isCollectionItem(id)) {
     res.status(404).end()
+    return
+  }
+  const pItem = getPortalItem(id)
+  if (pItem?.image_url) {
+    res.redirect(302, pItem.image_url)
     return
   }
   await proxy(req, res, jfUrl(`/Items/${id}/Images/Primary`, { maxWidth: '400', quality: '90' }))

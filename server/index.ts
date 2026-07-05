@@ -32,7 +32,7 @@ app.use(cookieParser())
 // schedule). Registered before the authed admin APIs and the SPA catch-all.
 app.use(publicRouter)
 
-function requireAuth(
+async function requireAuth(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction,
@@ -41,6 +41,18 @@ function requireAuth(
   const authHeader = req.headers.authorization
   if (authHeader?.startsWith('Bearer ')) {
     token = authHeader.split(' ')[1]
+    try {
+      const resp = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {
+        headers: { Authorization: `Bearer ${token}`, apikey: process.env.SUPABASE_ANON_KEY || '' }
+      })
+      if (resp.ok) {
+        const user = await resp.json()
+        res.locals.username = user.id
+        return next()
+      }
+    } catch (e) {
+      // fallback to jwt.verify below
+    }
   }
 
   if (!token) {
@@ -206,8 +218,29 @@ app.delete('/api/series/:id', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
+app.get('/api/library/saved', requireAuth, (req, res) => {
+  res.json({ saved: seriesDb.getSavedAnimes(res.locals.username as string) })
+})
+
+app.post('/api/library/saved', requireAuth, (req, res) => {
+  const { item_id } = req.body
+  if (!item_id) { res.status(400).json({ error: 'item_id required' }); return }
+  seriesDb.saveAnime(res.locals.username as string, String(item_id))
+  res.json({ ok: true })
+})
+
+app.delete('/api/library/saved/:id', requireAuth, (req, res) => {
+  seriesDb.unsaveAnime(res.locals.username as string, String(req.params.id))
+  res.json({ ok: true })
+})
+
+
 app.get('/config.js', (req, res) => {
+  // Dynamic per-request env dump — a CDN in front of this (e.g. Cloudflare)
+  // will otherwise cache it by its .js extension and serve stale credentials
+  // long after a Supabase URL/key rotation.
   res.setHeader('Content-Type', 'application/javascript')
+  res.setHeader('Cache-Control', 'no-store')
   res.send(`window.ENV = {
     SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
     SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)}

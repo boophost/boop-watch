@@ -1,15 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  MediaPlayer, MediaProvider, isHLSProvider, isVideoProvider,
+  MediaPlayer, MediaProvider, canFullscreen, isHLSProvider, isVideoProvider,
   type MediaPlayerInstance, type MediaProviderAdapter,
 } from '@vidstack/react'
 import { DefaultVideoLayout, defaultLayoutIcons } from '@vidstack/react/player/layouts/default'
 import HLS from 'hls.js'
 import { Icon, type IconName } from '@/components/Icon'
+import { SearchBar } from '@/components/SearchBar'
+import { UserCrumb } from '@/components/PortalLayout'
+import { useAuth } from '@/lib/AuthContext'
 import { getWatch, type Segment, type WatchData } from '@/lib/api'
+import {
+  loadProgressMap, localProgress, saveLocalProgress, saveAccountProgress, backfillAccountProgress,
+  type Progress,
+} from '@/lib/progress'
 import '@vidstack/react/player/styles/default/theme.css'
 import '@vidstack/react/player/styles/default/layouts/video.css'
+
+// Main player header: brand (icon-only on phones) · centered search · account
+// crumb. The series back-link + episode title live in the .subbar row below it.
+function PlayerTopbar() {
+  return (
+    <header className="topbar">
+      <Link className="brand" to="/">
+        <span className="brand-mark">B</span>
+        <span className="label">boopurnoes <span className="sub">· watch</span></span>
+      </Link>
+      <SearchBar />
+      <UserCrumb />
+    </header>
+  )
+}
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 declare global {
@@ -44,26 +66,30 @@ function loadScript(src: string): Promise<void> {
   }))
 }
 
-// ── localStorage helpers (preferences, watched set, resume position) ──
+// ── localStorage helpers (playback preferences) ──
 const PREF_KEY = 'bw:pref'
-const WATCHED_KEY = 'bw:watched'
 type Pref = { audioLang?: string; quality?: string; subGroup?: string }
 const readPref = (): Pref => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') } catch { return {} } }
 const savePref = (patch: Pref) => { try { localStorage.setItem(PREF_KEY, JSON.stringify({ ...readPref(), ...patch })) } catch { /* ignore */ } }
-const readWatched = (): Record<string, number> => { try { return JSON.parse(localStorage.getItem(WATCHED_KEY) || '{}') } catch { return {} } }
-const markWatched = (id: string) => {
-  const w = readWatched()
-  if (!w[id]) { w[id] = 1; try { localStorage.setItem(WATCHED_KEY, JSON.stringify(w)) } catch { /* ignore */ } }
-}
 
 export default function Watch() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
+  const { user, loading: authLoading } = useAuth()
 
   const [data, setData] = useState<WatchData | null>(null)
+  // Watch progress for this series' episodes (account rows when logged in,
+  // local otherwise); drives the episode-list bars and the resume position.
+  const [progMap, setProgMap] = useState<Record<string, Progress>>({})
   const [error, setError] = useState('')
   const [subsReady, setSubsReady] = useState(false) // JASSUB library loaded
   const [theater, setTheater] = useState(false)
+  // Pseudo-fullscreen for iPhone: no element-fullscreen API there, so Vidstack's
+  // fullscreen button falls back to the video's *native* fullscreen — which
+  // presents the bare <video> layer and leaves the JASSUB subtitle canvas (a DOM
+  // overlay) behind. We intercept the request and fill the viewport with CSS
+  // instead (theater layout with the control bar hidden), keeping subs rendered.
+  const [pseudoFs, setPseudoFs] = useState(false)
   // Gate the source URL until audio/quality are initialised from the response, so
   // the player loads once with the final selection instead of reloading the
   // transcode (which loses the resume position).
@@ -72,6 +98,8 @@ export default function Watch() {
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null)
   // The intro/outro segment the playhead is currently inside (drives the skip button).
   const [activeSeg, setActiveSeg] = useState<Segment | null>(null)
+  // Media duration, needed to place the segment marks on the timeline.
+  const [duration, setDuration] = useState(0)
 
   // selections
   const [audioIndex, setAudioIndex] = useState<string | null>(null)
@@ -83,6 +111,9 @@ export default function Watch() {
   const firstLoad = useRef(true)
   // Position + play-state to restore after a transcode reload (audio/quality switch).
   const pendingSeek = useRef<{ time: number; play: boolean } | null>(null)
+  // Resume point from saved progress (account or local), applied on first canplay.
+  const resumePos = useRef<number | null>(null)
+  const epsListRef = useRef<HTMLDivElement>(null)
 
   // Load the subtitle library (JASSUB) once. A CDN hiccup is non-fatal: the
   // player and page chrome still work; only subtitle rendering waits.
@@ -96,11 +127,30 @@ export default function Watch() {
 
   // Fetch metadata when the episode changes.
   useEffect(() => {
-    setData(null); setError(''); setSelReady(false); setActiveSeg(null)
+    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0)
     firstLoad.current = true
     pendingSeek.current = null
+    resumePos.current = null
     getWatch(id).then(setData).catch((e: Error) => setError(e.message))
   }, [id])
+
+  // Load progress for this episode + its siblings (episode-list bars and the
+  // resume point). Waits for auth so a logged-in reload reads account rows.
+  useEffect(() => {
+    if (!data || authLoading) return
+    let alive = true
+    const ids = [data.id, ...data.episodes.map((e) => e.id)]
+    if (user) {
+      backfillAccountProgress(user.id)
+    }
+    loadProgressMap(ids, !!user).then((m) => {
+      if (!alive) return
+      setProgMap(m)
+      const cur = m[data.id]
+      if (cur && !cur.watched && cur.position > 5) resumePos.current = cur.position
+    })
+    return () => { alive = false }
+  }, [data, user, authLoading])
 
   // Initialise selections from the response + saved preferences.
   useEffect(() => {
@@ -120,6 +170,19 @@ export default function Watch() {
     }
     setSubIndex(sub)
     setSelReady(true)
+  }, [data])
+
+  // Center the playing episode in the list, once per episode. Scrolls only the
+  // list element — scrollIntoView also scrolls the page, and the progress bar
+  // re-render made that fire every few seconds (dragging mobile down the page).
+  useEffect(() => {
+    if (!data) return
+    const list = epsListRef.current
+    const row = list?.querySelector<HTMLElement>('[aria-current="true"]')
+    if (list && row) {
+      list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top
+        - (list.clientHeight - row.clientHeight) / 2
+    }
   }, [data])
 
   const quality = useMemo(() => data?.quality.find((q) => q.key === qKey) || { h: 0, vb: 0, key: 'auto', label: 'Auto' }, [data, qKey])
@@ -153,10 +216,16 @@ export default function Watch() {
   const onCanPlay = () => {
     const p = playerRef.current
     if (!p || !data) return
+    if (Number.isFinite(p.duration) && p.duration > 0) setDuration((d) => d || p.duration)
     if (firstLoad.current) {
       firstLoad.current = false
-      const n = parseInt(localStorage.getItem(`bw:pos:${data.id}`) || '', 10)
-      if (Number.isInteger(n) && n > 5) p.currentTime = n
+      // Account/local progress when it loaded in time, else the sync local view
+      // (the HLS transcode start usually outlasts the progress fetch).
+      const n = resumePos.current ?? (() => {
+        const l = localProgress(data.id)
+        return l && !l.watched && l.position > 5 ? l.position : null
+      })()
+      if (n != null && n > 5) p.currentTime = n
     } else if (pendingSeek.current) {
       const { time, play } = pendingSeek.current
       pendingSeek.current = null
@@ -169,6 +238,8 @@ export default function Watch() {
   const onTimeUpdate = () => {
     const p = playerRef.current
     if (!p || !data?.segments.length) return
+    // Duration settles once the HLS playlist is parsed; capture it for the marks.
+    if (Number.isFinite(p.duration) && p.duration > 0) setDuration((d) => d || p.duration)
     const t = p.currentTime
     const seg = data.segments.find((s) => t >= s.start && t < s.end - 1) || null
     setActiveSeg((prev) => (prev?.type === seg?.type && prev?.start === seg?.start ? prev : seg))
@@ -178,6 +249,22 @@ export default function Watch() {
     const p = playerRef.current
     if (p && activeSeg) { p.currentTime = activeSeg.end; setActiveSeg(null) }
   }
+
+  // Intro/outro marks on the timeline: a gradient with a stop pair per segment,
+  // painted over the seek bar by kagura.css (.vds-time-slider::after).
+  const segMarksStyle = useMemo(() => {
+    if (!data?.segments.length || !duration) return undefined
+    const stops = [...data.segments]
+      .sort((a, b) => a.start - b.start)
+      .flatMap((s) => {
+        const a = Math.min(100, Math.max(0, (s.start / duration) * 100)).toFixed(2)
+        const b = Math.min(100, Math.max(0, (s.end / duration) * 100)).toFixed(2)
+        if (Number(b) <= Number(a)) return []
+        return [`transparent ${a}%`, `var(--accent-deep) ${a}%`, `var(--accent-deep) ${b}%`, `transparent ${b}%`]
+      })
+    if (!stops.length) return undefined
+    return { '--seg-marks': `linear-gradient(to right, ${stops.join(', ')})` }
+  }, [data, duration])
 
   // Capture position + play-state before an audio/quality switch reloads the
   // transcode, so onCanPlay can restore them.
@@ -189,7 +276,11 @@ export default function Watch() {
   // Auto-advance when the episode ends.
   const onEnded = () => {
     if (!data) return
-    markWatched(data.id)
+    const p = playerRef.current
+    const prog: Progress = { position: p?.duration || 0, duration: p?.duration || 0, watched: true }
+    saveLocalProgress(data.id, prog)
+    if (user) saveAccountProgress(user.id, data.id, prog).catch(() => {})
+    setProgMap((m) => ({ ...m, [data.id]: prog }))
     if (data.nextId) navigate(`/watch/${data.nextId}`)
   }
 
@@ -221,34 +312,61 @@ export default function Watch() {
     }
   }, [data, subsReady, subIndex, videoEl])
 
-  // Persist resume position; finish -> mark watched.
+  // Persist progress: locally every tick (resume), to the account on a longer
+  // cadence + flush points (tab hide, unmount, near-end), and into progMap so
+  // the episode list's bar tracks the playhead. Past the -15s mark it counts
+  // as watched.
   useEffect(() => {
     if (!data) return
-    const POS_KEY = `bw:pos:${data.id}`
-    const savePos = () => {
+    let lastPush = 0
+    const savePos = (flush = false) => {
       const p = playerRef.current
       if (!p) return
       const d = p.duration
       if (!d || isNaN(d)) return
       const t = p.currentTime || 0
-      try {
-        if (t > 5 && t < d - 15) localStorage.setItem(POS_KEY, String(Math.floor(t)))
-        else { localStorage.removeItem(POS_KEY); if (t >= d - 15) markWatched(data.id) }
-      } catch { /* ignore */ }
+      if (t <= 5) return
+      const prog: Progress = { position: t, duration: d, watched: t >= d - 15 }
+      saveLocalProgress(data.id, prog)
+      setProgMap((m) => ({ ...m, [data.id]: prog }))
+      const now = Date.now()
+      if (user && (flush || prog.watched || now - lastPush >= 15000)) {
+        lastPush = now
+        saveAccountProgress(user.id, data.id, prog).catch(() => {})
+      }
     }
-    const iv = setInterval(savePos, 5000)
-    const onHide = () => savePos()
-    const onVis = () => { if (document.hidden) savePos() }
+    const iv = setInterval(() => savePos(), 5000)
+    const onHide = () => savePos(true)
+    const onVis = () => { if (document.hidden) savePos(true) }
     window.addEventListener('pagehide', onHide)
     document.addEventListener('visibilitychange', onVis)
-    return () => { clearInterval(iv); window.removeEventListener('pagehide', onHide); document.removeEventListener('visibilitychange', onVis); savePos() }
-  }, [data])
+    return () => {
+      clearInterval(iv)
+      window.removeEventListener('pagehide', onHide)
+      document.removeEventListener('visibilitychange', onVis)
+      savePos(true)
+    }
+  }, [data, user])
 
-  // Theater mode reflects onto <body> (CSS targets body.theater).
+  // Theater + pseudo-fullscreen reflect onto <body> (CSS targets body.theater /
+  // body.fs; pseudo-fullscreen is the theater layout plus a hidden control bar).
   useEffect(() => {
-    document.body.classList.toggle('theater', theater)
-    return () => { document.body.classList.remove('theater') }
-  }, [theater])
+    document.body.classList.toggle('theater', theater || pseudoFs)
+    document.body.classList.toggle('fs', pseudoFs)
+    return () => { document.body.classList.remove('theater', 'fs') }
+  }, [theater, pseudoFs])
+
+  // Where element fullscreen doesn't exist (iPhone), catch Vidstack's fullscreen
+  // request before its own handler runs (capture phase on document; the handler
+  // bails on defaultPrevented) and toggle pseudo-fullscreen instead. Vidstack's
+  // fullscreen state never turns on, so every button press dispatches an
+  // *enter* request — hence toggle.
+  useEffect(() => {
+    if (canFullscreen()) return
+    const onRequest = (e: Event) => { e.preventDefault(); setPseudoFs((v) => !v) }
+    document.addEventListener('media-enter-fullscreen-request', onRequest, true)
+    return () => document.removeEventListener('media-enter-fullscreen-request', onRequest, true)
+  }, [])
 
   // Keyboard: 't' toggles theater, Esc exits (ignored while typing).
   useEffect(() => {
@@ -256,7 +374,7 @@ export default function Watch() {
       const el = document.activeElement as HTMLElement | null
       const tag = el && el.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return
-      if (e.key === 'Escape') setTheater(false)
+      if (e.key === 'Escape') { setTheater(false); setPseudoFs(false) }
       else if ((e.key === 't' || e.key === 'T') && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); setTheater((t) => !t) }
     }
     document.addEventListener('keydown', onKey)
@@ -280,13 +398,12 @@ export default function Watch() {
   }, [])
 
   if (error) {
-    return <div className="player"><div className="topbar"><Link className="back" to="/"><Icon name="back" size={15} /> All titles</Link></div><p style={{ padding: 20 }}>{error}</p></div>
+    return <div className="kagura player"><PlayerTopbar /><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></div>
   }
   if (!data) {
-    return <div className="player"><div className="topbar"><span className="t">Loading…</span></div></div>
+    return <div className="kagura player"><PlayerTopbar /><div className="subbar"><span className="t">Loading…</span></div></div>
   }
 
-  const watched = readWatched()
   const closeMenu = (e: React.MouseEvent) => (e.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')
 
   const audioLabel = data.audio.tracks.find((t) => String(t.index) === audioIndex)?.label || 'Audio'
@@ -294,10 +411,10 @@ export default function Watch() {
   const qualityLabel = data.quality.find((q) => q.key === qKey)?.label || 'Auto'
 
   return (
-    <div className="player">
-      <div className="topbar">
-        <Link className="back" to={data.back.href}><Icon name="back" size={15} /> {data.back.label}</Link>
-        <span className="sep">/</span>
+    <div className="kagura player">
+      <PlayerTopbar />
+      <div className="subbar">
+        <Link className="back" to={data.back.href}><Icon name="back" size={15} /><span className="bl">{data.back.label}</span></Link>
         {data.epNum && <span className="ep">{data.epNum}</span>}
         <span className="t">{data.title}</span>
       </div>
@@ -311,6 +428,7 @@ export default function Watch() {
                 className="vds-player"
                 title={data.title}
                 src={{ src, type: 'application/x-mpegurl' }}
+                style={segMarksStyle}
                 aspectRatio="16/9"
                 autoPlay
                 playsInline
@@ -372,20 +490,26 @@ export default function Watch() {
         {data.episodes.length > 0 && (
           <aside className="col-eps panel">
             <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span><span className="badge">{data.episodes.length}</span></div>
-            <div className="eps-list">
-              {data.episodes.map((ep) => (
-                <Link
-                  key={ep.id}
-                  className={`eprow${ep.current ? ' current' : ''}${!ep.current && watched[ep.id] ? ' watched' : ''}`}
-                  to={`/watch/${ep.id}`}
-                  aria-current={ep.current ? 'true' : undefined}
-                  ref={ep.current ? (el) => el?.scrollIntoView({ block: 'center' }) : undefined}
-                >
-                  <span className="epn">{ep.num}</span>
-                  <span className="ept">{ep.name}</span>
-                  {ep.current && <span className="epnow"><Icon name="play" size={12} fill="currentColor" /></span>}
-                </Link>
-              ))}
+            <div className="eps-list" ref={epsListRef}>
+              {data.episodes.map((ep) => {
+                const prog = progMap[ep.id]
+                const watched = !!prog?.watched
+                const pct = watched ? 100
+                  : prog && prog.duration > 0 ? Math.min(100, (prog.position / prog.duration) * 100) : 0
+                return (
+                  <Link
+                    key={ep.id}
+                    className={`eprow${ep.current ? ' current' : ''}${!ep.current && watched ? ' watched' : ''}`}
+                    to={`/watch/${ep.id}`}
+                    aria-current={ep.current ? 'true' : undefined}
+                  >
+                    <span className="epn">{ep.num}</span>
+                    <span className="ept">{ep.name}</span>
+                    {ep.current && <span className="epnow"><Icon name="play" size={12} fill="currentColor" /></span>}
+                    {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
+                  </Link>
+                )
+              })}
             </div>
           </aside>
         )}

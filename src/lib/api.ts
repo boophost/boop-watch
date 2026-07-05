@@ -129,3 +129,19 @@ export const getSchedule = (weekParam: string) =>
 
 export const imgUrl = (id: string) => `/img/${encodeURIComponent(id)}`
 export const backdropUrl = (id: string) => `/img/${encodeURIComponent(id)}/backdrop`
+
+export const getSavedAnimes = () => fetchAuth('/api/library/saved').then(r => r.json() as Promise<{ saved: { item_id: string; added_at: string }[] }>)
+export async function saveAnime(id: string): Promise<void> {
+  const r = await fetchAuth('/api/library/saved', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ item_id: id }),
+  })
+  if (!r.ok) throw new Error('failed to save anime')
+}
+export async function unsaveAnime(id: string): Promise<void> {
+  const r = await fetchAuth(`/api/library/saved/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  if (!r.ok) throw new Error('failed to unsave anime')
+}
