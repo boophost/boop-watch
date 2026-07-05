@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   MediaPlayer, MediaProvider, canFullscreen, isHLSProvider, isVideoProvider,
@@ -8,7 +8,7 @@ import { DefaultVideoLayout, defaultLayoutIcons } from '@vidstack/react/player/l
 import HLS from 'hls.js'
 import { Icon, type IconName } from '@/components/Icon'
 import { SearchBar } from '@/components/SearchBar'
-import { UserCrumb } from '@/components/PortalLayout'
+import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
 import { getWatch, type Segment, type WatchData } from '@/lib/api'
 import {
@@ -18,15 +18,27 @@ import {
 import '@vidstack/react/player/styles/default/theme.css'
 import '@vidstack/react/player/styles/default/layouts/video.css'
 
-// Main player header: brand (icon-only on phones) · centered search · account
-// crumb. The series back-link + episode title live in the .subbar row below it.
+// The player page reuses the portal's side nav (Kagura-scoped, so it composes
+// with the .player styles already on the root). The .shell flex layout puts the
+// nav beside a .shell-main column holding the topbar/subbar/player. Theater +
+// pseudo-fullscreen still fill the viewport (their .col-video is position:fixed).
+function PlayerShell({ children }: { children: ReactNode }) {
+  const [collapsed, setCollapsed] = useSidebarCollapsed()
+  return (
+    <div className="kagura player shell" data-collapsed={collapsed}>
+      <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+      <div className="shell-main">{children}</div>
+      <MobileNav />
+    </div>
+  )
+}
+
+// Main player header: centered search · account crumb. The brand lives in the
+// side nav now, so the topbar drops it to avoid a duplicate wordmark. The series
+// back-link + episode title live in the .subbar row below it.
 function PlayerTopbar() {
   return (
     <header className="topbar">
-      <Link className="brand" to="/">
-        <span className="brand-mark">B</span>
-        <span className="label">boopurnoes <span className="sub">· watch</span></span>
-      </Link>
       <SearchBar />
       <UserCrumb />
     </header>
@@ -398,10 +410,10 @@ export default function Watch() {
   }, [])
 
   if (error) {
-    return <div className="kagura player"><PlayerTopbar /><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></div>
+    return <PlayerShell><PlayerTopbar /><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></PlayerShell>
   }
   if (!data) {
-    return <div className="kagura player"><PlayerTopbar /><div className="subbar"><span className="t">Loading…</span></div></div>
+    return <PlayerShell><PlayerTopbar /><div className="subbar"><span className="t">Loading…</span></div></PlayerShell>
   }
 
   const closeMenu = (e: React.MouseEvent) => (e.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')
@@ -411,7 +423,7 @@ export default function Watch() {
   const qualityLabel = data.quality.find((q) => q.key === qKey)?.label || 'Auto'
 
   return (
-    <div className="kagura player">
+    <PlayerShell>
       <PlayerTopbar />
       <div className="subbar">
         <Link className="back" to={data.back.href}><Icon name="back" size={15} /><span className="bl">{data.back.label}</span></Link>
@@ -514,7 +526,7 @@ export default function Watch() {
           </aside>
         )}
       </div>
-    </div>
+    </PlayerShell>
   )
 }
 
