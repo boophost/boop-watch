@@ -18,3 +18,7 @@ data/
 
 # playwright mcp scratch output
 .playwright-mcp/
+
+# flow MCP server local secrets (staging JWT secret / token)
+mcp/*.env
+mcp/.secrets.json

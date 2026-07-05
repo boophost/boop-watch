@@ -243,6 +243,116 @@ const httpSource: NodeImpl = {
   },
 }
 
+// ---------------------------------------------------------------------------
+// qBittorrent WebUI client shared by the source (list) and sink (add) nodes.
+// Credentials come from node config first, env vars second, so a stored graph
+// can stay credential-free.
+// ---------------------------------------------------------------------------
+async function qbitLogin(base: string, username: string, password: string): Promise<string> {
+  const login = await fetch(`${base}/api/v2/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username, password }),
+    signal: AbortSignal.timeout(15_000),
+  })
+  const cookie = login.headers.get('set-cookie')?.split(';')[0]
+  if (!login.ok || !cookie || !(await login.text()).includes('Ok')) {
+    throw new Error('qBittorrent login failed')
+  }
+  return cookie
+}
+
+function qbitCreds(config: Record<string, unknown>): { base: string; user: string; pass: string } {
+  const base = (str(config, 'url', '') || process.env.QBIT_URL || '').replace(/\/$/, '')
+  if (!base) throw new Error('qBittorrent URL is not set (node config or QBIT_URL env)')
+  return {
+    base,
+    user: str(config, 'username', '') || process.env.QBIT_USERNAME || 'admin',
+    pass: str(config, 'password', '') || process.env.QBIT_PASSWORD || '',
+  }
+}
+
+// qBittorrent reports every torrent's on-disk location as an absolute path from
+// its own filesystem. The importer runs in a different container, so rewrite
+// that prefix to wherever the same files are mounted in the pod.
+function remapPath(p: string, from: string, to: string): string {
+  if (!from || !to) return p
+  const f = from.replace(/\/+$/, '')
+  if (p === f) return to.replace(/\/+$/, '')
+  if (p.startsWith(f + '/')) return to.replace(/\/+$/, '') + p.slice(f.length)
+  return p
+}
+
+interface QbitInfo {
+  hash: string
+  name: string
+  state: string
+  progress: number
+  category: string
+  size: number
+  save_path?: string
+  content_path?: string
+}
+
+const qbittorrentSource: NodeImpl = {
+  spec: {
+    type: 'source.qbittorrent',
+    label: 'qBittorrent torrents',
+    category: 'source',
+    description:
+      'Lists torrents from qBittorrent (optionally completed only), emitting each one’s on-disk content path so the importer can place the files.',
+    inputs: [],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'url', label: 'qBittorrent URL', kind: 'text', default: '', help: 'Empty = QBIT_URL env.' },
+      { key: 'username', label: 'Username', kind: 'text', default: '', help: 'Empty = QBIT_USERNAME env.' },
+      { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
+      { key: 'category', label: 'Category', kind: 'text', default: 'anime', help: 'Empty = all categories.' },
+      { key: 'completedOnly', label: 'Completed only', kind: 'boolean', default: true, help: 'Only emit torrents that finished downloading (ready to import).' },
+      { key: 'pathFrom', label: 'Download path (qBit)', kind: 'text', default: '', help: 'Path prefix as qBittorrent sees it, e.g. /downloads.' },
+      { key: 'pathTo', label: 'Download path (pod)', kind: 'text', default: '', help: 'Where that same prefix is mounted here, e.g. /downloads. Both empty = no rewrite.' },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const { base, user, pass } = qbitCreds(config)
+    const category = str(config, 'category', 'anime')
+    const completedOnly = bool(config, 'completedOnly', true)
+    const from = str(config, 'pathFrom', '')
+    const to = str(config, 'pathTo', '')
+
+    const cookie = await qbitLogin(base, user, pass)
+    const q = new URLSearchParams()
+    if (category) q.set('category', category)
+    if (completedOnly) q.set('filter', 'completed')
+    const res = await fetch(`${base}/api/v2/torrents/info?${q.toString()}`, {
+      headers: { Cookie: cookie },
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!res.ok) throw new Error(`qBittorrent list failed (${res.status})`)
+    const torrents = (await res.json()) as QbitInfo[]
+
+    const items = torrents.map((t): FlowItem => {
+      const contentPath = remapPath(String(t.content_path ?? ''), from, to)
+      return {
+        // `name` so title-matching / template nodes work unchanged.
+        name: t.name,
+        torrent_hash: t.hash,
+        torrent_name: t.name,
+        torrent_state: t.state,
+        torrent_progress: t.progress,
+        torrent_category: t.category,
+        torrent_size: t.size ?? null,
+        save_path: remapPath(String(t.save_path ?? ''), from, to),
+        content_path: contentPath,
+        torrent_episode: parseEpisode(t.name),
+        torrent_is_batch: titleIsBatch(t.name),
+      }
+    })
+    ctx.notes.push(`${items.length} torrent(s)${completedOnly ? ' (completed)' : ''}${category ? ` in "${category}"` : ''}`)
+    return { items }
+  },
+}
+
 const template: NodeImpl = {
   spec: {
     type: 'transform.template',
@@ -1028,21 +1138,8 @@ const qbittorrentSink: NodeImpl = {
 
     // Node config wins; env vars are the fallback so credentials can be kept
     // out of the stored graph when preferred.
-    const base = (str(config, 'url', '') || process.env.QBIT_URL || '').replace(/\/$/, '')
-    if (!base) throw new Error('qBittorrent URL is not set (node config or QBIT_URL env)')
-    const login = await fetch(`${base}/api/v2/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        username: str(config, 'username', '') || process.env.QBIT_USERNAME || 'admin',
-        password: str(config, 'password', '') || process.env.QBIT_PASSWORD || '',
-      }),
-      signal: AbortSignal.timeout(15_000),
-    })
-    const cookie = login.headers.get('set-cookie')?.split(';')[0]
-    if (!login.ok || !cookie || !(await login.text()).includes('Ok')) {
-      throw new Error('qBittorrent login failed')
-    }
+    const { base, user, pass } = qbitCreds(config)
+    const cookie = await qbitLogin(base, user, pass)
 
     const paused = bool(config, 'paused', false)
     const form = new URLSearchParams({
@@ -1162,6 +1259,7 @@ const IMPLS: NodeImpl[] = [
   indexerSource,
   portalSource,
   httpSource,
+  qbittorrentSource,
   fieldFilter,
   dedupe,
   limit,
