@@ -16,6 +16,52 @@ export interface SeriesRow {
   image_url: string | null
   url: string | null
   added_at: string
+  // Richer metadata (populated by the enrich.metadata flow node) — the
+  // groundwork for our own catalog to replace Jellyfin as the source of truth.
+  title_english: string | null
+  title_japanese: string | null
+  type: string | null
+  episodes: number | null
+  status: string | null
+  score: number | null
+  year: number | null
+  season: string | null
+  aired: string | null
+  studios: string | null // JSON array of names
+  genres: string | null // JSON array of names
+  metadata_updated_at: string | null
+}
+
+// Columns added after the original 5-field schema. Applied as additive ALTERs so
+// existing series.sqlite files migrate in place (ADD COLUMN is a no-op-safe when
+// guarded by the table_info check below).
+const SERIES_EXTRA_COLUMNS: [string, string][] = [
+  ['title_english', 'TEXT'],
+  ['title_japanese', 'TEXT'],
+  ['type', 'TEXT'],
+  ['episodes', 'INTEGER'],
+  ['status', 'TEXT'],
+  ['score', 'REAL'],
+  ['year', 'INTEGER'],
+  ['season', 'TEXT'],
+  ['aired', 'TEXT'],
+  ['studios', 'TEXT'],
+  ['genres', 'TEXT'],
+  ['metadata_updated_at', 'TEXT'],
+]
+
+export interface SeriesMetadata {
+  title_english?: string | null
+  title_japanese?: string | null
+  type?: string | null
+  episodes?: number | null
+  status?: string | null
+  score?: number | null
+  year?: number | null
+  season?: string | null
+  aired?: string | null
+  studios?: string | null
+  genres?: string | null
 }
 
 let db: Database.Database | null = null
@@ -54,8 +100,48 @@ export function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_history_user ON watch_history(username);
   `)
+
+  // Additive migration for the richer metadata columns.
+  const existing = new Set(
+    (instance.prepare(`PRAGMA table_info(series)`).all() as { name: string }[]).map((c) => c.name),
+  )
+  for (const [name, type] of SERIES_EXTRA_COLUMNS) {
+    if (!existing.has(name)) instance.exec(`ALTER TABLE series ADD COLUMN ${name} ${type}`)
+  }
+
   db = instance
   return instance
+}
+
+/**
+ * Upsert a catalog series by mal_id and set its richer metadata. Creates the
+ * row (with title/synopsis/image/url) if the mal_id is new, otherwise updates
+ * only the provided metadata fields. Returns the resulting row.
+ */
+export function upsertSeriesMetadata(
+  base: { mal_id: number; title: string; synopsis?: string | null; image_url?: string | null; url?: string | null },
+  meta: SeriesMetadata,
+): SeriesRow {
+  const db = getDb()
+  const existing = findByMalId(base.mal_id)
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO series (mal_id, title, synopsis, image_url, url) VALUES (@mal_id, @title, @synopsis, @image_url, @url)`,
+    ).run({
+      mal_id: base.mal_id,
+      title: base.title,
+      synopsis: base.synopsis ?? null,
+      image_url: base.image_url ?? null,
+      url: base.url ?? null,
+    })
+  }
+  const cols = Object.keys(meta).filter((k) => (meta as Record<string, unknown>)[k] !== undefined)
+  const assignments = [...cols.map((c) => `${c} = @${c}`), `metadata_updated_at = datetime('now')`]
+  db.prepare(`UPDATE series SET ${assignments.join(', ')} WHERE mal_id = @mal_id`).run({
+    ...meta,
+    mal_id: base.mal_id,
+  })
+  return findByMalId(base.mal_id)!
 }
 
 export function getSavedAnimes(username: string): { item_id: string; added_at: string }[] {
@@ -77,7 +163,7 @@ export function listSeries(): SeriesRow[] {
 }
 
 export function insertSeries(
-  row: Omit<SeriesRow, 'id' | 'added_at'>,
+  row: Pick<SeriesRow, 'mal_id' | 'title' | 'synopsis' | 'image_url' | 'url'>,
 ): SeriesRow {
   const stmt = getDb().prepare(`
     INSERT INTO series (mal_id, title, synopsis, image_url, url)

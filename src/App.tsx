@@ -1,9 +1,15 @@
+import { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from './lib/AuthContext'
 import { APP_VERSION, APP_COMMIT } from './version'
 import Login from './pages/Login'
-import Dashboard from './pages/Dashboard'
+import ManageLayout from './pages/manage/ManageLayout'
+import Library from './pages/manage/Library'
+import Flows from './pages/manage/Flows'
 import AdminSeriesDetail from './pages/SeriesDetail'
+
+// The graph editor pulls in @xyflow/react — keep it out of the portal bundle.
+const FlowEditor = lazy(() => import('./pages/manage/FlowEditor'))
 import Browse from './pages/Browse'
 import Title from './pages/Title'
 import Watch from './pages/Watch'
@@ -81,8 +87,25 @@ export default function App() {
 
         {/* Admin routes */}
         <Route path="/manage" element={<RequireAdmin />}>
-          <Route index element={<Dashboard />} />
-          <Route path="series/:seriesId" element={<AdminSeriesDetail />} />
+          <Route element={<ManageLayout />}>
+            <Route index element={<Library />} />
+            <Route path="series/:seriesId" element={<AdminSeriesDetail />} />
+            <Route path="flows" element={<Flows />} />
+            <Route
+              path="flows/:flowId"
+              element={
+                <Suspense
+                  fallback={
+                    <div className="flex h-screen items-center justify-center">
+                      <div className="text-muted-foreground">Loading editor…</div>
+                    </div>
+                  }
+                >
+                  <FlowEditor />
+                </Suspense>
+              }
+            />
+          </Route>
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

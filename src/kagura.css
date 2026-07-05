@@ -117,6 +117,27 @@
   & .chrome .crumb:hover { color: var(--fg); }
   & .chrome .crumb-avatar { padding: 0; border-radius: 999px; transition: box-shadow .14s ease; }
   & .chrome .crumb-avatar:hover { box-shadow: 0 0 0 2px var(--border-strong); }
+  /* User menu dropdown (avatar in the header opens a menu) */
+  & .umenu { position: relative; display: inline-flex; }
+  & .umenu > summary { list-style: none; cursor: pointer; }
+  & .umenu > summary::-webkit-details-marker { display: none; }
+  & .umenu[open] > summary.crumb-avatar { box-shadow: 0 0 0 2px var(--accent); }
+  & .umenu-pop {
+    position: absolute; top: calc(100% + 10px); right: 0; min-width: 220px; z-index: 140;
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 11px; padding: 6px;
+    box-shadow: 0 30px 80px -20px oklch(0 0 0 / 75%);
+  }
+  & .umenu-head { display: flex; align-items: center; gap: 10px; padding: 8px 10px 10px; }
+  & .umenu-head .umenu-name { font-size: 12.5px; color: var(--fg-muted); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  & .umenu-sep { height: 1px; background: var(--border); margin: 6px 4px; }
+  & .umenu-pop .popitem { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    padding: 8px 10px; border: none; border-radius: 7px; background: transparent; color: var(--fg);
+    font: 13px var(--font-sans); cursor: pointer; }
+  & .umenu-pop .popitem:hover { background: var(--bg-hover); }
+  & .umenu-pop .popitem .icon { color: var(--fg-subtle); flex: none; }
+  & .umenu-pop .popitem:hover .icon { color: var(--fg); }
+  & .umenu-pop .pi-main { flex: 1; min-width: 0; }
   & .avatar-img { border-radius: 999px; object-fit: cover; display: block; }
   & .avatar-fallback {
     display: inline-flex; align-items: center; justify-content: center; border-radius: 999px;
@@ -454,7 +475,9 @@
      scope, so the page root carries both classes. */
   & .topbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 520px) minmax(0, 1fr);
     gap: 14px; align-items: center; padding: 12px 22px; border-bottom: 1px solid var(--border);
+    position: relative; z-index: 60;
     background: oklch(0.145 0.008 285 / 70%); backdrop-filter: blur(10px); }
+  & .topbar .umenu { grid-column: 3; justify-self: end; }
   & .topbar .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px;
     font-weight: 600; font-size: 14px; color: var(--fg); min-width: 0; }
   & .topbar .brand-mark { width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
@@ -492,6 +515,8 @@
   /* Vidstack player, themed to the Kagura accent. */
   & .vds-player { width: 100%; max-height: 78vh; --media-brand: var(--accent); --media-focus-ring-color: var(--accent); }
   & .vds-player video { max-height: 78vh; }
+  & .vds-player[data-fullscreen] { max-height: none; aspect-ratio: auto !important; }
+  & .vds-player[data-fullscreen] video { max-height: none; }
 
   /* Subtitle (JASSUB) overlay. Vidstack wraps <video> in a flex
      [data-media-provider] and JASSUB inserts its canvas anchor as a *sibling* of
@@ -515,15 +540,19 @@
     background-image: var(--seg-marks, none); pointer-events: none; z-index: 1; }
   & .vds-time-slider .vds-slider-thumb { z-index: 2; }
 
-  /* Skip intro/outro button: rides above the control bar while controls are
+  /* Overlay buttons: rides above the control bar while controls are
      shown, drops to the bottom edge of the video when they auto-hide. */
-  & .skip-btn { position: absolute; right: 20px; bottom: 20px; z-index: 50;
+  & .vds-overlay-btns { position: absolute; right: 20px; bottom: 20px; z-index: 50;
+    display: flex; flex-direction: column; gap: 10px; align-items: flex-end;
+    transition: bottom .25s ease; pointer-events: none; }
+  & .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
+
+  & .skip-btn { pointer-events: auto;
     display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 16px; border-radius: 10px;
     background: var(--bg-elev-2); border: 1px solid var(--border-strong); color: var(--fg);
     font: 600 13px var(--font-sans); cursor: pointer; backdrop-filter: blur(8px);
     box-shadow: 0 8px 24px -8px oklch(0 0 0 / 70%);
-    transition: background .14s, border-color .14s, transform .14s, bottom .25s ease; }
-  & .vds-player[data-controls] .skip-btn { bottom: 86px; }
+    transition: background .14s, border-color .14s, transform .14s; }
   & .skip-btn:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); transform: translateY(-1px); }
 
   & .pbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
@@ -625,7 +654,7 @@ body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow
    and let object-fit letterbox the video. */
 body.theater .player .vds-player { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; aspect-ratio: auto !important; }
 body.theater .player video { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; object-fit: contain; }
-body.theater .player .vds-player[data-controls] .skip-btn { bottom: 96px; }
+body.theater .player .vds-player[data-controls] .vds-overlay-btns { bottom: 96px; }
 body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
   background: oklch(0.145 0.008 285 / 94%); border-top: 1px solid var(--border); }
 
@@ -635,4 +664,4 @@ body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
    hides the control bar so only the player remains. Exit via the player's own
    fullscreen button. */
 body.fs .player .pbar { display: none; }
-body.fs .player .vds-player[data-controls] .skip-btn { bottom: 86px; }
+body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
