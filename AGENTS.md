@@ -20,4 +20,4 @@ Quick rules:
 - **Workflow: commit feature work straight to `dev` and push, then verify it works on the
   `boop-watch-dev` staging pod** (the host has `kubectl` to the LAN cluster: `kubectl -n link-apps
   rollout status deploy/boop-watch-dev` then smoke `/health`). Promote to prod with a `dev` → `main`
-  PR. **Never commit directly to `main`.** Bump `package.json` `version` with every shipped change.
+  PR. **Never commit directly to `main`.** Bump `package.json` `version` with every shipped change (use patch bumps for follow-up commits in the same feature session).

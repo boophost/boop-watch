@@ -190,8 +190,9 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
    server-rendered HTML anymore (it's a client-rendered SPA).
 3. **Bump the version with every change that ships.** Increment `version` in `package.json` (semver:
    patch for fixes, minor for features, major for breaking changes). This is the single source of
-   truth — `src/version.ts` re-exports it and the portal footer renders it as `v<version>`, so a bump
-   is how a deploy becomes visibly identifiable. One bump per shipped change.
+   is how a deploy becomes visibly identifiable. One bump per shipped change (if making multiple
+   commits for the same continuous feature session/PR, use a patch version for subsequent commits
+   rather than repeatedly bumping the minor version).
 4. **Commit and push feature work straight to `dev`, then verify it on staging.** `dev` is the
    integration/staging trunk: commit your change (bump included), push to `dev`, and the CI builds
    `:dev` + rolls `boop-watch-dev`. Then **confirm it actually works on staging** — wait for the

@@ -1,10 +1,25 @@
 import { createContext, useContext, useEffect, useState } from 'react'
+import type { Session } from '@supabase/supabase-js'
 import { supabase } from './supabase'
 
 interface User {
   username: string
   id: string
   isAdmin: boolean
+  avatarUrl: string | null
+}
+
+// Google and Discord (via Supabase OAuth) both land the profile photo under
+// one of these user_metadata keys depending on provider.
+function toUser(session: Session | null): User | null {
+  if (!session?.user) return null
+  const meta = session.user.user_metadata || {}
+  return {
+    username: session.user.email ?? '',
+    id: session.user.id,
+    isAdmin: meta.admin === true || session.user.app_metadata?.role === 'admin',
+    avatarUrl: meta.avatar_url || meta.picture || null,
+  }
 }
 
 interface AuthContextType {
@@ -31,22 +46,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ? { 
-        username: session.user.email ?? '', 
-        id: session.user.id,
-        isAdmin: session.user.user_metadata?.admin === true || session.user.app_metadata?.role === 'admin' 
-      } : null)
+      setUser(toUser(session))
       setLoading(false)
     })
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ? { 
-        username: session.user.email ?? '', 
-        id: session.user.id,
-        isAdmin: session.user.user_metadata?.admin === true || session.user.app_metadata?.role === 'admin'
-      } : null)
+      setUser(toUser(session))
       setLoading(false)
     })
 

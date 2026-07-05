@@ -29,6 +29,9 @@ export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children:
             <NavLink to="/schedule" className="snav-link" title="Schedule">
               <Icon name="calendar" size={16} /><span className="snav-label">Schedule</span>
             </NavLink>
+            <NavLink to="/library" className="snav-link" title="Library">
+              <Icon name="bookmark" size={16} /><span className="snav-label">Library</span>
+            </NavLink>
           </nav>
           <button
             className="snav-link snav-collapse" type="button"
@@ -44,6 +47,17 @@ export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children:
         <Chrome crumb={crumb} />
         {children}
       </div>
+      <nav className="mob-nav">
+        <NavLink to="/" end className="mob-link" title="All titles">
+          <Icon name="film" size={20} /><span>Home</span>
+        </NavLink>
+        <NavLink to="/schedule" className="mob-link" title="Schedule">
+          <Icon name="calendar" size={20} /><span>Schedule</span>
+        </NavLink>
+        <NavLink to="/library" className="mob-link" title="Library">
+          <Icon name="bookmark" size={20} /><span>Library</span>
+        </NavLink>
+      </nav>
     </div>
   )
 }
@@ -52,8 +66,8 @@ export function UserCrumb() {
   const { user } = useAuth()
   if (user) {
     return (
-      <Link className="crumb" to="/profile">
-        <Icon name="user" size={15} /> {user.username}
+      <Link className="crumb crumb-avatar" to="/profile" title={user.username} aria-label={user.username}>
+        <Avatar user={user} />
       </Link>
     )
   }
@@ -62,6 +76,29 @@ export function UserCrumb() {
       <Icon name="user" size={15} /> Log in
     </Link>
   )
+}
+
+/** Profile photo (Google/Discord OAuth) when we have one, else the user's
+ * initial, else a generic user icon. */
+export function Avatar({ user, size = 34 }: { user: { username: string; avatarUrl: string | null }; size?: number }) {
+  const [broken, setBroken] = useState(false)
+  if (user.avatarUrl && !broken) {
+    return (
+      <img
+        className="avatar-img" src={user.avatarUrl} alt="" width={size} height={size}
+        onError={() => setBroken(true)}
+      />
+    )
+  }
+  const initial = user.username?.[0]?.toUpperCase()
+  if (initial) {
+    return (
+      <span className="avatar-fallback" style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}>
+        {initial}
+      </span>
+    )
+  }
+  return <Icon name="user" size={15} />
 }
 
 export const BackCrumb = (
