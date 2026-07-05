@@ -723,8 +723,8 @@ const qbittorrentSink: NodeImpl = {
         key: 'paused',
         label: 'Add paused',
         kind: 'boolean',
-        default: true,
-        help: 'Queue without starting so you can review in qBittorrent first.',
+        default: false,
+        help: 'Off = start downloading immediately. A paused magnet can’t fetch its metadata (it shows as a bare hash until you resume it).',
       },
     ],
   },
@@ -759,11 +759,12 @@ const qbittorrentSink: NodeImpl = {
       throw new Error('qBittorrent login failed')
     }
 
+    const paused = bool(config, 'paused', false)
     const form = new URLSearchParams({
       urls: withMagnet.map((it) => String(it[urlField])).join('\n'),
       category: str(config, 'category', 'anime'),
-      paused: String(bool(config, 'paused', true)),
-      stopped: String(bool(config, 'paused', true)), // qBit >= 5 renamed the flag
+      paused: String(paused),
+      stopped: String(paused), // qBit >= 5 renamed the flag
     })
     const savepath = str(config, 'savepath', '')
     if (savepath) form.set('savepath', savepath)
@@ -774,7 +775,31 @@ const qbittorrentSink: NodeImpl = {
       signal: AbortSignal.timeout(15_000),
     })
     if (!add.ok) throw new Error(`qBittorrent add failed (${add.status})`)
-    ctx.notes.push(`sent ${withMagnet.length} magnets to qBittorrent`)
+
+    // Give each torrent the readable name we already have from search, keyed by
+    // its info-hash. This makes paused magnets (which can't fetch their own
+    // metadata) reviewable instead of showing as a bare hash. Best-effort.
+    let renamed = 0
+    for (const it of withMagnet) {
+      const hash = String(it.torrent_hash ?? '').toLowerCase()
+      const name = String(it.torrent_name ?? '')
+      if (!hash || !name) continue
+      try {
+        const r = await fetch(`${base}/api/v2/torrents/rename`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+          body: new URLSearchParams({ hash, name }),
+          signal: AbortSignal.timeout(10_000),
+        })
+        if (r.ok) renamed++
+      } catch {
+        /* rename is cosmetic — never fail the send over it */
+      }
+    }
+    ctx.notes.push(
+      `sent ${withMagnet.length} magnet(s) to qBittorrent${paused ? ' (paused)' : ''}` +
+        (renamed ? `, named ${renamed}` : ''),
+    )
     return { sent: withMagnet }
   },
 }
