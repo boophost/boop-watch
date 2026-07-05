@@ -889,7 +889,7 @@ const indexerMatch: NodeImpl = {
     label: 'Match indexer title',
     category: 'enrich',
     description:
-      'Finds an indexer series whose title matches the item name and copies a field from it.',
+      'Finds an indexer series whose title matches the item and copies a field from it. Exact mode compares whole titles; tokens mode matches messy release names by shared distinctive words (romaji/english/japanese catalog titles).',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
       { id: 'matched', label: 'matched' },
@@ -904,20 +904,63 @@ const indexerMatch: NodeImpl = {
         default: 'image_url',
         help: 'Column on the indexer series row to copy from.',
       },
+      { key: 'queryField', label: 'Match against field', kind: 'text', default: 'name', help: 'Item field holding the title/release name to match.' },
+      {
+        key: 'matchMode',
+        label: 'Match mode',
+        kind: 'select',
+        options: [
+          { value: 'exact', label: 'Exact title' },
+          { value: 'tokens', label: 'Shared words (release names)' },
+        ],
+        default: 'exact',
+      },
+      { key: 'threshold', label: 'Min word overlap (0-1)', kind: 'number', default: 0.6, help: 'Tokens mode: fraction of a catalog title’s distinctive words the release must contain.' },
     ],
   },
   async run(inputs, config, ctx) {
     const setField = str(config, 'setField', 'image_url')
     const fromField = str(config, 'fromField', 'image_url')
+    const queryField = str(config, 'queryField', 'name')
+    const mode = str(config, 'matchMode', 'exact')
+    const threshold = num(config, 'threshold', 0.6)
     const catalog = listSeries()
+
+    // Precompute each catalog row's distinctive tokens across its title variants
+    // (romaji / english / japanese), for tokens mode.
+    const titleVariants = (s: (typeof catalog)[number]): string[] =>
+      [s.title, s.title_english, s.title_japanese].filter((t): t is string => !!t)
+
+    const matchExact = (item: FlowItem): (typeof catalog)[number] | undefined =>
+      catalog.find(
+        (s) =>
+          titleVariants(s).some((t) => norm(t) === norm(item[queryField])) ||
+          (item.original_title != null && norm(s.title) === norm(item.original_title)),
+      )
+
+    // Tokens mode: pick the catalog row whose distinctive words are most present
+    // in the release name, above the threshold (best overlap wins ties).
+    const matchTokens = (item: FlowItem): (typeof catalog)[number] | undefined => {
+      const hay = norm(item[queryField])
+      const collapsed = hay.replace(/ /g, '')
+      let best: { row: (typeof catalog)[number] | undefined; score: number } = { row: undefined, score: 0 }
+      for (const s of catalog) {
+        let rowScore = 0
+        for (const variant of titleVariants(s)) {
+          const toks = significantTokens(variant)
+          if (toks.length === 0) continue
+          const present = toks.filter((t) => hay.includes(t) || collapsed.includes(t)).length
+          rowScore = Math.max(rowScore, present / toks.length)
+        }
+        if (rowScore > best.score) best = { row: s, score: rowScore }
+      }
+      return best.score >= threshold ? best.row : undefined
+    }
+
     const matched: FlowItem[] = []
     const unmatched: FlowItem[] = []
     for (const item of allInputs(inputs)) {
-      const hit = catalog.find(
-        (s) =>
-          norm(s.title) === norm(item.name) ||
-          (item.original_title != null && norm(s.title) === norm(item.original_title)),
-      )
+      const hit = mode === 'tokens' ? matchTokens(item) : matchExact(item)
       const copied = hit ? (hit as unknown as FlowItem)[fromField] : null
       if (hit && copied != null && copied !== '') {
         matched.push({ ...item, [setField]: copied })

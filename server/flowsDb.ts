@@ -104,16 +104,18 @@ const MISSING_VIDEOS_GRAPH: FlowGraph = {
 // + library dirs mounted into the pod (see mcp/README.md / CLAUDE.md).
 const LIBRARY_IMPORT_GRAPH: FlowGraph = {
   nodes: [
-    { id: 'qb', type: 'source.qbittorrent', position: { x: 0, y: 200 }, config: { category: 'anime', completedOnly: true, pathFrom: '/data/downloads', pathTo: '/downloads' } },
+    { id: 'qb', type: 'source.qbittorrent', position: { x: 0, y: 200 }, config: { category: 'anime', completedOnly: true, pathFrom: '', pathTo: '' } },
     { id: 'exp', type: 'transform.expand-files', position: { x: 260, y: 200 }, config: { pathField: 'content_path', extensions: 'mkv,mp4' } },
-    { id: 'match', type: 'enrich.indexer-match', position: { x: 520, y: 200 }, config: { setField: 'mal_id', fromField: 'mal_id' } },
+    { id: 'match', type: 'enrich.indexer-match', position: { x: 520, y: 200 }, config: { setField: 'mal_id', fromField: 'mal_id', queryField: 'name', matchMode: 'tokens', threshold: 0.6 } },
     { id: 'meta', type: 'enrich.metadata', position: { x: 780, y: 120 }, config: { malField: 'mal_id', writeDb: true, maxItems: 0 } },
     { id: 'probe', type: 'enrich.media-probe', position: { x: 1060, y: 200 }, config: { fileField: 'file_path' } },
     { id: 'cmp', type: 'filter.compare', position: { x: 1320, y: 200 }, config: { field: 'sub_langs', op: 'contains', value: 'eng' } },
     { id: 'ext', type: 'enrich.extract-subs', position: { x: 1580, y: 120 }, config: { fileField: 'file_path', lang: 'eng' } },
-    { id: 'fetch', type: 'enrich.fetch-subs', position: { x: 1580, y: 300 }, config: { queryField: 'title', episodeField: 'torrent_episode', lang: 'eng' } },
+    { id: 'fetch', type: 'enrich.fetch-subs', position: { x: 1580, y: 300 }, config: { queryField: 'title_english', episodeField: 'torrent_episode', lang: 'eng' } },
     { id: 'mg', type: 'combine.merge', position: { x: 1860, y: 220 }, config: {} },
-    { id: 'imp', type: 'sink.library-import', position: { x: 2120, y: 220 }, config: { fileField: 'file_path', libraryRoot: '/library', method: 'hardlink' } },
+    // libraryRoot empty => LIBRARY_DIR env. showField=title_english (set by the
+    // metadata node); falls back to the release name for unmatched files.
+    { id: 'imp', type: 'sink.library-import', position: { x: 2120, y: 220 }, config: { fileField: 'file_path', libraryRoot: '', showField: 'title_english', method: 'hardlink' } },
     { id: 'scan', type: 'sink.jellyfin-scan', position: { x: 2400, y: 220 }, config: {} },
   ],
   edges: [

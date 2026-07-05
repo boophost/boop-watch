@@ -125,16 +125,16 @@ sidecars alongside) → `sink.jellyfin-scan`. Run it on a schedule (files finish
 queued). Sorting/scoring/branching is done with the general `filter.compare` / `filter.sort` /
 `transform.compute` / `combine.group-pick` nodes — **don't hardcode that logic into domain nodes.**
 
-**This flow needs two dirs mounted into the pod** (not wired in the `link` deploy yet — TODO):
-- the qBittorrent completed-downloads dir **read-only** (qBit reports paths under `/data/downloads`;
-  the `source.qbittorrent` node's `pathFrom`/`pathTo` remaps that prefix to wherever the pod mounts
-  it, e.g. `/downloads`),
-- the Jellyfin media library dir **read-write** at `LIBRARY_DIR` (`/library`).
-
-`sink.library-import` **hardlinks** (falling back to a copy across filesystems), so for no-copy
-imports both dirs must be the **same filesystem/export**. `ffmpeg`/`ffprobe` are in the image for the
-probe/extract nodes. The `mcp/` CLI (see `mcp/README.md`) drives flows against a port-forwarded
-staging backend for iteration.
+**This flow needs the media storage mounted into the pod.** Downloads and the Jellyfin library are
+**one NFS export** — `[redacted-nfs-export]` (qBittorrent on boopurnoes bind-mounts it at `/data`;
+Jellyfin/tdarr mount it via `media-nfs-pvc`; layout: `downloads/`, `anime/`, `anime-movies/`,
+`movies/`). Mount that same export **at `/data`** in the pod: then qBit's reported
+`content_path=/data/downloads/…` resolves with **no** `pathFrom`/`pathTo` remap, and set
+`LIBRARY_DIR=/data/anime`. Because downloads and library are the **same filesystem**,
+`sink.library-import` **hardlinks** (verified: shared inode; it falls back to a copy across
+filesystems). `link` supports this via its NFS-mount field (added in `n0es/link` for issue #54).
+`ffmpeg`/`ffprobe` are in the image for the probe/extract nodes. The `mcp/` CLI (see `mcp/README.md`)
+drives flows against a port-forwarded staging backend for iteration.
 
 ### Environment variables
 - `JELLYFIN_URL` — base URL (default `http://jellyfin:8096`)
