@@ -3,11 +3,17 @@
 // render and configure it. Specs are served via GET /api/flows/node-types so
 // the editor never hardcodes node knowledge.
 
+import fs from 'node:fs'
+import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { jfJson, jellyfinConfigured, JfItem } from './jellyfin.js'
 import { listSeries } from './db.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
+
+const execFileP = promisify(execFile)
 
 export type FlowItem = Record<string, unknown>
 
@@ -538,6 +544,342 @@ const fieldFilter: NodeImpl = {
       ;(ok ? pass : fail).push(item)
     }
     return { pass, fail }
+  },
+}
+
+// ---------------------------------------------------------------------------
+// General compute primitives. Sorting/filtering/math belong in the graph, not
+// hardcoded inside domain nodes — these let a flow express "best per episode",
+// "score then sort", "keep the ones above N", etc. from generic building blocks.
+// ---------------------------------------------------------------------------
+
+// Coerce a value for comparison: numbers stay numeric (so 9 < 10), everything
+// else is lowercased string. Booleans -> 1/0 so they sort/compare sanely.
+function asNumber(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'boolean') return v ? 1 : 0
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+// Safe arithmetic evaluator for transform.compute — a recursive-descent parser
+// over {field} refs, numeric literals, + - * / %, parentheses, unary minus, and
+// a few functions. No eval / Function, so a stored graph can't run code.
+type Tok = { t: 'num'; v: number } | { t: 'op'; v: string } | { t: 'fn'; v: string }
+const FUNCS: Record<string, (args: number[]) => number> = {
+  min: (a) => Math.min(...a),
+  max: (a) => Math.max(...a),
+  abs: (a) => Math.abs(a[0] ?? 0),
+  round: (a) => Math.round(a[0] ?? 0),
+  floor: (a) => Math.floor(a[0] ?? 0),
+  ceil: (a) => Math.ceil(a[0] ?? 0),
+}
+
+function tokenizeExpr(expr: string, item: FlowItem): Tok[] {
+  const toks: Tok[] = []
+  let i = 0
+  while (i < expr.length) {
+    const c = expr[i]
+    if (c === ' ' || c === '\t') { i++; continue }
+    if (c === '{') {
+      const end = expr.indexOf('}', i)
+      if (end < 0) throw new Error('unclosed { in expression')
+      const key = expr.slice(i + 1, end).trim()
+      const n = asNumber(item[key])
+      if (n == null) throw new Error(`field "${key}" is not numeric`)
+      toks.push({ t: 'num', v: n })
+      i = end + 1
+      continue
+    }
+    if (/[0-9.]/.test(c)) {
+      let j = i + 1
+      while (j < expr.length && /[0-9.]/.test(expr[j])) j++
+      toks.push({ t: 'num', v: Number(expr.slice(i, j)) })
+      i = j
+      continue
+    }
+    if (/[a-zA-Z]/.test(c)) {
+      let j = i + 1
+      while (j < expr.length && /[a-zA-Z]/.test(expr[j])) j++
+      const name = expr.slice(i, j).toLowerCase()
+      if (!FUNCS[name]) throw new Error(`unknown function "${name}"`)
+      toks.push({ t: 'fn', v: name })
+      i = j
+      continue
+    }
+    if ('+-*/%(),'.includes(c)) {
+      toks.push({ t: 'op', v: c })
+      i++
+      continue
+    }
+    throw new Error(`unexpected character "${c}" in expression`)
+  }
+  return toks
+}
+
+function evalExpr(expr: string, item: FlowItem): number {
+  const toks = tokenizeExpr(expr, item)
+  let pos = 0
+  const peek = () => toks[pos]
+  const eat = (v?: string) => {
+    const tk = toks[pos]
+    if (!tk || (v && !(tk.t === 'op' && tk.v === v))) throw new Error(`expected "${v}" in expression`)
+    pos++
+    return tk
+  }
+  // expr := term (('+'|'-') term)*
+  function parseExpr(): number {
+    let v = parseTerm()
+    while (peek()?.t === 'op' && ((peek() as { v: string }).v === '+' || (peek() as { v: string }).v === '-')) {
+      const op = (eat() as { v: string }).v
+      const r = parseTerm()
+      v = op === '+' ? v + r : v - r
+    }
+    return v
+  }
+  // term := factor (('*'|'/'|'%') factor)*
+  function parseTerm(): number {
+    let v = parseFactor()
+    while (peek()?.t === 'op' && ['*', '/', '%'].includes((peek() as { v: string }).v)) {
+      const op = (eat() as { v: string }).v
+      const r = parseFactor()
+      v = op === '*' ? v * r : op === '/' ? v / r : v % r
+    }
+    return v
+  }
+  function parseFactor(): number {
+    const tk = peek()
+    if (!tk) throw new Error('unexpected end of expression')
+    if (tk.t === 'op' && tk.v === '-') { eat(); return -parseFactor() }
+    if (tk.t === 'op' && tk.v === '+') { eat(); return parseFactor() }
+    if (tk.t === 'op' && tk.v === '(') {
+      eat('(')
+      const v = parseExpr()
+      eat(')')
+      return v
+    }
+    if (tk.t === 'fn') {
+      eat()
+      eat('(')
+      const args: number[] = [parseExpr()]
+      while (peek()?.t === 'op' && (peek() as { v: string }).v === ',') { eat(','); args.push(parseExpr()) }
+      eat(')')
+      return FUNCS[tk.v](args)
+    }
+    if (tk.t === 'num') { eat(); return tk.v }
+    throw new Error('malformed expression')
+  }
+  const result = parseExpr()
+  if (pos !== toks.length) throw new Error('trailing tokens in expression')
+  return result
+}
+
+const compute: NodeImpl = {
+  spec: {
+    type: 'transform.compute',
+    label: 'Compute field',
+    category: 'enrich',
+    description:
+      'Sets a numeric field from an arithmetic expression over the item’s fields, e.g. "{torrent_seeders} + {res_rank} * 100". Supports + - * / %, parentheses, and min/max/abs/round/floor/ceil.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'ok', label: 'ok' },
+      { id: 'error', label: 'error' },
+    ],
+    config: [
+      { key: 'field', label: 'Set field', kind: 'text', default: 'score' },
+      { key: 'expr', label: 'Expression', kind: 'text', default: '{torrent_seeders}', help: '{field} refs must be numeric. Non-numeric items exit "error" untouched.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'score')
+    const expr = str(config, 'expr', '')
+    const ok: FlowItem[] = []
+    const error: FlowItem[] = []
+    let firstErr = ''
+    for (const item of allInputs(inputs)) {
+      try {
+        ok.push({ ...item, [field]: evalExpr(expr, item) })
+      } catch (e) {
+        if (!firstErr) firstErr = e instanceof Error ? e.message : String(e)
+        error.push(item)
+      }
+    }
+    if (error.length > 0) ctx.notes.push(`${error.length} item(s) failed to compute (${firstErr})`)
+    return { ok, error }
+  },
+}
+
+const compare: NodeImpl = {
+  spec: {
+    type: 'filter.compare',
+    label: 'Compare',
+    category: 'filter',
+    description:
+      'Splits items on a comparison. Compares a field against a fixed value or another field; numeric when both sides are numbers, otherwise string.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'pass', label: 'pass' },
+      { id: 'fail', label: 'fail' },
+    ],
+    config: [
+      { key: 'field', label: 'Field', kind: 'text', default: 'score' },
+      {
+        key: 'op',
+        label: 'Operator',
+        kind: 'select',
+        options: [
+          { value: 'eq', label: '= equals' },
+          { value: 'ne', label: '≠ not equals' },
+          { value: 'gt', label: '> greater than' },
+          { value: 'gte', label: '≥ at least' },
+          { value: 'lt', label: '< less than' },
+          { value: 'lte', label: '≤ at most' },
+          { value: 'contains', label: 'contains' },
+          { value: 'matches', label: 'matches regex' },
+          { value: 'in', label: 'in (comma list)' },
+        ],
+        default: 'gte',
+      },
+      { key: 'value', label: 'Value', kind: 'text', default: '', help: 'Compared against. Empty compares against the "Other field" instead.' },
+      { key: 'otherField', label: 'Other field', kind: 'text', default: '', help: 'When Value is empty, compare the field against this field.' },
+    ],
+  },
+  async run(inputs, config) {
+    const field = str(config, 'field', 'score')
+    const op = str(config, 'op', 'gte')
+    const rawValue = str(config, 'value', '')
+    const otherField = str(config, 'otherField', '')
+    const pass: FlowItem[] = []
+    const fail: FlowItem[] = []
+    for (const item of allInputs(inputs)) {
+      const left = item[field]
+      const right: unknown = rawValue !== '' ? rawValue : otherField ? item[otherField] : ''
+      let ok: boolean
+      switch (op) {
+        case 'contains':
+          ok = String(left ?? '').toLowerCase().includes(String(right).toLowerCase())
+          break
+        case 'matches':
+          try { ok = new RegExp(String(right), 'i').test(String(left ?? '')) } catch { ok = false }
+          break
+        case 'in':
+          ok = String(right).split(',').map((s) => s.trim().toLowerCase()).includes(String(left ?? '').toLowerCase())
+          break
+        default: {
+          const ln = asNumber(left)
+          const rn = asNumber(right)
+          const numeric = ln != null && rn != null
+          const cmp = numeric
+            ? ln < rn ? -1 : ln > rn ? 1 : 0
+            : String(left ?? '').toLowerCase().localeCompare(String(right).toLowerCase())
+          ok =
+            op === 'eq' ? cmp === 0 :
+            op === 'ne' ? cmp !== 0 :
+            op === 'gt' ? cmp > 0 :
+            op === 'gte' ? cmp >= 0 :
+            op === 'lt' ? cmp < 0 :
+            op === 'lte' ? cmp <= 0 : false
+        }
+      }
+      ;(ok ? pass : fail).push(item)
+    }
+    return { pass, fail }
+  },
+}
+
+const sortNode: NodeImpl = {
+  spec: {
+    type: 'filter.sort',
+    label: 'Sort',
+    category: 'filter',
+    description: 'Orders items by a field (numeric when the values are numbers, otherwise alphabetical).',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'field', label: 'Sort by field', kind: 'text', default: 'score' },
+      {
+        key: 'direction',
+        label: 'Direction',
+        kind: 'select',
+        options: [
+          { value: 'desc', label: 'Descending (high → low)' },
+          { value: 'asc', label: 'Ascending (low → high)' },
+        ],
+        default: 'desc',
+      },
+    ],
+  },
+  async run(inputs, config) {
+    const field = str(config, 'field', 'score')
+    const dir = str(config, 'direction', 'desc') === 'asc' ? 1 : -1
+    const items = [...allInputs(inputs)].sort((a, b) => {
+      const an = asNumber(a[field])
+      const bn = asNumber(b[field])
+      if (an != null && bn != null) return (an - bn) * dir
+      return String(a[field] ?? '').toLowerCase().localeCompare(String(b[field] ?? '').toLowerCase()) * dir
+    })
+    return { items }
+  },
+}
+
+const groupPick: NodeImpl = {
+  spec: {
+    type: 'combine.group-pick',
+    label: 'Pick best per group',
+    category: 'combine',
+    description:
+      'Groups items by a key field and keeps the top N of each group (ordered by a sort field). The classic "best release per episode" primitive.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'picked', label: 'picked' },
+      { id: 'rest', label: 'rest' },
+    ],
+    config: [
+      { key: 'groupField', label: 'Group by field', kind: 'text', default: 'torrent_episode' },
+      { key: 'sortField', label: 'Rank by field', kind: 'text', default: 'score' },
+      {
+        key: 'direction',
+        label: 'Rank direction',
+        kind: 'select',
+        options: [
+          { value: 'desc', label: 'Descending (keep highest)' },
+          { value: 'asc', label: 'Ascending (keep lowest)' },
+        ],
+        default: 'desc',
+      },
+      { key: 'perGroup', label: 'Keep per group', kind: 'number', default: 1 },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const groupField = str(config, 'groupField', 'torrent_episode')
+    const sortField = str(config, 'sortField', 'score')
+    const dir = str(config, 'direction', 'desc') === 'asc' ? 1 : -1
+    const perGroup = Math.max(1, num(config, 'perGroup', 1))
+    const groups = new Map<string, FlowItem[]>()
+    for (const item of allInputs(inputs)) {
+      const key = String(item[groupField] ?? '')
+      const arr = groups.get(key)
+      if (arr) arr.push(item)
+      else groups.set(key, [item])
+    }
+    const picked: FlowItem[] = []
+    const rest: FlowItem[] = []
+    for (const arr of groups.values()) {
+      const ranked = [...arr].sort((a, b) => {
+        const an = asNumber(a[sortField])
+        const bn = asNumber(b[sortField])
+        if (an != null && bn != null) return (an - bn) * dir
+        return String(a[sortField] ?? '').toLowerCase().localeCompare(String(b[sortField] ?? '').toLowerCase()) * dir
+      })
+      picked.push(...ranked.slice(0, perGroup))
+      rest.push(...ranked.slice(perGroup))
+    }
+    ctx.notes.push(`${groups.size} group(s) → ${picked.length} picked, ${rest.length} set aside`)
+    return { picked, rest }
   },
 }
 
@@ -1092,6 +1434,261 @@ const animeStatus: NodeImpl = {
   },
 }
 
+// ---------------------------------------------------------------------------
+// Library-import stage: expand a torrent into its video files, probe them for
+// subtitle tracks, extract embedded subs we own, then place the files. These
+// need the downloaded files mounted into the pod (see the source.qbittorrent
+// path remap) and ffmpeg/ffprobe on PATH.
+// ---------------------------------------------------------------------------
+const VIDEO_EXTS_DEFAULT = 'mkv,mp4,avi,m4v,mov'
+const WORK_DIR = () => process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
+
+function walkFiles(root: string, exts: Set<string>, out: string[]): void {
+  let stat: fs.Stats
+  try {
+    stat = fs.statSync(root)
+  } catch {
+    return
+  }
+  if (stat.isFile()) {
+    if (exts.has(path.extname(root).slice(1).toLowerCase())) out.push(root)
+    return
+  }
+  if (!stat.isDirectory()) return
+  for (const entry of fs.readdirSync(root)) {
+    // Skip sample dirs/files — a common torrent nuisance that mis-imports.
+    if (/^sample$/i.test(entry) || /\bsample\b/i.test(entry)) continue
+    walkFiles(path.join(root, entry), exts, out)
+  }
+}
+
+const expandFiles: NodeImpl = {
+  spec: {
+    type: 'transform.expand-files',
+    label: 'Expand to files',
+    category: 'enrich',
+    description:
+      'Turns each item into one item per video file at its path (recurses into folders for season packs). Re-parses the episode number from each file name.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'files', label: 'files' },
+      { id: 'empty', label: 'no files' },
+    ],
+    config: [
+      { key: 'pathField', label: 'Path field', kind: 'text', default: 'content_path' },
+      { key: 'extensions', label: 'Video extensions', kind: 'text', default: VIDEO_EXTS_DEFAULT, help: 'Comma-separated, no dots.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const pathField = str(config, 'pathField', 'content_path')
+    const exts = new Set(
+      str(config, 'extensions', VIDEO_EXTS_DEFAULT).split(',').map((e) => e.trim().toLowerCase().replace(/^\./, '')).filter(Boolean),
+    )
+    const files: FlowItem[] = []
+    const empty: FlowItem[] = []
+    for (const item of allInputs(inputs)) {
+      const p = String(item[pathField] ?? '')
+      const found: string[] = []
+      if (p) walkFiles(p, exts, found)
+      if (found.length === 0) {
+        empty.push(item)
+        continue
+      }
+      for (const filePath of found.sort()) {
+        const fileName = path.basename(filePath)
+        let size: number | null = null
+        try { size = fs.statSync(filePath).size } catch { /* raced deletion */ }
+        files.push({
+          ...item,
+          file_path: filePath,
+          file_name: fileName,
+          file_size: size,
+          // Per-file episode is more reliable than the torrent name for batches.
+          torrent_episode: parseEpisode(fileName) ?? item.torrent_episode ?? null,
+        })
+      }
+    }
+    ctx.notes.push(`${files.length} file(s) from ${allInputs(inputs).length} item(s), ${empty.length} with none`)
+    return { files, empty }
+  },
+}
+
+interface ProbeStream {
+  index: number
+  codec_type?: string
+  codec_name?: string
+  tags?: { language?: string; title?: string }
+}
+
+const mediaProbe: NodeImpl = {
+  spec: {
+    type: 'enrich.media-probe',
+    label: 'Probe media',
+    category: 'enrich',
+    description:
+      'ffprobes the video file and emits its stream facts (sub_langs, sub_codecs, sub_track_count, audio_langs, video_codec) plus a sub_tracks list for the extractor. Branch on these with a Compare node.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'probed', label: 'probed' },
+      { id: 'error', label: 'error' },
+    ],
+    config: [
+      { key: 'fileField', label: 'File field', kind: 'text', default: 'file_path' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fileField = str(config, 'fileField', 'file_path')
+    const probed: FlowItem[] = []
+    const error: FlowItem[] = []
+    let firstErr = ''
+    for (const item of allInputs(inputs)) {
+      const file = String(item[fileField] ?? '')
+      if (!file) { error.push(item); continue }
+      try {
+        const { stdout } = await execFileP(
+          'ffprobe',
+          ['-v', 'quiet', '-print_format', 'json', '-show_streams', file],
+          { timeout: 60_000, maxBuffer: 8 * 1024 * 1024 },
+        )
+        const streams = (JSON.parse(stdout).streams ?? []) as ProbeStream[]
+        // Subtitle-relative index is what `ffmpeg -map 0:s:N` wants.
+        let subOrdinal = 0
+        const subTracks = streams
+          .filter((s) => s.codec_type === 'subtitle')
+          .map((s) => ({
+            index: subOrdinal++,
+            lang: s.tags?.language ?? '',
+            codec: s.codec_name ?? '',
+            title: s.tags?.title ?? '',
+          }))
+        const audioLangs = streams
+          .filter((s) => s.codec_type === 'audio')
+          .map((s) => s.tags?.language ?? '')
+          .filter(Boolean)
+        const video = streams.find((s) => s.codec_type === 'video')
+        probed.push({
+          ...item,
+          sub_track_count: subTracks.length,
+          sub_langs: subTracks.map((t) => t.lang).filter(Boolean).join(','),
+          sub_codecs: subTracks.map((t) => t.codec).filter(Boolean).join(','),
+          sub_tracks: JSON.stringify(subTracks),
+          audio_langs: audioLangs.join(','),
+          video_codec: video?.codec_name ?? '',
+        })
+      } catch (e) {
+        if (!firstErr) firstErr = e instanceof Error ? e.message : String(e)
+        error.push(item)
+      }
+    }
+    if (error.length > 0) ctx.notes.push(`${error.length} probe failure(s) (${firstErr})`)
+    return { probed, error }
+  },
+}
+
+// ffmpeg subtitle codec -> sidecar extension. Text subs become .ass/.srt we own;
+// image subs (PGS/VobSub) can't be turned into text, so the extractor skips them.
+const SUB_EXT: Record<string, string> = { ass: 'ass', ssa: 'ass', subrip: 'srt', srt: 'srt', webvtt: 'vtt', mov_text: 'srt' }
+
+const extractSubs: NodeImpl = {
+  spec: {
+    type: 'enrich.extract-subs',
+    label: 'Extract subtitles',
+    category: 'enrich',
+    description:
+      'Pulls an embedded text subtitle track out of the file into a sidecar we own (sets subtitle_path/subtitle_lang), plus any embedded fonts. Picks by language, with fallback. Image subs (PGS/VobSub) can’t be extracted.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'extracted', label: 'extracted' },
+      { id: 'none', label: 'no track' },
+    ],
+    config: [
+      { key: 'fileField', label: 'File field', kind: 'text', default: 'file_path' },
+      { key: 'lang', label: 'Preferred language', kind: 'text', default: 'eng', help: 'ISO code(s) to prefer, comma-separated, e.g. "eng,en". Empty = first text track.' },
+      { key: 'fallbackFirst', label: 'Fall back to first track', kind: 'boolean', default: true, help: 'If no language match, take the first text subtitle track anyway.' },
+      { key: 'trackIndexField', label: 'Track index field', kind: 'text', default: '', help: 'If set and present on the item, extract exactly this subtitle-relative index (overrides language pick).' },
+      { key: 'outDir', label: 'Output dir', kind: 'text', default: '', help: 'Where sidecars are written. Empty = DATA_DIR/work.' },
+      { key: 'extractFonts', label: 'Extract embedded fonts', kind: 'boolean', default: true },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fileField = str(config, 'fileField', 'file_path')
+    const langPref = str(config, 'lang', 'eng').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    const fallbackFirst = bool(config, 'fallbackFirst', true)
+    const trackIndexField = str(config, 'trackIndexField', '')
+    const outDir = str(config, 'outDir', '') || path.join(WORK_DIR(), 'work')
+    const extractFonts = bool(config, 'extractFonts', true)
+
+    interface SubTrack { index: number; lang: string; codec: string; title: string }
+    const extracted: FlowItem[] = []
+    const none: FlowItem[] = []
+
+    for (const item of allInputs(inputs)) {
+      const file = String(item[fileField] ?? '')
+      let tracks: SubTrack[] = []
+      try {
+        tracks = item.sub_tracks ? (JSON.parse(String(item.sub_tracks)) as SubTrack[]) : []
+      } catch { /* fall through to no-track */ }
+      // Only text codecs we can turn into a sidecar.
+      const textTracks = tracks.filter((t) => SUB_EXT[t.codec.toLowerCase()])
+      if (!file || textTracks.length === 0) { none.push(item); continue }
+
+      // Choose the track: explicit index field > language preference > first.
+      let pick: SubTrack | undefined
+      const forced = trackIndexField ? Number(item[trackIndexField]) : NaN
+      if (Number.isFinite(forced)) pick = textTracks.find((t) => t.index === forced)
+      if (!pick) {
+        for (const lang of langPref) {
+          pick = textTracks.find((t) => t.lang.toLowerCase() === lang || t.lang.toLowerCase().startsWith(lang))
+          if (pick) break
+        }
+      }
+      if (!pick && (fallbackFirst || langPref.length === 0)) pick = textTracks[0]
+      if (!pick) { none.push(item); continue }
+
+      const ext = SUB_EXT[pick.codec.toLowerCase()]
+      const base = path.basename(file, path.extname(file))
+      const langTag = pick.lang || 'und'
+      const subDir = path.join(outDir, base)
+      const subPath = path.join(subDir, `${base}.${langTag}.${ext}`)
+      try {
+        if (!ctx.dryRun) {
+          fs.mkdirSync(subDir, { recursive: true })
+          await execFileP(
+            'ffmpeg',
+            ['-y', '-v', 'error', '-i', file, '-map', `0:s:${pick.index}`, '-c:s', ext === 'ass' ? 'ass' : ext === 'srt' ? 'srt' : 'webvtt', subPath],
+            { timeout: 120_000 },
+          )
+          if (extractFonts) {
+            // Dump every attachment (fonts) into the sidecar dir; harmless if none.
+            try {
+              await execFileP('ffmpeg', ['-y', '-v', 'error', '-dump_attachment:t', '', '-i', file], {
+                timeout: 60_000,
+                cwd: subDir,
+              })
+            } catch { /* attachments are best-effort; -dump_attachment exits nonzero when there are none */ }
+          }
+        }
+        extracted.push({
+          ...item,
+          subtitle_path: subPath,
+          subtitle_lang: langTag,
+          subtitle_codec: ext,
+          subtitle_dir: subDir,
+        })
+      } catch (e) {
+        ctx.notes.push(`extract failed for ${path.basename(file)}: ${e instanceof Error ? e.message : String(e)}`)
+        none.push(item)
+      }
+    }
+    ctx.notes.push(
+      ctx.dryRun
+        ? `dry run — would extract ${extracted.length} sidecar(s)`
+        : `extracted ${extracted.length} sidecar(s), ${none.length} without a text track`,
+    )
+    return { extracted, none }
+  },
+}
+
 const qbittorrentSink: NodeImpl = {
   spec: {
     type: 'sink.qbittorrent',
@@ -1261,6 +1858,13 @@ const IMPLS: NodeImpl[] = [
   httpSource,
   qbittorrentSource,
   fieldFilter,
+  compare,
+  sortNode,
+  compute,
+  groupPick,
+  expandFiles,
+  mediaProbe,
+  extractSubs,
   dedupe,
   limit,
   indexerMatch,
