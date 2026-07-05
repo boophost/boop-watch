@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { jfJson, jellyfinConfigured, JfItem } from './jellyfin.js'
+import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
 import { listSeries } from './db.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
@@ -1783,6 +1783,210 @@ const qbittorrentSink: NodeImpl = {
   },
 }
 
+// Fills a path template with an item's fields. {field} is the raw value;
+// {field:2} zero-pads a number to 2 digits (season/episode). Unknown fields ->
+// empty. Slashes in the template make directories.
+function fillPathTemplate(tpl: string, item: FlowItem): string {
+  return tpl.replace(/\{([^}:]+)(?::(\d+))?\}/g, (_, key: string, pad?: string) => {
+    const v = item[key.trim()]
+    if (v == null) return ''
+    if (pad) {
+      const n = asNumber(v)
+      if (n != null) return String(Math.trunc(n)).padStart(Number(pad), '0')
+    }
+    return String(v)
+  })
+}
+
+// Strip characters that are illegal or troublesome in file paths, per path
+// segment (so template slashes still create directories).
+function sanitizeSegments(rel: string): string {
+  return rel
+    .split('/')
+    .map((seg) => seg.replace(/[<>:"\\|?*\x00-\x1f]/g, '').replace(/\s+/g, ' ').trim().replace(/\.+$/, ''))
+    .filter(Boolean)
+    .join('/')
+}
+
+const LIBRARY_DIR = () => process.env.LIBRARY_DIR ?? '/library'
+
+const libraryImport: NodeImpl = {
+  spec: {
+    type: 'sink.library-import',
+    label: 'Import to library',
+    category: 'sink',
+    description:
+      'Places each video file into the media library at a templated path (hardlink, falling back to copy across filesystems), moving its subtitle sidecars alongside. This is what makes a download watchable.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'imported', label: 'imported' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      { key: 'fileField', label: 'Video file field', kind: 'text', default: 'file_path' },
+      { key: 'libraryRoot', label: 'Library root', kind: 'text', default: '', help: 'Destination library dir. Empty = LIBRARY_DIR env (/library).' },
+      {
+        key: 'pathTemplate',
+        label: 'Path template',
+        kind: 'text',
+        default: '{show} ({production_year})/Season {season:2}/{show} - S{season:2}E{torrent_episode:2}',
+        help: 'Relative destination path (no extension). {field} = value, {field:2} = 2-digit padded. Slashes make folders.',
+      },
+      { key: 'showField', label: 'Show name field', kind: 'text', default: 'title', help: 'Aliased to {show} in the template; falls back to name/series_name.' },
+      { key: 'defaultSeason', label: 'Default season', kind: 'number', default: 1, help: 'Used as {season} when the item has no season field.' },
+      {
+        key: 'method',
+        label: 'Method',
+        kind: 'select',
+        options: [
+          { value: 'hardlink', label: 'Hardlink (copy on cross-device)' },
+          { value: 'copy', label: 'Copy' },
+          { value: 'symlink', label: 'Symlink' },
+        ],
+        default: 'hardlink',
+      },
+      { key: 'overwrite', label: 'Overwrite existing', kind: 'boolean', default: false, help: 'Off = skip files already present in the library.' },
+      { key: 'moveSubs', label: 'Bring subtitle sidecars', kind: 'boolean', default: true },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fileField = str(config, 'fileField', 'file_path')
+    const root = str(config, 'libraryRoot', '') || LIBRARY_DIR()
+    const tpl = str(config, 'pathTemplate', '{show}/{show} - S{season:2}E{torrent_episode:2}')
+    const showField = str(config, 'showField', 'title')
+    const defaultSeason = num(config, 'defaultSeason', 1)
+    const method = str(config, 'method', 'hardlink')
+    const overwrite = bool(config, 'overwrite', false)
+    const moveSubs = bool(config, 'moveSubs', true)
+
+    // Place one file: link/copy/symlink src -> dest with an EXDEV copy fallback.
+    const place = (src: string, dest: string): 'copy' | 'hardlink' | 'symlink' => {
+      fs.mkdirSync(path.dirname(dest), { recursive: true })
+      if (fs.existsSync(dest)) {
+        if (!overwrite) return 'hardlink' // caller checks existence first; unreached
+        fs.rmSync(dest)
+      }
+      if (method === 'copy') { fs.copyFileSync(src, dest); return 'copy' }
+      if (method === 'symlink') { fs.symlinkSync(src, dest); return 'symlink' }
+      try {
+        fs.linkSync(src, dest)
+        return 'hardlink'
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'EXDEV') {
+          // Different filesystem: hardlink impossible, copy instead.
+          fs.copyFileSync(src, dest)
+          return 'copy'
+        }
+        throw e
+      }
+    }
+
+    const imported: FlowItem[] = []
+    const skipped: FlowItem[] = []
+    let copied = 0
+    for (const item of allInputs(inputs)) {
+      const src = String(item[fileField] ?? '')
+      const show = String(item[showField] ?? item.title ?? item.name ?? item.series_name ?? '').trim()
+      if (!src || !show) {
+        ctx.notes.push(`skipped an item missing file or show name`)
+        skipped.push(item)
+        continue
+      }
+      const ext = path.extname(src)
+      // Expose derived template fields without mutating the item.
+      const ctxItem: FlowItem = {
+        ...item,
+        show,
+        season: item.season ?? item.parent_index_number ?? defaultSeason,
+        torrent_episode: item.torrent_episode ?? item.index_number ?? '',
+      }
+      const rel = sanitizeSegments(fillPathTemplate(tpl, ctxItem))
+      if (!rel) {
+        ctx.notes.push(`skipped "${show}" — template produced an empty path`)
+        skipped.push(item)
+        continue
+      }
+      const dest = path.join(root, rel + ext)
+
+      if (!overwrite && fs.existsSync(dest)) {
+        skipped.push({ ...item, library_path: dest, import_status: 'exists' })
+        continue
+      }
+      if (ctx.dryRun) {
+        imported.push({ ...item, library_path: dest, import_method: method })
+        continue
+      }
+      try {
+        const used = place(src, dest)
+        if (used === 'copy' && method === 'hardlink') copied++
+        const out: FlowItem = { ...item, library_path: dest, import_method: used }
+        // Bring subtitle + font sidecars next to the video (same basename).
+        if (moveSubs && item.subtitle_path) {
+          const subSrc = String(item.subtitle_path)
+          // Prefer the exact lang.codec extension from extract-subs; fall back to
+          // the source sidecar's own suffix if those fields aren't present.
+          const lang = item.subtitle_lang ? String(item.subtitle_lang) : ''
+          const codec = item.subtitle_codec ? String(item.subtitle_codec) : ''
+          const subExt =
+            lang && codec ? `.${lang}.${codec}` : path.basename(subSrc).slice(String(item.file_name ?? path.basename(subSrc)).lastIndexOf('.'))
+          const subDest = dest.slice(0, dest.length - ext.length) + subExt
+          try {
+            fs.mkdirSync(path.dirname(subDest), { recursive: true })
+            fs.copyFileSync(subSrc, subDest)
+            out.library_subtitle_path = subDest
+          } catch (e) {
+            ctx.notes.push(`subtitle copy failed for ${path.basename(dest)}: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        }
+        imported.push(out)
+      } catch (e) {
+        ctx.notes.push(`import failed for ${path.basename(src)}: ${e instanceof Error ? e.message : String(e)}`)
+        skipped.push(item)
+      }
+    }
+    ctx.notes.push(
+      ctx.dryRun
+        ? `dry run — would import ${imported.length} file(s), skip ${skipped.length}`
+        : `imported ${imported.length} file(s)${copied ? ` (${copied} copied, cross-device)` : ''}, skipped ${skipped.length}`,
+    )
+    return { imported, skipped }
+  },
+}
+
+const jellyfinScan: NodeImpl = {
+  spec: {
+    type: 'sink.jellyfin-scan',
+    label: 'Trigger Jellyfin scan',
+    category: 'sink',
+    description:
+      'Kicks off a Jellyfin library refresh so newly-imported files get picked up for playback. (Transitional — playback still runs through Jellyfin.)',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [],
+  },
+  async run(inputs, _config, ctx) {
+    const items = allInputs(inputs)
+    if (ctx.dryRun) {
+      ctx.notes.push('dry run — would trigger a Jellyfin library scan')
+      return { items }
+    }
+    if (!jellyfinConfigured) {
+      ctx.notes.push('Jellyfin not configured — scan skipped')
+      return { items }
+    }
+    try {
+      // POST /Library/Refresh — async full-library scan (item-scoped refresh
+      // needs a user context we don't have; a library scan is cheap enough).
+      const res = await fetch(jfUrl('/Library/Refresh'), { method: 'POST', signal: AbortSignal.timeout(15_000) })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      ctx.notes.push('triggered Jellyfin library scan')
+    } catch (e) {
+      ctx.notes.push(`Jellyfin scan failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    return { items }
+  },
+}
+
 const merge: NodeImpl = {
   spec: {
     type: 'combine.merge',
@@ -1876,6 +2080,8 @@ const IMPLS: NodeImpl[] = [
   merge,
   portalSink,
   qbittorrentSink,
+  libraryImport,
+  jellyfinScan,
 ]
 
 export const NODE_REGISTRY: Map<string, NodeImpl> = new Map(IMPLS.map((n) => [n.spec.type, n]))
