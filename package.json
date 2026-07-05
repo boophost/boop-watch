@@ -1,7 +1,7 @@
 {
   "name": "boop-watch",
   "private": true,
-  "version": "2.20.7",
+  "version": "2.20.8",
   "description": "Public, no-login viewing portal for a curated Jellyfin collection + library manager",
   "type": "module",
   "scripts": {
@@ -52,6 +52,7 @@
     "tsx": "^4.19.4",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.30.1",
+    "undici": "^8.7.0",
     "vite": "^6.3.5"
   }
 }
