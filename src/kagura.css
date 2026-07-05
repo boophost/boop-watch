@@ -515,6 +515,8 @@
   /* Vidstack player, themed to the Kagura accent. */
   & .vds-player { width: 100%; max-height: 78vh; --media-brand: var(--accent); --media-focus-ring-color: var(--accent); }
   & .vds-player video { max-height: 78vh; }
+  & .vds-player[data-fullscreen] { max-height: none; aspect-ratio: auto !important; }
+  & .vds-player[data-fullscreen] video { max-height: none; }
 
   /* Subtitle (JASSUB) overlay. Vidstack wraps <video> in a flex
      [data-media-provider] and JASSUB inserts its canvas anchor as a *sibling* of
