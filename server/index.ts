@@ -222,16 +222,6 @@ app.delete('/api/library/saved/:id', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/library/history', requireAuth, (req, res) => {
-  res.json({ history: seriesDb.getHistory(res.locals.username as string) })
-})
-
-app.post('/api/library/history', requireAuth, (req, res) => {
-  const { item_id } = req.body
-  if (!item_id) { res.status(400).json({ error: 'item_id required' }); return }
-  seriesDb.addHistory(res.locals.username as string, String(item_id))
-  res.json({ ok: true })
-})
 
 app.get('/config.js', (req, res) => {
   // Dynamic per-request env dump — a CDN in front of this (e.g. Cloudflare)
