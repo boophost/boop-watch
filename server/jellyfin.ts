@@ -42,6 +42,7 @@ export interface JfItem {
   SeriesId?: string
   SeriesName?: string
   PrimaryImageAspectRatio?: number
+  BackdropImageTags?: string[]
   MediaStreams?: JfMediaStream[]
   MediaSources?: { MediaStreams?: JfMediaStream[] }[]
 }
@@ -98,6 +99,7 @@ function mapPortalToJf(p: PortalItem): JfItem {
     ParentIndexNumber: p.parent_index_number ?? undefined,
     SeriesId: p.series_id || undefined,
     SeriesName: p.series_name || undefined,
+    BackdropImageTags: p.has_backdrop ? ['mock'] : undefined
   }
 }
 

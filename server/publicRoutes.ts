@@ -131,6 +131,7 @@ publicRouter.get('/api/featured', async (_req, res) => {
   }
 
   const entries = getCollectionItems().flatMap((it) => {
+    if (!it.BackdropImageTags || it.BackdropImageTags.length === 0) return []
     const isSeries = it.Type === 'Series'
     const watchId = isSeries ? firstEp.get(it.Id)?.Id : it.Id
     if (!watchId) return []
