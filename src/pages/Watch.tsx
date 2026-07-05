@@ -110,6 +110,7 @@ export default function Watch() {
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null)
   // The intro/outro segment the playhead is currently inside (drives the skip button).
   const [activeSeg, setActiveSeg] = useState<Segment | null>(null)
+  const [showNext, setShowNext] = useState(false)
   // Media duration, needed to place the segment marks on the timeline.
   const [duration, setDuration] = useState(0)
 
@@ -139,7 +140,7 @@ export default function Watch() {
 
   // Fetch metadata when the episode changes.
   useEffect(() => {
-    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0)
+    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0); setShowNext(false)
     firstLoad.current = true
     pendingSeek.current = null
     resumePos.current = null
@@ -249,12 +250,20 @@ export default function Watch() {
   // Surface a skip button while the playhead sits inside an intro/outro segment.
   const onTimeUpdate = () => {
     const p = playerRef.current
-    if (!p || !data?.segments.length) return
-    // Duration settles once the HLS playlist is parsed; capture it for the marks.
-    if (Number.isFinite(p.duration) && p.duration > 0) setDuration((d) => d || p.duration)
+    if (!p) return
+    const d = p.duration
+    if (Number.isFinite(d) && d > 0) setDuration((prev) => prev || d)
     const t = p.currentTime
-    const seg = data.segments.find((s) => t >= s.start && t < s.end - 1) || null
+    
+    let seg: Segment | null = null
+    if (data?.segments?.length) {
+      seg = data.segments.find((s) => t >= s.start && t < s.end - 1) || null
+    }
     setActiveSeg((prev) => (prev?.type === seg?.type && prev?.start === seg?.start ? prev : seg))
+    
+    const isOutro = seg?.type === 'outro'
+    const isNearEnd = Number.isFinite(d) && d > 0 && d - t <= 60
+    setShowNext(isOutro || isNearEnd)
   }
 
   const skip = () => {
@@ -469,7 +478,7 @@ export default function Watch() {
                       Skip {activeSeg.type === 'intro' ? 'Intro' : 'Outro'} <Icon name="next" size={15} />
                     </button>
                   )}
-                  {data.nextId && (
+                  {showNext && data.nextId && (
                     <button type="button" className="skip-btn" onClick={goNext}>
                       Next Episode <Icon name="next" size={15} />
                     </button>
