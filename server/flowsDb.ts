@@ -80,7 +80,7 @@ const MISSING_VIDEOS_GRAPH: FlowGraph = {
     { id: 'tpl', type: 'transform.template', position: { x: 600, y: 40 }, config: { field: 'torrent_query', template: '{title} 1080p' } },
     { id: 'lim', type: 'filter.limit', position: { x: 900, y: 40 }, config: { count: 3 } },
     { id: 'tor', type: 'enrich.torrent-search', position: { x: 1200, y: 40 }, config: { provider: 'animetosho', queryField: 'torrent_query', preferBatch: true, maxItems: 5 } },
-    { id: 'qb', type: 'sink.qbittorrent', position: { x: 1500, y: 90 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: true } },
+    { id: 'qb', type: 'sink.qbittorrent', position: { x: 1500, y: 90 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
   ],
   edges: [
     { id: 'e1', source: 'idx', sourceHandle: 'items', target: 'diff', targetHandle: 'a' },
