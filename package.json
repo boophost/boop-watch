@@ -1,7 +1,7 @@
 {
   "name": "boop-watch",
   "private": true,
-  "version": "2.19.2",
+  "version": "2.20.0",
   "description": "Public, no-login viewing portal for a curated Jellyfin collection + library manager",
   "type": "module",
   "scripts": {
@@ -34,6 +34,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.25.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/vite": "^4.1.6",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cookie-parser": "^1.4.8",
