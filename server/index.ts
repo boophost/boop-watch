@@ -32,7 +32,7 @@ app.use(cookieParser())
 // schedule). Registered before the authed admin APIs and the SPA catch-all.
 app.use(publicRouter)
 
-function requireAuth(
+async function requireAuth(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction,
@@ -41,6 +41,18 @@ function requireAuth(
   const authHeader = req.headers.authorization
   if (authHeader?.startsWith('Bearer ')) {
     token = authHeader.split(' ')[1]
+    try {
+      const resp = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {
+        headers: { Authorization: `Bearer ${token}`, apikey: process.env.SUPABASE_ANON_KEY || '' }
+      })
+      if (resp.ok) {
+        const user = await resp.json()
+        res.locals.username = user.id
+        return next()
+      }
+    } catch (e) {
+      // fallback to jwt.verify below
+    }
   }
 
   if (!token) {
