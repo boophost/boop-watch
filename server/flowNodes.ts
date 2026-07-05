@@ -555,51 +555,186 @@ function magnetFromHash(btih: string, name: string): string {
   return `magnet:?xt=urn:btih:${btih}&dn=${encodeURIComponent(name)}${tr}`
 }
 
-interface TorrentHit {
+// A normalized torrent-search candidate with the quality signals the selector
+// scores on. AnimeTosho gives structured resolution/seeders/batch; audio and
+// episode number are parsed from the release title (no structured field).
+interface Candidate {
   name: string
   magnet: string
   hash: string
   size: number | null
   seeders: number | null
+  resolution: string // '2160p' | '1080p' | '720p' | '480p' | ''
+  dualAudio: boolean
+  isBatch: boolean
+  episode: number | null
+  aid: number | null // AniDB series id (AnimeTosho) — canonical show identity
+  seriesTitle: string | null // AnimeTosho canonical series title
 }
 
-async function searchTosho(q: string, preferBatch: boolean, base = TOSHO_URL): Promise<TorrentHit | null> {
+const RES_RANK: Record<string, number> = { '2160p': 4, '1080p': 3, '720p': 2, '480p': 1 }
+
+function normResolution(raw: string, title: string): string {
+  const r = raw.toLowerCase()
+  if (RES_RANK[r]) return r
+  const m = title.match(/\b(2160|1080|720|480)p?\b/i)
+  return m ? `${m[1]}p` : ''
+}
+
+// "Dual Audio" / "Multi Audio" — English + Japanese tracks. Note "Multi-Subs"
+// is subtitles only (usually Japanese audio), so it deliberately doesn't match.
+function titleDualAudio(title: string): boolean {
+  return /dual[\s._-]?audio|multi[\s._-]?audio|dual[\s._-]?lang/i.test(title)
+}
+
+function titleIsBatch(title: string): boolean {
+  return /\bbatch\b|\bcomplete(?:d)?\b|\bseason\b|\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/i.test(title)
+}
+
+// Best-effort single-episode number from a fansub title. Ranges ("(01-28)")
+// are batches, not episodes, so they return null.
+function parseEpisode(title: string): number | null {
+  if (/\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/.test(title)) return null
+  let m = title.match(/\bS\d{1,2}\s*E(\d{1,4})\b/i)
+  if (m) return Number(m[1])
+  m = title.match(/\bEP?(\d{1,4})\b/i)
+  if (m) return Number(m[1])
+  m = title.match(/\s-\s(\d{1,4})(?:v\d)?\s*(?:\[|\(|$)/i)
+  if (m) return Number(m[1])
+  m = title.match(/\s(\d{2,4})\s*(?:\[|\()/)
+  if (m) return Number(m[1])
+  return null
+}
+
+async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
   const doc = (await fetchJson(
     `${base}/json/v1/search?q=${encodeURIComponent(q)}`,
   )) as { data?: Record<string, unknown>[] }
-  const rows = (doc.data ?? []).filter((r) => r.magnet || r.info_hash)
-  if (rows.length === 0) return null
-  const pool = preferBatch && rows.some((r) => r.is_batch) ? rows.filter((r) => r.is_batch) : rows
-  const best = [...pool].sort((x, y) => Number(y.seeders ?? 0) - Number(x.seeders ?? 0))[0]
-  const hash = String(best.info_hash ?? '')
-  return {
-    name: String(best.title ?? q),
-    magnet: String(best.magnet ?? magnetFromHash(hash, String(best.title ?? q))),
-    hash,
-    size: best.total_size != null ? Number(best.total_size) : null,
-    seeders: best.seeders != null ? Number(best.seeders) : null,
-  }
+  return (doc.data ?? [])
+    .filter((r) => r.magnet || r.info_hash)
+    .map((r) => {
+      const title = String(r.title ?? '')
+      const hash = String(r.info_hash ?? '')
+      const series = (r.series ?? null) as { anidb_aid?: number; title?: string } | null
+      return {
+        name: title || q,
+        magnet: String(r.magnet ?? magnetFromHash(hash, title || q)),
+        hash,
+        size:
+          r.size_bytes != null
+            ? Number(r.size_bytes)
+            : r.total_size != null
+              ? Number(r.total_size)
+              : null,
+        seeders: r.seeders != null ? Number(r.seeders) : null,
+        resolution: normResolution(String(r.resolution ?? ''), title),
+        dualAudio: titleDualAudio(title),
+        isBatch: Boolean(r.is_batch) || titleIsBatch(title),
+        episode: parseEpisode(title),
+        aid: series?.anidb_aid != null ? Number(series.anidb_aid) : null,
+        seriesTitle: series?.title != null ? String(series.title) : null,
+      }
+    })
 }
 
-async function searchTsuki(q: string, base = TSUKI_URL): Promise<TorrentHit | null> {
+async function tsukiCandidates(q: string, base: string): Promise<Candidate[]> {
   const doc = (await fetchJson(
-    `${base}/v1/search/torrents?q=${encodeURIComponent(q)}&limit=25`,
+    `${base}/v1/search/torrents?q=${encodeURIComponent(q)}&limit=50`,
   )) as { results?: Record<string, unknown>[] }
-  const rows = (doc.results ?? []).filter((r) => r.btih && !r.is_adult)
-  if (rows.length === 0) return null
-  // No seeder counts here — prefer completed state, then the newest release.
-  const best = [...rows].sort((x, y) => {
-    const done = Number(y.state === 'completed') - Number(x.state === 'completed')
-    return done !== 0 ? done : Number(y.added_date ?? 0) - Number(x.added_date ?? 0)
-  })[0]
-  const name = String(best.name ?? q)
-  const hash = String(best.btih)
+  return (doc.results ?? [])
+    .filter((r) => r.btih && !r.is_adult)
+    .map((r) => {
+      const title = String(r.name ?? '')
+      const hash = String(r.btih)
+      const audio = Array.isArray(r.audiolangs) ? (r.audiolangs as string[]) : []
+      const ep = r.episode_no != null ? Number(r.episode_no) : parseEpisode(title)
+      return {
+        name: title || q,
+        magnet: magnetFromHash(hash, title || q),
+        hash,
+        size: r.totalsize != null ? Number(r.totalsize) : null,
+        // TsukiHime exposes no seeder count.
+        seeders: null,
+        resolution: normResolution('', title),
+        dualAudio: (audio.includes('ja') && audio.includes('en')) || titleDualAudio(title),
+        isBatch: r.episode_no == null && (titleIsBatch(title) || Number(r.filecount ?? 0) > 2),
+        episode: ep,
+        aid: null,
+        seriesTitle: null,
+      }
+    })
+}
+
+// Release-name noise that shouldn't count as title words when checking whether
+// a search hit actually matches the show we asked for.
+const QUALITY_TOKENS = new Set([
+  '1080p', '720p', '480p', '2160p', '4k', 'bd', 'bluray', 'bdrip', 'web', 'webrip', 'webdl',
+  'hevc', 'x265', 'x264', 'av1', 'avc', 'aac', 'opus', 'flac', 'dual', 'audio', 'multi', 'subs',
+  'sub', 'batch', 'complete', 'completed', 'uncensored', 'remux', 'season', 'part', 'ova',
+])
+
+function significantTokens(s: string): string[] {
+  return norm(s)
+    .split(' ')
+    .filter((t) => t.length >= 3 && !QUALITY_TOKENS.has(t) && !/^\d+$/.test(t))
+}
+
+// How well a candidate matches the show we asked for, most-confident first:
+//   3   canonical series title equals ours exactly ("Chainsaw Man" TV, not the
+//       "Chainsaw Man: Reze Hen" movie)
+//   2.5 our title is contained in the canonical series title
+//   2   our title appears as a phrase in the release name (space-insensitive) —
+//       catches romaji releases of an English-canonical show ("Kimi no Na wa")
+//   0-1 fraction of our distinctive words present (weak fallback)
+function relevanceScore(c: Candidate, titleNorm: string, queryTokens: string[]): number {
+  const titleCollapsed = titleNorm.replace(/ /g, '')
+  const st = c.seriesTitle ? norm(c.seriesTitle) : ''
+  if (st) {
+    if (st === titleNorm) return 3
+    if (titleCollapsed.length >= 5 && st.replace(/ /g, '').includes(titleCollapsed)) return 2.5
+  }
+  const cand = norm(c.name)
+  if (titleCollapsed.length >= 5 && cand.replace(/ /g, '').includes(titleCollapsed)) return 2
+  if (queryTokens.length === 0) return 1
+  return queryTokens.filter((t) => cand.includes(t)).length / queryTokens.length
+}
+
+interface SearchOpts {
+  resolution: string
+  requireResolution: boolean
+  preferDualAudio: boolean
+  requireDualAudio: boolean
+  minSeeders: number
+}
+
+function passesFilters(c: Candidate, o: SearchOpts): boolean {
+  // Seeder floor only applies when the provider reports seeders (TsukiHime doesn't).
+  if (o.minSeeders > 0 && c.seeders != null && c.seeders < o.minSeeders) return false
+  if (o.requireResolution && o.resolution && c.resolution !== o.resolution) return false
+  if (o.requireDualAudio && !c.dualAudio) return false
+  return true
+}
+
+function scoreCandidate(c: Candidate, o: SearchOpts): number {
+  let s = 0
+  if (o.resolution && c.resolution === o.resolution) s += 1000
+  else s += (RES_RANK[c.resolution] ?? 0) * 100 // closeness when off-target
+  if (c.dualAudio) s += o.preferDualAudio ? 400 : 100
+  s += Math.min(c.seeders ?? 0, 500) // seeders, capped so they don't dominate quality
+  return s
+}
+
+function candidateFields(c: Candidate): FlowItem {
   return {
-    name,
-    magnet: magnetFromHash(hash, name),
-    hash,
-    size: best.totalsize != null ? Number(best.totalsize) : null,
-    seeders: null,
+    torrent_name: c.name,
+    torrent_magnet: c.magnet,
+    torrent_hash: c.hash,
+    torrent_size: c.size,
+    torrent_seeders: c.seeders,
+    torrent_resolution: c.resolution || null,
+    torrent_dual_audio: c.dualAudio,
+    torrent_is_batch: c.isBatch,
+    torrent_episode: c.episode,
   }
 }
 
@@ -609,7 +744,7 @@ const torrentSearch: NodeImpl = {
     label: 'Torrent search',
     category: 'enrich',
     description:
-      'Searches a torrent index per item and attaches the best result as torrent_* fields.',
+      'Searches a torrent index per item, scores results by resolution/audio/seeders, and picks a season-pack batch or one release per episode.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
       { id: 'found', label: 'found' },
@@ -621,45 +756,63 @@ const torrentSearch: NodeImpl = {
         label: 'Provider',
         kind: 'select',
         options: [
-          { value: 'animetosho', label: 'Anime Tosho' },
-          { value: 'tsukihime', label: 'TsukiHime' },
+          { value: 'animetosho', label: 'Anime Tosho (has seeders)' },
+          { value: 'tsukihime', label: 'TsukiHime (no seeders)' },
         ],
         default: 'animetosho',
       },
-      {
-        key: 'baseUrl',
-        label: 'Index base URL',
-        kind: 'text',
-        default: '',
-        help: 'Override the provider’s API host (mirror/self-hosted). Empty = default.',
-      },
+      { key: 'baseUrl', label: 'Index base URL', kind: 'text', default: '', help: 'Override the provider’s API host. Empty = default.' },
       { key: 'queryField', label: 'Query field', kind: 'text', default: 'torrent_query' },
       {
-        key: 'preferBatch',
-        label: 'Prefer batch releases',
-        kind: 'boolean',
-        default: true,
-        help: 'Anime Tosho only — favor whole-season batches over single episodes.',
+        key: 'mode',
+        label: 'What to grab',
+        kind: 'select',
+        options: [
+          { value: 'auto', label: 'Auto (batch if finished, episodes if airing)' },
+          { value: 'batch', label: 'Season pack (batch)' },
+          { value: 'episode', label: 'Individual episodes' },
+        ],
+        default: 'auto',
+        help: 'Auto reads the item’s want_mode / air_status (set by the Anime status node).',
       },
-      {
-        key: 'maxItems',
-        label: 'Max items',
-        kind: 'number',
-        default: 10,
-        help: 'Safety cap of searches per run. 0 = unlimited.',
-      },
+      { key: 'resolution', label: 'Resolution', kind: 'select', options: [
+        { value: '1080p', label: '1080p' },
+        { value: '720p', label: '720p' },
+        { value: '2160p', label: '2160p (4K)' },
+        { value: '', label: 'Any' },
+      ], default: '1080p' },
+      { key: 'requireResolution', label: 'Require exact resolution', kind: 'boolean', default: false, help: 'Off = prefer it but accept the best available.' },
+      { key: 'preferDualAudio', label: 'Prefer dual audio (EN+JP)', kind: 'boolean', default: true },
+      { key: 'requireDualAudio', label: 'Require dual audio', kind: 'boolean', default: false, help: 'Drops releases without English+Japanese audio. Many fansubs are sub-only.' },
+      { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho only — TsukiHime reports no seeders).' },
+      { key: 'minTitleMatch', label: 'Title match (0-1)', kind: 'number', default: 0.5, help: 'Min fraction of the show’s title words a result must contain. Guards against the index returning a different show.' },
+      { key: 'maxEpisodes', label: 'Max episodes', kind: 'number', default: 26, help: 'Episode mode: cap on how many recent episodes to queue per show.' },
+      { key: 'maxItems', label: 'Max shows', kind: 'number', default: 10, help: 'Safety cap of searches per run. 0 = unlimited.' },
     ],
   },
   async run(inputs, config, ctx) {
     const provider = str(config, 'provider', 'animetosho')
-    const baseOverride = str(config, 'baseUrl', '').replace(/\/$/, '')
+    const base =
+      str(config, 'baseUrl', '').replace(/\/$/, '') ||
+      (provider === 'tsukihime' ? TSUKI_URL : TOSHO_URL)
     const queryField = str(config, 'queryField', 'torrent_query')
-    const preferBatch = bool(config, 'preferBatch', true)
+    const configMode = str(config, 'mode', 'auto')
+    const opts: SearchOpts = {
+      resolution: str(config, 'resolution', '1080p'),
+      requireResolution: bool(config, 'requireResolution', false),
+      preferDualAudio: bool(config, 'preferDualAudio', true),
+      requireDualAudio: bool(config, 'requireDualAudio', false),
+      minSeeders: num(config, 'minSeeders', 1),
+    }
+    const maxEpisodes = Math.max(1, num(config, 'maxEpisodes', 26))
+    const minTitleMatch = num(config, 'minTitleMatch', 0.5)
     const maxItems = num(config, 'maxItems', 10)
+
     const items = allInputs(inputs)
     const found: FlowItem[] = []
     const missed: FlowItem[] = []
     let queried = 0
+
     for (const item of items) {
       const q = String(item[queryField] ?? '').trim()
       if (!q || (maxItems > 0 && queried >= maxItems)) {
@@ -667,22 +820,76 @@ const torrentSearch: NodeImpl = {
         continue
       }
       queried++
+
+      // Resolve batch-vs-episode per item.
+      let mode = configMode
+      if (mode === 'auto') {
+        const wm = String(item.want_mode ?? '')
+        if (wm === 'episode' || wm === 'batch') mode = wm
+        else mode = String(item.air_status ?? '') === 'airing' ? 'episode' : 'batch'
+      }
+
+      // Match on the show's title (prefer a clean field over the query, which
+      // carries quality words like "1080p").
+      const showTitle = String(item.title ?? item.name ?? q)
+      const titleNorm = norm(showTitle)
+      const qTokens = significantTokens(showTitle + ' ' + q)
+
       try {
-        const hit =
+        const raw =
           provider === 'tsukihime'
-            ? await searchTsuki(q, baseOverride || TSUKI_URL)
-            : await searchTosho(q, preferBatch, baseOverride || TOSHO_URL)
-        if (hit) {
-          found.push({
-            ...item,
-            torrent_name: hit.name,
-            torrent_magnet: hit.magnet,
-            torrent_hash: hit.hash,
-            torrent_size: hit.size,
-            torrent_seeders: hit.seeders,
-          })
-        } else {
+            ? await tsukiCandidates(q, base)
+            : await toshoCandidates(q, base)
+
+        // Anchor on the single most title-relevant release, then trust
+        // AnimeTosho's canonical AniDB id to gather that exact show's other
+        // releases (English + romaji variants), discarding look-alikes.
+        let best = { c: null as Candidate | null, rel: 0 }
+        for (const c of raw) {
+          const rel = relevanceScore(c, titleNorm, qTokens)
+          if (rel > best.rel) best = { c, rel }
+        }
+        let relevant: Candidate[] = []
+        if (best.c && best.rel >= minTitleMatch) {
+          relevant =
+            best.c.aid != null
+              ? raw.filter((c) => c.aid === best.c!.aid)
+              : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
+        }
+        const cands = relevant.filter((c) => passesFilters(c, opts))
+
+        if (cands.length === 0) {
           missed.push(item)
+          const why =
+            raw.length > 0 && relevant.length === 0
+              ? `no title-relevant releases for "${q}" (${raw.length} off-title results ignored)`
+              : `no releases passed filters for "${q}"`
+          ctx.notes.push(why)
+        } else if (mode === 'episode') {
+          // Best release per episode number, most recent episodes first.
+          const byEp = new Map<number, Candidate>()
+          for (const c of cands) {
+            if (c.isBatch || c.episode == null) continue
+            const cur = byEp.get(c.episode)
+            if (!cur || scoreCandidate(c, opts) > scoreCandidate(cur, opts)) byEp.set(c.episode, c)
+          }
+          const eps = [...byEp.entries()].sort((a, b) => b[0] - a[0]).slice(0, maxEpisodes)
+          if (eps.length === 0) {
+            missed.push(item)
+            ctx.notes.push(`no single-episode releases for "${q}"`)
+          } else {
+            for (const [, c] of eps) found.push({ ...item, ...candidateFields(c) })
+            ctx.notes.push(`${q}: ${eps.length} episode(s), best seeders ${Math.max(...eps.map(([, c]) => c.seeders ?? 0))}`)
+          }
+        } else {
+          // Season pack: highest-scoring batch, or best overall if none flagged batch.
+          const batches = cands.filter((c) => c.isBatch)
+          const pool = batches.length > 0 ? batches : cands
+          const best = pool.sort((a, b) => scoreCandidate(b, opts) - scoreCandidate(a, opts))[0]
+          found.push({ ...item, ...candidateFields(best) })
+          ctx.notes.push(
+            `${q}: ${best.resolution || '?'} ${best.dualAudio ? 'dual' : 'sub'} ${best.isBatch ? 'batch' : 'single'} · ${best.seeders ?? '?'} seeders`,
+          )
         }
       } catch (e) {
         ctx.notes.push(`search error for "${q}": ${e instanceof Error ? e.message : String(e)}`)
@@ -691,9 +898,65 @@ const torrentSearch: NodeImpl = {
       await new Promise((r) => setTimeout(r, 500)) // be polite to the index
     }
     if (maxItems > 0 && items.length > maxItems) {
-      ctx.notes.push(`capped at ${maxItems} of ${items.length} items`)
+      ctx.notes.push(`capped at ${maxItems} of ${items.length} shows`)
     }
     return { found, missed }
+  },
+}
+
+const animeStatus: NodeImpl = {
+  spec: {
+    type: 'enrich.anime-status',
+    label: 'Anime status',
+    category: 'enrich',
+    description:
+      'Looks up airing status + episode count by MAL id (TsukiHime) and sets air_status / total_episodes / is_movie / want_mode.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'out', label: 'out' },
+      { id: 'unknown', label: 'unknown' },
+    ],
+    config: [
+      { key: 'malField', label: 'MAL id field', kind: 'text', default: 'mal_id' },
+      { key: 'baseUrl', label: 'API base URL', kind: 'text', default: '', help: 'Empty = TsukiHime default.' },
+      { key: 'maxItems', label: 'Max lookups', kind: 'number', default: 25, help: '0 = unlimited.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const malField = str(config, 'malField', 'mal_id')
+    const base = str(config, 'baseUrl', '').replace(/\/$/, '') || TSUKI_URL
+    const maxItems = num(config, 'maxItems', 25)
+    const out: FlowItem[] = []
+    const unknown: FlowItem[] = []
+    let looked = 0
+    for (const item of allInputs(inputs)) {
+      const mal = Number(item[malField])
+      if (!Number.isFinite(mal) || mal <= 0 || (maxItems > 0 && looked >= maxItems)) {
+        unknown.push(item)
+        continue
+      }
+      looked++
+      try {
+        const a = (await fetchJson(`${base}/v1/animes/mal/${mal}`)) as Record<string, unknown>
+        const isMovie = Boolean(a.is_movie)
+        // TsukiHime air_status: 1 = airing, 2 = finished.
+        const airStatus = a.air_status === 1 ? 'airing' : a.air_status === 2 ? 'finished' : 'unknown'
+        const wantMode = airStatus === 'airing' ? 'episode' : 'batch'
+        out.push({
+          ...item,
+          air_status: airStatus,
+          total_episodes: a.total_episodes ?? null,
+          is_movie: isMovie,
+          want_mode: wantMode,
+        })
+      } catch {
+        // Unknown status → default to batch downstream, but route separately.
+        unknown.push({ ...item, air_status: 'unknown', want_mode: 'batch' })
+      }
+      await new Promise((r) => setTimeout(r, 400))
+    }
+    ctx.notes.push(`resolved status for ${out.length}, ${unknown.length} unknown`)
+    return { out, unknown }
   },
 }
 
@@ -883,6 +1146,7 @@ const IMPLS: NodeImpl[] = [
   indexerMatch,
   jikanEnrich,
   template,
+  animeStatus,
   torrentSearch,
   diff,
   merge,
