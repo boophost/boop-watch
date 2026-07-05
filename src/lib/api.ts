@@ -131,8 +131,17 @@ export const imgUrl = (id: string) => `/img/${encodeURIComponent(id)}`
 export const backdropUrl = (id: string) => `/img/${encodeURIComponent(id)}/backdrop`
 
 export const getSavedAnimes = () => fetchAuth('/api/library/saved').then(r => r.json() as Promise<{ saved: { item_id: string; added_at: string }[] }>)
-export const saveAnime = (item_id: string) => fetchAuth('/api/library/saved', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ item_id }) })
-export const unsaveAnime = (item_id: string) => fetchAuth(`/api/library/saved/${encodeURIComponent(item_id)}`, { method: 'DELETE' })
-
-export const getHistory = () => fetchAuth('/api/library/history').then(r => r.json() as Promise<{ history: { item_id: string; watched_at: string }[] }>)
-export const addHistory = (item_id: string) => fetchAuth('/api/library/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ item_id }) })
+export async function saveAnime(id: string): Promise<void> {
+  const r = await fetchAuth('/api/library/saved', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ item_id: id }),
+  })
+  if (!r.ok) throw new Error('failed to save anime')
+}
+export async function unsaveAnime(id: string): Promise<void> {
+  const r = await fetchAuth(`/api/library/saved/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  if (!r.ok) throw new Error('failed to unsave anime')
+}

@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PortalLayout } from '@/components/PortalLayout'
 import { Icon } from '@/components/Icon'
-import { getSavedAnimes, getHistory, loadCatalog, getWatch, imgUrl, type CatalogItem, type WatchData } from '@/lib/api'
+import { getSavedAnimes, loadCatalog, getWatch, imgUrl, type CatalogItem, type WatchData } from '@/lib/api'
+import { supabase } from '@/lib/supabase'
 
 export default function PersonalLibrary() {
   const [savedIds, setSavedIds] = useState<string[]>([])
@@ -13,13 +14,20 @@ export default function PersonalLibrary() {
   useEffect(() => {
     loadCatalog().then(c => setCatalog(c.items)).catch(console.error)
     getSavedAnimes().then(r => setSavedIds(r.saved.map(s => s.item_id))).catch(console.error)
-    getHistory().then(r => {
-      const ids = r.history.map(h => h.item_id)
-      setHistoryIds(ids)
-      ids.forEach(id => {
-        getWatch(id).then(data => setHistoryDetails(prev => ({ ...prev, [id]: data }))).catch(() => {})
+    supabase.from('watch_progress')
+      .select('item_id')
+      .order('updated_at', { ascending: false })
+      .limit(20)
+      .then(({ data, error }) => {
+        if (error) console.error(error)
+        else if (data) {
+          const ids = data.map((r: any) => r.item_id)
+          setHistoryIds(ids)
+          ids.forEach((id: string) => {
+            getWatch(id).then(wd => setHistoryDetails(prev => ({ ...prev, [id]: wd }))).catch(() => {})
+          })
+        }
       })
-    }).catch(console.error)
   }, [])
 
   const savedItems = catalog.filter(c => savedIds.includes(c.id))

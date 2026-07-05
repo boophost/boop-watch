@@ -70,18 +70,6 @@ export function unsaveAnime(username: string, item_id: string) {
   getDb().prepare('DELETE FROM saved_animes WHERE username = ? AND item_id = ?').run(username, item_id)
 }
 
-export function getHistory(username: string): { item_id: string; watched_at: string }[] {
-  return getDb().prepare('SELECT item_id, watched_at FROM watch_history WHERE username = ? ORDER BY watched_at DESC LIMIT 50').all(username) as any[]
-}
-
-export function addHistory(username: string, item_id: string) {
-  getDb().prepare(`
-    INSERT INTO watch_history (username, item_id, watched_at) 
-    VALUES (?, ?, datetime('now')) 
-    ON CONFLICT(username, item_id) DO UPDATE SET watched_at = datetime('now')
-  `).run(username, item_id)
-}
-
 export function listSeries(): SeriesRow[] {
   return getDb()
     .prepare('SELECT * FROM series ORDER BY added_at DESC')
