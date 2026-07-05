@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   MediaPlayer, MediaProvider, canFullscreen, isHLSProvider, isVideoProvider,
@@ -8,25 +8,38 @@ import { DefaultVideoLayout, defaultLayoutIcons } from '@vidstack/react/player/l
 import HLS from 'hls.js'
 import { Icon, type IconName } from '@/components/Icon'
 import { SearchBar } from '@/components/SearchBar'
-import { UserCrumb } from '@/components/PortalLayout'
+import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
 import { getWatch, type Segment, type WatchData } from '@/lib/api'
 import {
   loadProgressMap, localProgress, saveLocalProgress, saveAccountProgress, backfillAccountProgress,
   type Progress,
 } from '@/lib/progress'
+import { presenceBeat, presenceStop } from '@/lib/presence'
 import '@vidstack/react/player/styles/default/theme.css'
 import '@vidstack/react/player/styles/default/layouts/video.css'
 
-// Main player header: brand (icon-only on phones) · centered search · account
-// crumb. The series back-link + episode title live in the .subbar row below it.
+// The player page reuses the portal's side nav (Kagura-scoped, so it composes
+// with the .player styles already on the root). The .shell flex layout puts the
+// nav beside a .shell-main column holding the topbar/subbar/player. Theater +
+// pseudo-fullscreen still fill the viewport (their .col-video is position:fixed).
+function PlayerShell({ children }: { children: ReactNode }) {
+  const [collapsed, setCollapsed] = useSidebarCollapsed()
+  return (
+    <div className="kagura player shell" data-collapsed={collapsed}>
+      <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+      <div className="shell-main">{children}</div>
+      <MobileNav />
+    </div>
+  )
+}
+
+// Main player header: centered search · account crumb. The brand lives in the
+// side nav now, so the topbar drops it to avoid a duplicate wordmark. The series
+// back-link + episode title live in the .subbar row below it.
 function PlayerTopbar() {
   return (
     <header className="topbar">
-      <Link className="brand" to="/">
-        <span className="brand-mark">B</span>
-        <span className="label">boopurnoes <span className="sub">· watch</span></span>
-      </Link>
       <SearchBar />
       <UserCrumb />
     </header>
@@ -98,6 +111,7 @@ export default function Watch() {
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null)
   // The intro/outro segment the playhead is currently inside (drives the skip button).
   const [activeSeg, setActiveSeg] = useState<Segment | null>(null)
+  const [showNext, setShowNext] = useState(false)
   // Media duration, needed to place the segment marks on the timeline.
   const [duration, setDuration] = useState(0)
 
@@ -127,7 +141,7 @@ export default function Watch() {
 
   // Fetch metadata when the episode changes.
   useEffect(() => {
-    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0)
+    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0); setShowNext(false)
     firstLoad.current = true
     pendingSeek.current = null
     resumePos.current = null
@@ -237,17 +251,37 @@ export default function Watch() {
   // Surface a skip button while the playhead sits inside an intro/outro segment.
   const onTimeUpdate = () => {
     const p = playerRef.current
-    if (!p || !data?.segments.length) return
-    // Duration settles once the HLS playlist is parsed; capture it for the marks.
-    if (Number.isFinite(p.duration) && p.duration > 0) setDuration((d) => d || p.duration)
+    if (!p) return
+    const d = p.duration
+    if (Number.isFinite(d) && d > 0) setDuration((prev) => prev || d)
     const t = p.currentTime
-    const seg = data.segments.find((s) => t >= s.start && t < s.end - 1) || null
+    
+    let seg: Segment | null = null
+    if (data?.segments?.length) {
+      seg = data.segments.find((s) => t >= s.start && t < s.end - 1) || null
+    }
     setActiveSeg((prev) => (prev?.type === seg?.type && prev?.start === seg?.start ? prev : seg))
+    
+    const isOutro = seg?.type === 'outro'
+    const isNearEnd = Number.isFinite(d) && d > 0 && d - t <= 60
+    setShowNext(isOutro || isNearEnd)
   }
 
   const skip = () => {
     const p = playerRef.current
     if (p && activeSeg) { p.currentTime = activeSeg.end; setActiveSeg(null) }
+  }
+
+  const goNext = () => {
+    if (!data || !data.nextId) return
+    const p = playerRef.current
+    if (p) {
+      const prog: Progress = { position: p.currentTime, duration: p.duration || 0, watched: true }
+      saveLocalProgress(data.id, prog)
+      if (user) saveAccountProgress(user.id, data.id, prog).catch(() => {})
+      setProgMap((m) => ({ ...m, [data.id]: prog }))
+    }
+    navigate(`/watch/${data.nextId}`)
   }
 
   // Intro/outro marks on the timeline: a gradient with a stop pair per segment,
@@ -348,6 +382,44 @@ export default function Watch() {
     }
   }, [data, user])
 
+  // Discord watch status: logged-in users who opted in on the profile page get
+  // a "Watching …" activity while playing. The server throttles the actual
+  // Discord traffic, so this just ticks every 30s and reports play/pause edges
+  // promptly. Stopping lives in a separate unmount-only effect: on episode
+  // change the next beat *updates* the session in place instead (no flicker,
+  // and no stop/beat ordering race).
+  const presenceRef = useRef<(paused?: boolean) => void>(() => {})
+  useEffect(() => {
+    if (!data || !user) {
+      presenceRef.current = () => {}
+      return
+    }
+    const send = (pausedOverride?: boolean) => {
+      const p = playerRef.current
+      if (!p) return
+      const d = p.duration
+      if (!d || isNaN(d)) return
+      presenceBeat(data.id, p.currentTime || 0, d, pausedOverride ?? p.paused).catch(() => {})
+    }
+    presenceRef.current = send
+    const t0 = setTimeout(() => { const p = playerRef.current; if (p && !p.paused) send(false) }, 4000)
+    const iv = setInterval(() => { const p = playerRef.current; if (p && !p.paused) send(false) }, 30000)
+    return () => {
+      clearTimeout(t0)
+      clearInterval(iv)
+      presenceRef.current = () => {}
+    }
+  }, [data, user])
+
+  useEffect(() => {
+    const onHide = () => { presenceStop() }
+    window.addEventListener('pagehide', onHide)
+    return () => {
+      window.removeEventListener('pagehide', onHide)
+      presenceStop()
+    }
+  }, [])
+
   // Theater + pseudo-fullscreen reflect onto <body> (CSS targets body.theater /
   // body.fs; pseudo-fullscreen is the theater layout plus a hidden control bar).
   useEffect(() => {
@@ -398,10 +470,10 @@ export default function Watch() {
   }, [])
 
   if (error) {
-    return <div className="kagura player"><PlayerTopbar /><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></div>
+    return <PlayerShell><PlayerTopbar /><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></PlayerShell>
   }
   if (!data) {
-    return <div className="kagura player"><PlayerTopbar /><div className="subbar"><span className="t">Loading…</span></div></div>
+    return <PlayerShell><PlayerTopbar /><div className="subbar"><span className="t">Loading…</span></div></PlayerShell>
   }
 
   const closeMenu = (e: React.MouseEvent) => (e.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')
@@ -411,7 +483,7 @@ export default function Watch() {
   const qualityLabel = data.quality.find((q) => q.key === qKey)?.label || 'Auto'
 
   return (
-    <div className="kagura player">
+    <PlayerShell>
       <PlayerTopbar />
       <div className="subbar">
         <Link className="back" to={data.back.href}><Icon name="back" size={15} /><span className="bl">{data.back.label}</span></Link>
@@ -436,14 +508,23 @@ export default function Watch() {
                 onCanPlay={onCanPlay}
                 onTimeUpdate={onTimeUpdate}
                 onEnded={onEnded}
+                onPlay={() => presenceRef.current(false)}
+                onPause={() => presenceRef.current(true)}
               >
                 <MediaProvider />
                 <DefaultVideoLayout icons={defaultLayoutIcons} />
-                {activeSeg && (
-                  <button type="button" className="skip-btn" onClick={skip}>
-                    Skip {activeSeg.type === 'intro' ? 'Intro' : 'Outro'} <Icon name="next" size={15} />
-                  </button>
-                )}
+                <div className="vds-overlay-btns">
+                  {activeSeg && (
+                    <button type="button" className="skip-btn" onClick={skip}>
+                      Skip {activeSeg.type === 'intro' ? 'Intro' : 'Outro'} <Icon name="next" size={15} />
+                    </button>
+                  )}
+                  {showNext && data.nextId && (
+                    <button type="button" className="skip-btn" onClick={goNext}>
+                      Next Episode <Icon name="next" size={15} />
+                    </button>
+                  )}
+                </div>
               </MediaPlayer>
             )}
           </div>
@@ -514,7 +595,7 @@ export default function Watch() {
           </aside>
         )}
       </div>
-    </div>
+    </PlayerShell>
   )
 }
 

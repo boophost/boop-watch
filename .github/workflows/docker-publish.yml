@@ -1,11 +1,13 @@
 name: Build and Publish
 
 # Build the image on every PR (validation, no push). On pushes to main or dev, build
-# and push the image with a moving tag (main -> ghcr.io/n0es/boop-watch:latest,
+# and push the image with a moving tag (main -> ghcr.io/boophost/boop-watch:latest,
 # dev -> :dev; plus a per-commit sha tag), then roll the matching k3s Deployment so the
 # new image rolls out: main -> `deploy` (boop-watch, prod), dev -> `deploy-dev`
-# (boop-watch-dev, staging). Each Deployment is pinned to its moving tag (:latest / :dev),
-# so `rollout restart` re-pulls the freshly pushed image. The old Watchtower flow is gone.
+# (boop-watch-dev, staging). Each deploy job re-pins the Deployment to the correct
+# image (`kubectl set image`) before `rollout restart` re-pulls the moving tag, so the
+# ref stays correct even if link's stored app config drifts (e.g. after the org move
+# from n0es -> boophost). The old Watchtower flow is gone.
 
 on:
   push:
@@ -84,6 +86,7 @@ jobs:
         env:
           KUBECONFIG: $HOME/.kube/boop-watch-deployer.yaml
         run: |
+          kubectl -n link-apps set image deployment/boop-watch boop-watch=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           kubectl -n link-apps rollout restart deployment/boop-watch
           kubectl -n link-apps rollout status deployment/boop-watch --timeout=180s
 
@@ -96,5 +99,6 @@ jobs:
         env:
           KUBECONFIG: $HOME/.kube/boop-watch-deployer.yaml
         run: |
+          kubectl -n link-apps set image deployment/boop-watch-dev boop-watch-dev=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev
           kubectl -n link-apps rollout restart deployment/boop-watch-dev
           kubectl -n link-apps rollout status deployment/boop-watch-dev --timeout=180s
