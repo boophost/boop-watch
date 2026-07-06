@@ -85,12 +85,24 @@ const allInputs = (inputs: Record<string, FlowItem[]>): FlowItem[] =>
 const USER_AGENT = 'boop-watch-flows/1.0'
 
 async function fetchJson(url: string): Promise<unknown> {
-  const res = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-    signal: AbortSignal.timeout(20_000),
-  })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${new URL(url).host}`)
-  return res.json()
+  // Retry on 429, honouring Retry-After. TsukiHime documents per-IP windows
+  // (120 req/min default, 50 req/min for /v1/search/torrents) and returns 429 +
+  // Retry-After when exceeded; our per-request spacing keeps us under, this is
+  // the safety net for a burst that still trips a fixed window.
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (res.status === 429 && attempt < 3) {
+      const retryAfter = Number(res.headers.get('retry-after'))
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000 * (attempt + 1)
+      await new Promise((r) => setTimeout(r, Math.min(waitMs, 30_000)))
+      continue
+    }
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${new URL(url).host}`)
+    return res.json()
+  }
 }
 
 /** Resolves a dot path ("data.results") into a fetched JSON document. */
@@ -1427,7 +1439,10 @@ const torrentSearch: NodeImpl = {
         ctx.notes.push(`search error for "${q}": ${e instanceof Error ? e.message : String(e)}`)
         missed.push(item)
       }
-      await new Promise((r) => setTimeout(r, 500)) // be polite to the index
+      // Space searches under the index's rate limit. TsukiHime documents 50
+      // req/min for /v1/search/torrents (→ 1.3s spacing keeps headroom under the
+      // fixed window); AnimeTosho is undocumented, keep the polite 500ms.
+      await new Promise((r) => setTimeout(r, provider === 'tsukihime' ? 1300 : 500))
     }
     if (maxItems > 0 && items.length > maxItems) {
       ctx.notes.push(`capped at ${maxItems} of ${items.length} shows`)
@@ -1492,7 +1507,9 @@ const animeStatus: NodeImpl = {
         // Unknown status → default to batch downstream, but route separately.
         unknown.push({ ...item, air_status: 'unknown', want_mode: 'batch' })
       }
-      await new Promise((r) => setTimeout(r, 400))
+      // TsukiHime default limit is 120 req/min; 550ms spacing (~109/min) stays
+      // under it with headroom.
+      await new Promise((r) => setTimeout(r, 550))
     }
     ctx.notes.push(`resolved status for ${out.length}, ${unknown.length} unknown`)
     return { out, unknown }

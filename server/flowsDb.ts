@@ -71,8 +71,10 @@ const SEED_GRAPH: FlowGraph = {
 }
 
 // Indexer titles that Jellyfin doesn't have → look up airing status → torrent
-// search (season pack if finished, recent episodes if airing; 1080p, dual audio
-// preferred, seeded) → qBittorrent. Ends at qbit; never touches the portal DB.
+// search on TsukiHime (season pack if finished, recent episodes if airing;
+// 1080p, dual audio preferred) → qBittorrent. TsukiHime because it season-pins
+// reliably via the status node's tsuki_id. Ends at qbit; never touches the
+// portal DB.
 const MISSING_VIDEOS_GRAPH: FlowGraph = {
   nodes: [
     { id: 'idx', type: 'source.indexer', position: { x: 0, y: 0 }, config: {} },
@@ -81,7 +83,11 @@ const MISSING_VIDEOS_GRAPH: FlowGraph = {
     { id: 'lim', type: 'filter.limit', position: { x: 560, y: 60 }, config: { count: 5 } },
     { id: 'st', type: 'enrich.anime-status', position: { x: 820, y: 60 }, config: { malField: 'mal_id', maxItems: 0 } },
     { id: 'tpl', type: 'transform.template', position: { x: 1100, y: 20 }, config: { field: 'torrent_query', template: '{title} 1080p' } },
-    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1380, y: 20 }, config: { provider: 'animetosho', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, minSeeders: 1, minTitleMatch: 0.5, maxEpisodes: 26, maxItems: 0 } },
+    // TsukiHime: it tags each release with its per-season anime id (so the season
+    // pin from the Anime status node's tsuki_id is reliable — AnimeTosho mis-tags
+    // some seasons) and structured audio langs. It reports no seeders, so
+    // minSeeders=0.
+    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1380, y: 20 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, minSeeders: 0, minTitleMatch: 0.5, maxEpisodes: 26, maxItems: 0 } },
     { id: 'qb', type: 'sink.qbittorrent', position: { x: 1680, y: 90 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
   ],
   edges: [
