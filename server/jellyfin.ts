@@ -19,6 +19,8 @@ export interface JfMediaStream {
   Codec?: string
   Language?: string
   Channels?: number
+  Width?: number
+  Height?: number
   IsDefault?: boolean
   IsForced?: boolean
   IsTextSubtitleStream?: boolean
@@ -44,7 +46,7 @@ export interface JfItem {
   PrimaryImageAspectRatio?: number
   BackdropImageTags?: string[]
   MediaStreams?: JfMediaStream[]
-  MediaSources?: { MediaStreams?: JfMediaStream[] }[]
+  MediaSources?: { MediaStreams?: JfMediaStream[]; Size?: number; Container?: string }[]
 }
 
 type Query = Record<string, string | number | undefined | null>
