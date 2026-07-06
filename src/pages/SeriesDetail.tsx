@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Ban, ChevronLeft, ExternalLink, Play, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
-import { fetchAuth } from '@/lib/api'
+import { fetchAuth, parseAuthJson } from '@/lib/api'
 
 interface SeriesDownload {
   hash: string
@@ -151,6 +151,7 @@ export default function SeriesDetail() {
 
   const [dl, setDl] = useState<DownloadStatus | null>(null)
   const [busyHash, setBusyHash] = useState<string | null>(null)
+  const [researchMsg, setResearchMsg] = useState('')
 
   const loadDownloads = useCallback(async () => {
     if (!Number.isFinite(id)) return
@@ -179,6 +180,7 @@ export default function SeriesDetail() {
 
   const blacklistSource = async (t: SeriesDownload) => {
     setBusyHash(t.hash)
+    setResearchMsg('')
     try {
       await fetchAuth(`/api/series/${id}/blacklist`, {
         method: 'POST',
@@ -191,6 +193,22 @@ export default function SeriesDetail() {
         }),
       })
       await loadDownloads()
+      // Blacklisting a source implies "find me a better one" — kick off a
+      // one-series re-search that skips the blacklisted hash and queues a fresh,
+      // playable (non-AV1) release. Shows up in the Activity tab too.
+      setResearchMsg('Searching for a replacement…')
+      const r = await fetchAuth(`/api/series/${id}/research`, { method: 'POST' })
+      const d = await parseAuthJson<{ queued?: number; notes?: string[]; error?: string }>(r)
+      if (!r.ok) throw new Error(d.error ?? 'Re-search failed')
+      const note = d.notes?.[0] ?? ''
+      setResearchMsg(
+        d.queued && d.queued > 0
+          ? `Queued a replacement in qBittorrent${note ? ` — ${note}` : ''}`
+          : `No replacement release found${note ? ` — ${note}` : ''}`,
+      )
+      await loadDownloads()
+    } catch (e) {
+      setResearchMsg(e instanceof Error ? e.message : 'Re-search failed')
     } finally {
       setBusyHash(null)
     }
@@ -244,11 +262,11 @@ export default function SeriesDetail() {
       setEpError('')
       try {
         const r = await fetchAuth(`/api/series/${id}/episodes?page=${page}`)
-        const raw = (await r.json()) as {
+        const raw = await parseAuthJson<{
           episodes?: EpisodeRow[]
           pagination?: { has_next_page: boolean }
           error?: string
-        }
+        }>(r)
         if (!r.ok) throw new Error(raw.error ?? 'Episodes failed')
         const next = raw.episodes ?? []
         setEpisodes((prev) => (replace ? next : [...prev, ...next]))
@@ -461,11 +479,13 @@ export default function SeriesDetail() {
                           size="sm"
                           className="h-8 gap-1 px-2 text-amber-600 dark:text-amber-500"
                           disabled={busy}
-                          title="Blacklist this source and remove it — the flow won't pick it again"
+                          title="Blacklist and remove this source, then search for a replacement release"
                           onClick={() => void blacklistSource(t)}
                         >
                           <Ban className="size-3.5" />
-                          <span className="hidden sm:inline">Blacklist</span>
+                          <span className="hidden sm:inline">
+                            {busy ? 'Working…' : 'Blacklist & replace'}
+                          </span>
                         </Button>
                         <Button
                           type="button"
@@ -492,6 +512,12 @@ export default function SeriesDetail() {
               })}
             </ul>
           )}
+
+          {researchMsg ? (
+            <p className="mt-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              {researchMsg}
+            </p>
+          ) : null}
 
           {dl && dl.blacklist.length > 0 ? (
             <div className="mt-4">
