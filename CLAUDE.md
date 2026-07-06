@@ -37,7 +37,7 @@ server/                 # Express backend (TypeScript, ESM)
   publicRoutes.ts       # public portal routes + JSON APIs (no auth)
   watch.ts, schedule.ts # player stream-info; animeschedule scraper + library matcher
   db.ts, jikan.ts       # series.sqlite + Jikan/MAL client (the /manage admin)
-Dockerfile              # multi-stage node:20-alpine; builds dist + dist-server
+Dockerfile              # multi-stage node:22-alpine; builds dist + dist-server
 public/robots.txt       # Disallow: / (the portal is unlisted)
 ```
 
