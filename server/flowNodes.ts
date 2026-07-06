@@ -1914,6 +1914,143 @@ const fetchSubs: NodeImpl = {
   },
 }
 
+// Combine a playable video (release A) with an audio/sub track stolen from a
+// donor file (release B) into one stream-copied MKV — no video re-encode. This
+// manufactures a *playable* dual-audio file (h264 + jpn + eng) from a sub-only
+// h264 release + a dual (often AV1) donor, sidestepping the T4's inability to
+// HW-decode AV1. Only safe for same-source (same edit + framerate) pairs; sync
+// was validated for BD↔WEB Frieren (see docs/dual-audio-mux-plan.md).
+const muxTracks: NodeImpl = {
+  spec: {
+    type: 'enrich.mux-tracks',
+    label: 'Mux in tracks',
+    category: 'enrich',
+    description:
+      'Muxes an audio (and/or subtitle) track from a donor file onto the primary video, stream-copied into a new MKV (no re-encode). Use to build a playable dual-audio file: playable h264 primary + eng dub from a dual donor. Same-source pairs only (matching edit/framerate); audioOffset corrects a constant delay.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'muxed', label: 'muxed' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      { key: 'fileField', label: 'Primary file field', kind: 'text', default: 'file_path', help: 'The playable video source; its video + audio are kept as-is.' },
+      { key: 'donorField', label: 'Donor file field', kind: 'text', default: 'donor_path', help: 'The file to steal tracks from (e.g. the existing dual library file).' },
+      { key: 'audioLang', label: 'Donor audio language', kind: 'text', default: 'eng', help: 'ISO code(s) of the donor audio track to add, comma-separated. Empty = add no audio.' },
+      { key: 'subLang', label: 'Donor subtitle language', kind: 'text', default: '', help: 'ISO code(s) of the donor text subtitle track to add. Empty = add no sub. Image subs (PGS) are skipped.' },
+      { key: 'audioOffset', label: 'Audio offset (s)', kind: 'number', default: 0, help: 'Seconds to shift the donor track (-itsoffset). Constant-delay correction; 0 for same-edit pairs.' },
+      { key: 'outDir', label: 'Output dir', kind: 'text', default: '', help: 'Where the muxed MKV lands. Empty = DATA_DIR/work.' },
+      { key: 'setDefaultAudio', label: 'Default audio language', kind: 'text', default: 'jpn', help: 'Which output audio language is flagged default. Empty = leave source dispositions.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fileField = str(config, 'fileField', 'file_path')
+    const donorField = str(config, 'donorField', 'donor_path')
+    const audioLangs = str(config, 'audioLang', 'eng').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    const subLangs = str(config, 'subLang', '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    const audioOffset = num(config, 'audioOffset', 0)
+    const outDir = str(config, 'outDir', '') || path.join(WORK_DIR(), 'work')
+    const defaultLangs = str(config, 'setDefaultAudio', 'jpn').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+
+    const matchLang = (lang: string, wanted: string[]): boolean =>
+      wanted.some((w) => lang === w || (w.length > 0 && lang.startsWith(w)))
+    const probe = async (file: string): Promise<ProbeStream[]> => {
+      const { stdout } = await execFileP(
+        'ffprobe',
+        ['-v', 'quiet', '-print_format', 'json', '-show_streams', file],
+        { timeout: 60_000, maxBuffer: 8 * 1024 * 1024 },
+      )
+      return (JSON.parse(stdout).streams ?? []) as ProbeStream[]
+    }
+
+    const muxed: FlowItem[] = []
+    const skipped: FlowItem[] = []
+
+    for (const item of allInputs(inputs)) {
+      const primary = String(item[fileField] ?? '')
+      const donor = String(item[donorField] ?? '')
+      if (!primary || !donor || !fs.existsSync(primary) || !fs.existsSync(donor)) {
+        ctx.notes.push(`skip: missing primary/donor file (${path.basename(primary || '?')} / ${path.basename(donor || '?')})`)
+        skipped.push(item)
+        continue
+      }
+      try {
+        const [primaryStreams, donorStreams] = await Promise.all([probe(primary), probe(donor)])
+
+        // Audio/subtitle indices are *codec-relative* (what `-map 1:a:N` / `1:s:N` want).
+        let paOrd = 0
+        const primaryAudio = primaryStreams
+          .filter((s) => s.codec_type === 'audio')
+          .map((s) => ({ ord: paOrd++, lang: (s.tags?.language ?? '').toLowerCase() }))
+        let daOrd = 0
+        const donorAudio = donorStreams
+          .filter((s) => s.codec_type === 'audio')
+          .map((s) => ({ ord: daOrd++, lang: (s.tags?.language ?? '').toLowerCase() }))
+        let dsOrd = 0
+        const donorSubs = donorStreams
+          .filter((s) => s.codec_type === 'subtitle')
+          .map((s) => ({ ord: dsOrd++, lang: (s.tags?.language ?? '').toLowerCase(), codec: (s.codec_name ?? '').toLowerCase() }))
+
+        const donorAudioPick = audioLangs.length > 0 ? donorAudio.find((a) => matchLang(a.lang, audioLangs)) : undefined
+        // Text subs only (same limit as extract-subs); image subs can't be relied on.
+        const donorSubPick = subLangs.length > 0
+          ? donorSubs.find((s) => SUB_EXT[s.codec] && matchLang(s.lang, subLangs))
+          : undefined
+
+        if (!donorAudioPick && !donorSubPick) {
+          ctx.notes.push(`skip: donor has no matching ${audioLangs.join('/')||'audio'}${subLangs.length ? `/${subLangs.join('/')} sub` : ''} track (${path.basename(donor)})`)
+          skipped.push(item)
+          continue
+        }
+
+        // Output audio order = primary audio (0..N-1) then the appended donor track.
+        const outAudioCount = primaryAudio.length + (donorAudioPick ? 1 : 0)
+        let defaultIdx = -1
+        if (defaultLangs.length > 0) {
+          const inPrimary = primaryAudio.find((a) => matchLang(a.lang, defaultLangs))
+          if (inPrimary) defaultIdx = inPrimary.ord
+          else if (donorAudioPick && matchLang(donorAudioPick.lang, defaultLangs)) defaultIdx = primaryAudio.length
+        }
+
+        const base = path.basename(primary, path.extname(primary))
+        const outPath = path.join(outDir, `${base}.mkv`)
+
+        const args = ['-y', '-v', 'error', '-i', primary]
+        if (audioOffset) args.push('-itsoffset', String(audioOffset))
+        args.push('-i', donor, '-map', '0:v', '-map', '0:a')
+        if (donorAudioPick) args.push('-map', `1:a:${donorAudioPick.ord}`)
+        if (donorSubPick) args.push('-map', `1:s:${donorSubPick.ord}`)
+        args.push('-c', 'copy')
+        if (defaultIdx >= 0) {
+          for (let i = 0; i < outAudioCount; i++) args.push(`-disposition:a:${i}`, i === defaultIdx ? 'default' : '0')
+        }
+        args.push(outPath)
+
+        if (!ctx.dryRun) {
+          fs.mkdirSync(outDir, { recursive: true })
+          await execFileP('ffmpeg', args, { timeout: 600_000, maxBuffer: 8 * 1024 * 1024 })
+        }
+        muxed.push({
+          ...item,
+          [fileField]: outPath,
+          mux_added_audio: donorAudioPick ? donorAudioPick.lang || 'und' : '',
+          mux_added_sub: donorSubPick ? donorSubPick.lang || 'und' : '',
+          mux_source: primary,
+          mux_donor: donor,
+        })
+      } catch (e) {
+        ctx.notes.push(`mux failed for ${path.basename(primary)}: ${e instanceof Error ? e.message : String(e)}`)
+        skipped.push(item)
+      }
+    }
+    ctx.notes.push(
+      ctx.dryRun
+        ? `dry run — would mux ${muxed.length} file(s), ${skipped.length} skipped`
+        : `muxed ${muxed.length} file(s), ${skipped.length} skipped`,
+    )
+    return { muxed, skipped }
+  },
+}
+
 const metadataEnrich: NodeImpl = {
   spec: {
     type: 'enrich.metadata',
@@ -2589,6 +2726,7 @@ const IMPLS: NodeImpl[] = [
   mediaProbe,
   extractSubs,
   fetchSubs,
+  muxTracks,
   metadataEnrich,
   dedupe,
   limit,
