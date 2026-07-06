@@ -85,6 +85,26 @@ export interface RunReport {
   error?: string
 }
 
+export interface RunActivity {
+  node: string
+  type: string
+  status: 'ok' | 'error' | 'skipped'
+  notes: string[]
+  error?: string
+}
+
+export interface FlowRun {
+  id: number
+  flow_id: number | null
+  flow_name: string
+  dry_run: boolean
+  ok: boolean
+  error: string | null
+  started_at: string
+  duration_ms: number
+  activity: RunActivity[]
+}
+
 async function json<T>(r: Response): Promise<T> {
   if (!r.ok) {
     let msg = `Request failed (${r.status})`
@@ -130,3 +150,6 @@ export const runFlow = (id: number, dryRun: boolean) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ dryRun }),
   }).then((r) => json<{ report: RunReport }>(r))
+
+export const listRuns = (limit = 100) =>
+  fetchAuth(`/api/flows/runs?limit=${limit}`).then((r) => json<{ runs: FlowRun[] }>(r))

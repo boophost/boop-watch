@@ -85,12 +85,24 @@ const allInputs = (inputs: Record<string, FlowItem[]>): FlowItem[] =>
 const USER_AGENT = 'boop-watch-flows/1.0'
 
 async function fetchJson(url: string): Promise<unknown> {
-  const res = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-    signal: AbortSignal.timeout(20_000),
-  })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${new URL(url).host}`)
-  return res.json()
+  // Retry on 429, honouring Retry-After. TsukiHime documents per-IP windows
+  // (120 req/min default, 50 req/min for /v1/search/torrents) and returns 429 +
+  // Retry-After when exceeded; our per-request spacing keeps us under, this is
+  // the safety net for a burst that still trips a fixed window.
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (res.status === 429 && attempt < 3) {
+      const retryAfter = Number(res.headers.get('retry-after'))
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000 * (attempt + 1)
+      await new Promise((r) => setTimeout(r, Math.min(waitMs, 30_000)))
+      continue
+    }
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${new URL(url).host}`)
+    return res.json()
+  }
 }
 
 /** Resolves a dot path ("data.results") into a fetched JSON document. */
@@ -1062,9 +1074,14 @@ interface Candidate {
   seeders: number | null
   resolution: string // '2160p' | '1080p' | '720p' | '480p' | ''
   dualAudio: boolean
+  videoCodec: string // 'av1' | 'hevc' | 'h264' | '' (parsed from the release name)
   isBatch: boolean
   episode: number | null
   aid: number | null // AniDB series id (AnimeTosho) — canonical show identity
+  // Provider's canonical *per-season* id, used to pin the exact season (they
+  // share titles): AnimeTosho's AniDB aid, or TsukiHime's anime.id. TsukiHime is
+  // the more reliable of the two — AnimeTosho occasionally mis-tags a season.
+  pinId: number | null
   seriesTitle: string | null // AnimeTosho canonical series title
 }
 
@@ -1085,6 +1102,16 @@ function titleDualAudio(title: string): boolean {
 
 function titleIsBatch(title: string): boolean {
   return /\bbatch\b|\bcomplete(?:d)?\b|\bseason\b|\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/i.test(title)
+}
+
+// Video codec from the release name. Matters for playability: our Jellyfin
+// transcodes on a Tesla T4 (Turing), which HW-decodes h264/HEVC but NOT AV1 —
+// so an AV1 source forces a slow software decode that stalls the stream.
+function titleCodec(title: string): string {
+  if (/\bav1\b/i.test(title)) return 'av1'
+  if (/\b(hevc|x[\s._-]?265|h[\s._-]?265)\b/i.test(title)) return 'hevc'
+  if (/\b(avc|x[\s._-]?264|h[\s._-]?264)\b/i.test(title)) return 'h264'
+  return ''
 }
 
 // Best-effort single-episode number from a fansub title. Ranges ("(01-28)")
@@ -1125,9 +1152,11 @@ async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
         seeders: r.seeders != null ? Number(r.seeders) : null,
         resolution: normResolution(String(r.resolution ?? ''), title),
         dualAudio: titleDualAudio(title),
+        videoCodec: titleCodec(title),
         isBatch: Boolean(r.is_batch) || titleIsBatch(title),
         episode: parseEpisode(title),
         aid: series?.anidb_aid != null ? Number(series.anidb_aid) : null,
+        pinId: series?.anidb_aid != null ? Number(series.anidb_aid) : null,
         seriesTitle: series?.title != null ? String(series.title) : null,
       }
     })
@@ -1144,6 +1173,10 @@ async function tsukiCandidates(q: string, base: string): Promise<Candidate[]> {
       const hash = String(r.btih)
       const audio = Array.isArray(r.audiolangs) ? (r.audiolangs as string[]) : []
       const ep = r.episode_no != null ? Number(r.episode_no) : parseEpisode(title)
+      // TsukiHime tags each release with its per-season anime entry (id +
+      // titles), so "Frieren S1" (id 19) and "Frieren 2nd Season" (id 284) are
+      // distinguishable even though the release names both say "Frieren".
+      const anime = (r.anime ?? null) as { id?: number; title?: string } | null
       return {
         name: title || q,
         magnet: magnetFromHash(hash, title || q),
@@ -1153,10 +1186,12 @@ async function tsukiCandidates(q: string, base: string): Promise<Candidate[]> {
         seeders: null,
         resolution: normResolution('', title),
         dualAudio: (audio.includes('ja') && audio.includes('en')) || titleDualAudio(title),
+        videoCodec: titleCodec(title),
         isBatch: r.episode_no == null && (titleIsBatch(title) || Number(r.filecount ?? 0) > 2),
         episode: ep,
         aid: null,
-        seriesTitle: null,
+        pinId: anime?.id != null ? Number(anime.id) : null,
+        seriesTitle: anime?.title != null ? String(anime.title) : null,
       }
     })
 }
@@ -1201,6 +1236,7 @@ interface SearchOpts {
   preferDualAudio: boolean
   requireDualAudio: boolean
   minSeeders: number
+  excludeCodecs: string[] // video codecs to drop outright, e.g. ['av1']
 }
 
 function passesFilters(c: Candidate, o: SearchOpts): boolean {
@@ -1208,6 +1244,8 @@ function passesFilters(c: Candidate, o: SearchOpts): boolean {
   if (o.minSeeders > 0 && c.seeders != null && c.seeders < o.minSeeders) return false
   if (o.requireResolution && o.resolution && c.resolution !== o.resolution) return false
   if (o.requireDualAudio && !c.dualAudio) return false
+  // Drop unplayable codecs (only when detected — an untagged release is kept).
+  if (c.videoCodec && o.excludeCodecs.includes(c.videoCodec)) return false
   return true
 }
 
@@ -1216,6 +1254,13 @@ function scoreCandidate(c: Candidate, o: SearchOpts): number {
   if (o.resolution && c.resolution === o.resolution) s += 1000
   else s += (RES_RANK[c.resolution] ?? 0) * 100 // closeness when off-target
   if (c.dualAudio) s += o.preferDualAudio ? 400 : 100
+  // Prefer codecs the server can hardware-decode. Our Tesla T4 (Turing) can't
+  // HW-decode AV1, so a forced h264 transcode of AV1 stalls; h264 direct-plays
+  // and HEVC HW-transcodes. Penalty (600) outweighs the seeder cap (500) so a
+  // playable release always beats a higher-seeded AV1 one.
+  if (c.videoCodec === 'h264') s += 300
+  else if (c.videoCodec === 'hevc') s += 250
+  else if (c.videoCodec === 'av1') s -= 600
   s += Math.min(c.seeders ?? 0, 500) // seeders, capped so they don't dominate quality
   return s
 }
@@ -1229,6 +1274,7 @@ function candidateFields(c: Candidate): FlowItem {
     torrent_seeders: c.seeders,
     torrent_resolution: c.resolution || null,
     torrent_dual_audio: c.dualAudio,
+    torrent_codec: c.videoCodec || null,
     torrent_is_batch: c.isBatch,
     torrent_episode: c.episode,
   }
@@ -1280,6 +1326,7 @@ const torrentSearch: NodeImpl = {
       { key: 'requireResolution', label: 'Require exact resolution', kind: 'boolean', default: false, help: 'Off = prefer it but accept the best available.' },
       { key: 'preferDualAudio', label: 'Prefer dual audio (EN+JP)', kind: 'boolean', default: true },
       { key: 'requireDualAudio', label: 'Require dual audio', kind: 'boolean', default: false, help: 'Drops releases without English+Japanese audio. Many fansubs are sub-only.' },
+      { key: 'excludeCodecs', label: 'Exclude codecs', kind: 'text', default: '', help: 'Comma list of video codecs to drop, e.g. "av1". Our Jellyfin GPU (Tesla T4) can’t hardware-decode AV1, so those stall on playback. h264/HEVC are preferred automatically.' },
       { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho only — TsukiHime reports no seeders).' },
       { key: 'minTitleMatch', label: 'Title match (0-1)', kind: 'number', default: 0.5, help: 'Min fraction of the show’s title words a result must contain. Guards against the index returning a different show.' },
       { key: 'maxEpisodes', label: 'Max episodes', kind: 'number', default: 26, help: 'Episode mode: cap on how many recent episodes to queue per show.' },
@@ -1299,6 +1346,10 @@ const torrentSearch: NodeImpl = {
       preferDualAudio: bool(config, 'preferDualAudio', true),
       requireDualAudio: bool(config, 'requireDualAudio', false),
       minSeeders: num(config, 'minSeeders', 1),
+      excludeCodecs: str(config, 'excludeCodecs', '')
+        .split(',')
+        .map((c) => c.trim().toLowerCase())
+        .filter(Boolean),
     }
     const maxEpisodes = Math.max(1, num(config, 'maxEpisodes', 26))
     const minTitleMatch = num(config, 'minTitleMatch', 0.5)
@@ -1331,12 +1382,12 @@ const torrentSearch: NodeImpl = {
       const titleNorm = norm(showTitle)
       const qTokens = significantTokens(showTitle + ' ' + q)
 
-      // Authoritative AniDB season id (set by the Anime status node from the
-      // MAL id). AnimeTosho tags every release with series.anidb_aid, so this
-      // pins the exact season — the only reliable way to tell e.g. Frieren S1
-      // (aid 17617) from S2 (aid 18886), which share a title.
-      const knownAid = Number(item.anidb_id)
-      const haveAid = Number.isFinite(knownAid) && knownAid > 0
+      // Authoritative per-season id (set by the Anime status node from the MAL
+      // id). Each provider tags releases with its own canonical id — AnimeTosho's
+      // AniDB aid, TsukiHime's anime.id — so this pins the exact season, the only
+      // reliable way to tell e.g. Frieren S1 from S2, which share a title.
+      const knownPin = provider === 'tsukihime' ? Number(item.tsuki_id) : Number(item.anidb_id)
+      const havePin = Number.isFinite(knownPin) && knownPin > 0
 
       try {
         const raw =
@@ -1345,13 +1396,21 @@ const torrentSearch: NodeImpl = {
             : await toshoCandidates(q, base)
 
         let relevant: Candidate[]
-        if (haveAid && raw.some((c) => c.aid === knownAid)) {
-          // Exact season match — discard everything else, including
-          // higher-seeded releases of adjacent seasons.
-          relevant = raw.filter((c) => c.aid === knownAid)
+        // Only trust the pin when the results actually carry ids (a provider can
+        // return untagged releases); otherwise fall through to title relevance.
+        if (havePin && raw.some((c) => c.pinId != null)) {
+          // Keep only this season's releases, discarding everything else. If none
+          // exist yet — e.g. no dual-audio release of this season is posted — this
+          // is empty and the item exits "missed", never a different season.
+          // Grabbing e.g. Frieren S2 for an S1 upgrade would overwrite S1
+          // (episode numbers reset per season).
+          relevant = raw.filter((c) => c.pinId === knownPin)
+          if (relevant.length === 0 && raw.length > 0) {
+            ctx.notes.push(`no season-${knownPin} releases for "${q}" (${raw.length} other-season results ignored)`)
+          }
         } else {
-          // No AniDB id (unknown status, or TsukiHime provider): anchor on the
-          // most title-relevant release, then trust its AniDB id to gather that
+          // No season id (unknown status, or an untagged result set): anchor on
+          // the most title-relevant release, then trust its id to gather that
           // show's other releases (English + romaji variants).
           let best = { c: null as Candidate | null, rel: 0 }
           for (const c of raw) {
@@ -1360,8 +1419,8 @@ const torrentSearch: NodeImpl = {
           }
           relevant =
             best.c && best.rel >= minTitleMatch
-              ? best.c.aid != null
-                ? raw.filter((c) => c.aid === best.c!.aid)
+              ? best.c.pinId != null
+                ? raw.filter((c) => c.pinId === best.c!.pinId)
                 : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
               : []
         }
@@ -1402,14 +1461,17 @@ const torrentSearch: NodeImpl = {
           const best = pool.sort((a, b) => scoreCandidate(b, opts) - scoreCandidate(a, opts))[0]
           found.push({ ...item, ...candidateFields(best) })
           ctx.notes.push(
-            `${q}: ${best.resolution || '?'} ${best.dualAudio ? 'dual' : 'sub'} ${best.isBatch ? 'batch' : 'single'} · ${best.seeders ?? '?'} seeders`,
+            `${q}: ${best.resolution || '?'} ${best.videoCodec || '?'} ${best.dualAudio ? 'dual' : 'sub'} ${best.isBatch ? 'batch' : 'single'} · ${best.seeders ?? '?'} seeders`,
           )
         }
       } catch (e) {
         ctx.notes.push(`search error for "${q}": ${e instanceof Error ? e.message : String(e)}`)
         missed.push(item)
       }
-      await new Promise((r) => setTimeout(r, 500)) // be polite to the index
+      // Space searches under the index's rate limit. TsukiHime documents 50
+      // req/min for /v1/search/torrents (→ 1.3s spacing keeps headroom under the
+      // fixed window); AnimeTosho is undocumented, keep the polite 500ms.
+      await new Promise((r) => setTimeout(r, provider === 'tsukihime' ? 1300 : 500))
     }
     if (maxItems > 0 && items.length > maxItems) {
       ctx.notes.push(`capped at ${maxItems} of ${items.length} shows`)
@@ -1462,15 +1524,21 @@ const animeStatus: NodeImpl = {
           total_episodes: a.total_episodes ?? null,
           is_movie: isMovie,
           want_mode: wantMode,
-          // Authoritative AniDB id for this exact season — lets torrent search
-          // disambiguate seasons that share a title (Frieren S1 vs S2).
+          // Authoritative per-season ids — let torrent search disambiguate
+          // seasons that share a title (Frieren S1 vs S2). anidb_id pins
+          // AnimeTosho; tsuki_id (TsukiHime's own anime.id) pins TsukiHime, which
+          // tags seasons more reliably than AnimeTosho does.
           anidb_id: a.anidb != null ? Number(a.anidb) : null,
+          tsuki_id: a.id != null ? Number(a.id) : null,
+          anilist_id: a.anilist != null ? Number(a.anilist) : null,
         })
       } catch {
         // Unknown status → default to batch downstream, but route separately.
         unknown.push({ ...item, air_status: 'unknown', want_mode: 'batch' })
       }
-      await new Promise((r) => setTimeout(r, 400))
+      // TsukiHime default limit is 120 req/min; 550ms spacing (~109/min) stays
+      // under it with headroom.
+      await new Promise((r) => setTimeout(r, 550))
     }
     ctx.notes.push(`resolved status for ${out.length}, ${unknown.length} unknown`)
     return { out, unknown }
@@ -2029,6 +2097,52 @@ const qbittorrentSink: NodeImpl = {
   },
 }
 
+const qbittorrentDelete: NodeImpl = {
+  spec: {
+    type: 'sink.qbittorrent-delete',
+    label: 'Remove from qBittorrent',
+    category: 'sink',
+    description:
+      'Removes each item’s torrent from qBittorrent (deduped by hash), optionally deleting its downloaded files. Use it to retire a release a better one has replaced — safe when the library copy is a hardlink of the NEW release (a different inode survives the delete).',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'removed', label: 'removed' }],
+    config: [
+      { key: 'url', label: 'qBittorrent URL', kind: 'text', default: '', help: 'Empty = QBIT_URL env.' },
+      { key: 'username', label: 'Username', kind: 'text', default: '', help: 'Empty = QBIT_USERNAME env.' },
+      { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
+      { key: 'hashField', label: 'Torrent hash field', kind: 'text', default: 'torrent_hash' },
+      { key: 'deleteFiles', label: 'Delete downloaded files', kind: 'boolean', default: true, help: 'On = also remove the files from disk. Only feed this fully-superseded torrents (see the Difference node in the seed).' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const hashField = str(config, 'hashField', 'torrent_hash')
+    const deleteFiles = bool(config, 'deleteFiles', true)
+    const items = allInputs(inputs)
+    const hashes = [
+      ...new Set(items.map((it) => String(it[hashField] ?? '').toLowerCase()).filter(Boolean)),
+    ]
+    if (hashes.length === 0) {
+      ctx.notes.push('no torrent hashes to remove')
+      return { removed: [] }
+    }
+    if (ctx.dryRun) {
+      ctx.notes.push(`dry run — would remove ${hashes.length} torrent(s)${deleteFiles ? ' + files' : ''}`)
+      return { removed: items }
+    }
+    const { base, user, pass } = qbitCreds(config)
+    const cookie = await qbitLogin(base, user, pass)
+    const res = await fetch(`${base}/api/v2/torrents/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+      body: new URLSearchParams({ hashes: hashes.join('|'), deleteFiles: String(deleteFiles) }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!res.ok) throw new Error(`qBittorrent delete failed (${res.status})`)
+    ctx.notes.push(`removed ${hashes.length} torrent(s)${deleteFiles ? ' + files' : ''}`)
+    return { removed: items }
+  },
+}
+
 // Fills a path template with an item's fields. {field} is the raw value;
 // {field:2} zero-pads a number to 2 digits (season/episode). Unknown fields ->
 // empty. Slashes in the template make directories.
@@ -2062,6 +2176,22 @@ function sanitizeSegments(rel: string): string {
 }
 
 const LIBRARY_DIR = () => process.env.LIBRARY_DIR ?? '/library'
+
+// "Is the file already in the library this exact release?" Our imports hardlink,
+// so a re-run's src and the dest it produced share an inode — cheap, exact skip
+// that keeps scheduled runs idempotent. Fall back to size for copy-mode imports
+// (different inode); a genuine upgrade — e.g. a dual-audio re-encode — is a
+// larger, distinct file, so it still replaces the old one.
+function sameLibraryFile(src: string, dest: string): boolean {
+  try {
+    const a = fs.statSync(src)
+    const b = fs.statSync(dest)
+    if (a.ino !== 0 && a.ino === b.ino && a.dev === b.dev) return true
+    return a.size === b.size
+  } catch {
+    return false
+  }
+}
 
 const libraryImport: NodeImpl = {
   spec: {
@@ -2163,18 +2293,31 @@ const libraryImport: NodeImpl = {
       }
       const dest = path.join(root, rel + ext)
 
-      if (!overwrite && fs.existsSync(dest)) {
-        skipped.push({ ...item, library_path: dest, import_status: 'exists' })
-        continue
+      if (fs.existsSync(dest)) {
+        // Nothing there to upgrade → honour the plain skip.
+        if (!overwrite) {
+          skipped.push({ ...item, library_path: dest, import_status: 'exists' })
+          continue
+        }
+        // Overwrite mode: only re-place when the incoming file actually differs
+        // from what's already there, so re-runs don't churn (or re-trigger a
+        // Jellyfin scan) but a real upgrade does replace the old file.
+        if (sameLibraryFile(src, dest)) {
+          skipped.push({ ...item, library_path: dest, import_status: 'current' })
+          continue
+        }
       }
+      // dest still present here (with overwrite) means we're replacing a
+      // superseded release, e.g. swapping the sub-only file for a dual-audio one.
+      const replacing = fs.existsSync(dest)
       if (ctx.dryRun) {
-        imported.push({ ...item, library_path: dest, import_method: method })
+        imported.push({ ...item, library_path: dest, import_method: method, import_status: replacing ? 'replaced' : 'new' })
         continue
       }
       try {
         const used = place(src, dest)
         if (used === 'copy' && method === 'hardlink') copied++
-        const out: FlowItem = { ...item, library_path: dest, import_method: used }
+        const out: FlowItem = { ...item, library_path: dest, import_method: used, import_status: replacing ? 'replaced' : 'new' }
         // Bring subtitle + font sidecars next to the video (same basename).
         if (moveSubs && item.subtitle_path) {
           const subSrc = String(item.subtitle_path)
@@ -2239,6 +2382,127 @@ const jellyfinScan: NodeImpl = {
       ctx.notes.push(`Jellyfin scan failed: ${e instanceof Error ? e.message : String(e)}`)
     }
     return { items }
+  },
+}
+
+// Resolve a show name to a Jellyfin item id by searching + token-matching. The
+// scan is async, so callers poll until it surfaces.
+async function findJfItemByName(
+  name: string,
+  itemType: string,
+  threshold: number,
+): Promise<{ id: string; name: string } | null> {
+  const wanted = significantTokens(name)
+  if (wanted.length === 0) return null
+  // Search by the most distinctive word for good recall, then match locally.
+  const searchTerm = [...wanted].sort((a, b) => b.length - a.length)[0]
+  let res: { Items?: JfItem[] }
+  try {
+    res = await jfJson<{ Items?: JfItem[] }>('/Items', {
+      Recursive: 'true',
+      IncludeItemTypes: itemType,
+      SearchTerm: searchTerm,
+      Limit: 25,
+    })
+  } catch {
+    return null
+  }
+  let best: { id: string; name: string; score: number } | null = null
+  for (const it of res.Items ?? []) {
+    const hay = norm(it.Name)
+    const present = wanted.filter((t) => hay.includes(t)).length
+    const score = present / wanted.length
+    if (!best || score > best.score) best = { id: it.Id, name: it.Name || '', score }
+  }
+  return best && best.score >= threshold ? { id: best.id, name: best.name } : null
+}
+
+const jellyfinCollection: NodeImpl = {
+  spec: {
+    type: 'sink.jellyfin-collection',
+    label: 'Add to public collection',
+    category: 'sink',
+    description:
+      'Adds each item’s Jellyfin show to the public "Watch" collection — the last step that makes an imported title appear on the site. Resolves the show by name and waits for the library scan to surface it.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'added', label: 'added' },
+      { id: 'pending', label: 'not found yet' },
+    ],
+    config: [
+      { key: 'collectionId', label: 'Collection id', kind: 'text', default: '', help: 'Empty = WATCH_COLLECTION_ID env (the public "Watch" collection).' },
+      { key: 'nameField', label: 'Show name field', kind: 'text', default: 'title_english', help: 'Item field with the show title; falls back to name.' },
+      { key: 'itemType', label: 'Item type', kind: 'select', options: [
+        { value: 'Series', label: 'Series' },
+        { value: 'Movie', label: 'Movie' },
+      ], default: 'Series' },
+      { key: 'threshold', label: 'Name match (0-1)', kind: 'number', default: 0.6, help: 'Min word overlap between the item name and the Jellyfin title.' },
+      { key: 'waitSeconds', label: 'Wait for scan (s)', kind: 'number', default: 90, help: 'Poll this long for the newly-scanned show to appear. 0 = no wait.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const items = allInputs(inputs)
+    const collectionId = str(config, 'collectionId', '') || COLLECTION_ID || ''
+    const nameField = str(config, 'nameField', 'title_english')
+    const itemType = str(config, 'itemType', 'Series')
+    const threshold = num(config, 'threshold', 0.6)
+    const waitSeconds = num(config, 'waitSeconds', 90)
+
+    // Group items by show name (a 28-episode batch is one series to add).
+    const byName = new Map<string, FlowItem[]>()
+    for (const item of items) {
+      const name = String(item[nameField] ?? item.name ?? '').trim()
+      if (!name) continue
+      ;(byName.get(name) ?? byName.set(name, []).get(name)!).push(item)
+    }
+    if (byName.size === 0) {
+      ctx.notes.push('no items had a show name to resolve')
+      return { added: [], pending: items }
+    }
+    if (!collectionId) throw new Error('No collection id (config or WATCH_COLLECTION_ID env)')
+    if (!jellyfinConfigured) throw new Error('Jellyfin is not configured')
+
+    // Resolve each unique show to a Jellyfin id, polling for the async scan.
+    const resolved = new Map<string, { id: string; name: string }>()
+    const deadline = Date.now() + Math.max(0, waitSeconds) * 1000
+    const names = [...byName.keys()]
+    for (;;) {
+      for (const name of names) {
+        if (resolved.has(name)) continue
+        const hit = await findJfItemByName(name, itemType, threshold)
+        if (hit) resolved.set(name, hit)
+      }
+      if (resolved.size === names.length || Date.now() >= deadline) break
+      await new Promise((r) => setTimeout(r, 5000))
+    }
+
+    const added: FlowItem[] = []
+    const pending: FlowItem[] = []
+    for (const [name, group] of byName) {
+      if (resolved.has(name)) added.push(...group)
+      else {
+        pending.push(...group)
+        ctx.notes.push(`"${name}" not found in Jellyfin yet (scan may still be running)`)
+      }
+    }
+
+    const ids = [...resolved.values()].map((r) => r.id)
+    if (ids.length === 0) {
+      ctx.notes.push('resolved no shows to add')
+      return { added, pending }
+    }
+    if (ctx.dryRun) {
+      ctx.notes.push(`dry run — would add ${ids.length} show(s) to the collection: ${[...resolved.values()].map((r) => r.name).join(', ')}`)
+      return { added, pending }
+    }
+    // POST /Collections/{id}/Items?ids=… — adding an existing member is a no-op.
+    const res = await fetch(jfUrl(`/Collections/${collectionId}/Items`, { ids: ids.join(',') }), {
+      method: 'POST',
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!res.ok) throw new Error(`Jellyfin add-to-collection failed (${res.status})`)
+    ctx.notes.push(`added ${ids.length} show(s) to the collection: ${[...resolved.values()].map((r) => r.name).join(', ')}`)
+    return { added, pending }
   },
 }
 
@@ -2337,8 +2601,10 @@ const IMPLS: NodeImpl[] = [
   merge,
   portalSink,
   qbittorrentSink,
+  qbittorrentDelete,
   libraryImport,
   jellyfinScan,
+  jellyfinCollection,
 ]
 
 export const NODE_REGISTRY: Map<string, NodeImpl> = new Map(IMPLS.map((n) => [n.spec.type, n]))

@@ -36,6 +36,20 @@ function db() {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      -- Rolling activity log: one row per flow run (editor or MCP), pruned to
+      -- the most recent RUN_LOG_LIMIT. activity is a distilled JSON array of the
+      -- meaningful per-node notes (metadata writes, downloads, imports, …).
+      CREATE TABLE IF NOT EXISTS flow_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        flow_id INTEGER,
+        flow_name TEXT NOT NULL,
+        dry_run INTEGER NOT NULL DEFAULT 0,
+        ok INTEGER NOT NULL DEFAULT 1,
+        error TEXT,
+        started_at TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        activity TEXT NOT NULL DEFAULT '[]'
+      );
     `)
     ready = true
     seedFlows(instance)
@@ -71,8 +85,10 @@ const SEED_GRAPH: FlowGraph = {
 }
 
 // Indexer titles that Jellyfin doesn't have → look up airing status → torrent
-// search (season pack if finished, recent episodes if airing; 1080p, dual audio
-// preferred, seeded) → qBittorrent. Ends at qbit; never touches the portal DB.
+// search on TsukiHime (season pack if finished, recent episodes if airing;
+// 1080p, dual audio preferred) → qBittorrent. TsukiHime because it season-pins
+// reliably via the status node's tsuki_id. Ends at qbit; never touches the
+// portal DB.
 const MISSING_VIDEOS_GRAPH: FlowGraph = {
   nodes: [
     { id: 'idx', type: 'source.indexer', position: { x: 0, y: 0 }, config: {} },
@@ -81,7 +97,11 @@ const MISSING_VIDEOS_GRAPH: FlowGraph = {
     { id: 'lim', type: 'filter.limit', position: { x: 560, y: 60 }, config: { count: 5 } },
     { id: 'st', type: 'enrich.anime-status', position: { x: 820, y: 60 }, config: { malField: 'mal_id', maxItems: 0 } },
     { id: 'tpl', type: 'transform.template', position: { x: 1100, y: 20 }, config: { field: 'torrent_query', template: '{title} 1080p' } },
-    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1380, y: 20 }, config: { provider: 'animetosho', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, minSeeders: 1, minTitleMatch: 0.5, maxEpisodes: 26, maxItems: 0 } },
+    // TsukiHime: it tags each release with its per-season anime id (so the season
+    // pin from the Anime status node's tsuki_id is reliable — AnimeTosho mis-tags
+    // some seasons) and structured audio langs. It reports no seeders, so
+    // minSeeders=0.
+    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1380, y: 20 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.5, maxEpisodes: 26, maxItems: 0 } },
     { id: 'qb', type: 'sink.qbittorrent', position: { x: 1680, y: 90 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
   ],
   edges: [
@@ -96,27 +116,63 @@ const MISSING_VIDEOS_GRAPH: FlowGraph = {
   ],
 }
 
-// Completed qBittorrent downloads → placed in the media library. Expands each
-// torrent into its files, matches back to the catalog for a mal_id, pulls
-// metadata (year → import path), probes for a wanted-language subtitle and
-// branches: keep the embedded sub (extract) or fetch a replacement, then
-// hardlink the file into the library and refresh Jellyfin. Needs the downloads
-// + library dirs mounted into the pod (see mcp/README.md / CLAUDE.md).
+// Completed qBittorrent downloads → placed in the media library, and kept at the
+// best available quality. Expands each torrent into its files, matches back to
+// the catalog for a mal_id, pulls metadata (year → import path), probes each
+// file's audio/subtitle tracks, then:
+//   • picks the best release per episode (dual-audio beats sub-only) so a later
+//     upgrade download replaces the old file instead of colliding with it;
+//   • for shows whose best copy is still sub-only, searches for a dual-audio
+//     release and queues it — next run it downloads, imports over the old file,
+//     and the superseded torrent is deleted (files and all);
+//   • keeps or fetches a wanted-language subtitle, hardlinks the winner into the
+//     library, and refreshes Jellyfin.
+// Run on a schedule: each pass both imports new downloads and hunts upgrades,
+// settling once every show is dual-audio. Needs the downloads + library dirs
+// mounted into the pod (see mcp/README.md / CLAUDE.md).
 const LIBRARY_IMPORT_GRAPH: FlowGraph = {
   nodes: [
-    { id: 'qb', type: 'source.qbittorrent', position: { x: 0, y: 200 }, config: { category: 'anime', completedOnly: true, pathFrom: '', pathTo: '' } },
-    { id: 'exp', type: 'transform.expand-files', position: { x: 260, y: 200 }, config: { pathField: 'content_path', extensions: 'mkv,mp4' } },
-    { id: 'match', type: 'enrich.indexer-match', position: { x: 520, y: 200 }, config: { setField: 'mal_id', fromField: 'mal_id', queryField: 'name', matchMode: 'tokens', threshold: 0.6 } },
-    { id: 'meta', type: 'enrich.metadata', position: { x: 780, y: 120 }, config: { malField: 'mal_id', writeDb: true, maxItems: 0 } },
-    { id: 'probe', type: 'enrich.media-probe', position: { x: 1060, y: 200 }, config: { fileField: 'file_path' } },
-    { id: 'cmp', type: 'filter.compare', position: { x: 1320, y: 200 }, config: { field: 'sub_langs', op: 'contains', value: 'eng' } },
-    { id: 'ext', type: 'enrich.extract-subs', position: { x: 1580, y: 120 }, config: { fileField: 'file_path', lang: 'eng' } },
-    { id: 'fetch', type: 'enrich.fetch-subs', position: { x: 1580, y: 300 }, config: { queryField: 'title_english', episodeField: 'torrent_episode', lang: 'eng' } },
-    { id: 'mg', type: 'combine.merge', position: { x: 1860, y: 220 }, config: {} },
-    // libraryRoot empty => LIBRARY_DIR env. showField=title_english (set by the
-    // metadata node); falls back to the release name for unmatched files.
-    { id: 'imp', type: 'sink.library-import', position: { x: 2120, y: 220 }, config: { fileField: 'file_path', libraryRoot: '', showField: 'title_english', method: 'hardlink' } },
-    { id: 'scan', type: 'sink.jellyfin-scan', position: { x: 2400, y: 220 }, config: {} },
+    { id: 'qb', type: 'source.qbittorrent', position: { x: 0, y: 300 }, config: { category: 'anime', completedOnly: true, pathFrom: '', pathTo: '' } },
+    { id: 'exp', type: 'transform.expand-files', position: { x: 260, y: 300 }, config: { pathField: 'content_path', extensions: 'mkv,mp4' } },
+    { id: 'match', type: 'enrich.indexer-match', position: { x: 520, y: 300 }, config: { setField: 'mal_id', fromField: 'mal_id', queryField: 'name', matchMode: 'tokens', threshold: 0.6 } },
+    { id: 'meta', type: 'enrich.metadata', position: { x: 780, y: 220 }, config: { malField: 'mal_id', writeDb: true, maxItems: 0 } },
+    { id: 'probe', type: 'enrich.media-probe', position: { x: 1040, y: 300 }, config: { fileField: 'file_path' } },
+    // Split identified files (upgradable) from unmatched ones (import as-is).
+    { id: 'hasId', type: 'filter.field', position: { x: 1300, y: 300 }, config: { field: 'mal_id', mode: 'not-empty', value: '' } },
+    // Tag each file's audio quality: 2 = has an English dub (dual audio), 1 = sub-only.
+    { id: 'audioCmp', type: 'filter.compare', position: { x: 1560, y: 220 }, config: { field: 'audio_langs', op: 'contains', value: 'eng' } },
+    { id: 'dualTag', type: 'transform.template', position: { x: 1820, y: 140 }, config: { field: 'audio_score', template: '2' } },
+    { id: 'subTag', type: 'transform.template', position: { x: 1820, y: 300 }, config: { field: 'audio_score', template: '1' } },
+    { id: 'scoreMg', type: 'combine.merge', position: { x: 2080, y: 220 }, config: {} },
+    { id: 'keyTpl', type: 'transform.template', position: { x: 2340, y: 220 }, config: { field: 'group_key', template: '{mal_id}|{torrent_episode}' } },
+    // Best release per episode. Losers ("rest") are candidates for deletion.
+    { id: 'pick', type: 'combine.group-pick', position: { x: 2600, y: 220 }, config: { groupField: 'group_key', sortField: 'audio_score', direction: 'desc', perGroup: 1 } },
+    // Only delete a torrent none of whose episodes we're keeping — guards against
+    // wiping a season pack that still covers episodes the winner doesn't.
+    { id: 'safeDel', type: 'combine.diff', position: { x: 2860, y: 480 }, config: { fieldA: 'torrent_hash', fieldB: 'torrent_hash', fieldB2: '' } },
+    { id: 'delDed', type: 'filter.dedupe', position: { x: 3120, y: 480 }, config: { field: 'torrent_hash' } },
+    { id: 'del', type: 'sink.qbittorrent-delete', position: { x: 3380, y: 480 }, config: { hashField: 'torrent_hash', deleteFiles: true } },
+    // Upgrade hunt: shows whose kept copy is still sub-only → find dual audio.
+    { id: 'subOnly', type: 'filter.compare', position: { x: 2860, y: 680 }, config: { field: 'audio_score', op: 'eq', value: '1' } },
+    { id: 'upDed', type: 'filter.dedupe', position: { x: 3120, y: 680 }, config: { field: 'mal_id' } },
+    { id: 'status', type: 'enrich.anime-status', position: { x: 3380, y: 680 }, config: { malField: 'mal_id', maxItems: 0 } },
+    { id: 'upTpl', type: 'transform.template', position: { x: 3640, y: 680 }, config: { field: 'torrent_query', template: '{title_english} 1080p' } },
+    // TsukiHime: it tags each release with its per-season anime id (so the
+    // season pin is reliable) and structured audio langs (so dual-audio is
+    // detected without title-guessing). It reports no seeders, so minSeeders=0.
+    { id: 'search', type: 'enrich.torrent-search', position: { x: 3900, y: 680 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: true, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
+    { id: 'upQb', type: 'sink.qbittorrent', position: { x: 4160, y: 680 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
+    // Import path (best-per-episode winners + unmatched files).
+    { id: 'preSub', type: 'combine.merge', position: { x: 2860, y: 220 }, config: {} },
+    { id: 'cmp', type: 'filter.compare', position: { x: 3120, y: 220 }, config: { field: 'sub_langs', op: 'contains', value: 'eng' } },
+    { id: 'ext', type: 'enrich.extract-subs', position: { x: 3380, y: 140 }, config: { fileField: 'file_path', lang: 'eng' } },
+    { id: 'fetch', type: 'enrich.fetch-subs', position: { x: 3380, y: 300 }, config: { queryField: 'title_english', episodeField: 'torrent_episode', lang: 'eng' } },
+    { id: 'mg', type: 'combine.merge', position: { x: 3640, y: 220 }, config: {} },
+    // overwrite=true so a dual-audio upgrade replaces the old sub-only file; the
+    // sink skips re-placing an unchanged file so scheduled re-runs don't churn.
+    { id: 'imp', type: 'sink.library-import', position: { x: 3900, y: 220 }, config: { fileField: 'file_path', libraryRoot: '', showField: 'title_english', method: 'hardlink', overwrite: true } },
+    { id: 'scan', type: 'sink.jellyfin-scan', position: { x: 4160, y: 220 }, config: {} },
+    { id: 'coll', type: 'sink.jellyfin-collection', position: { x: 4420, y: 220 }, config: { nameField: 'title_english', itemType: 'Series', waitSeconds: 120 } },
   ],
   edges: [
     { id: 'e1', source: 'qb', sourceHandle: 'items', target: 'exp', targetHandle: 'in' },
@@ -126,17 +182,44 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
     { id: 'e4', source: 'match', sourceHandle: 'unmatched', target: 'probe', targetHandle: 'in' },
     { id: 'e5', source: 'meta', sourceHandle: 'enriched', target: 'probe', targetHandle: 'in' },
     { id: 'e6', source: 'meta', sourceHandle: 'skipped', target: 'probe', targetHandle: 'in' },
-    { id: 'e7', source: 'probe', sourceHandle: 'probed', target: 'cmp', targetHandle: 'in' },
-    // Has a wanted-language track → extract it; otherwise fetch a replacement.
-    { id: 'e8', source: 'cmp', sourceHandle: 'pass', target: 'ext', targetHandle: 'in' },
-    { id: 'e9', source: 'cmp', sourceHandle: 'fail', target: 'fetch', targetHandle: 'in' },
+    { id: 'e7', source: 'probe', sourceHandle: 'probed', target: 'hasId', targetHandle: 'in' },
+    // Identified files go through quality scoring; unmatched ones import as-is.
+    { id: 'e8', source: 'hasId', sourceHandle: 'pass', target: 'audioCmp', targetHandle: 'in' },
+    { id: 'e9', source: 'hasId', sourceHandle: 'fail', target: 'preSub', targetHandle: 'in' },
+    { id: 'e10', source: 'audioCmp', sourceHandle: 'pass', target: 'dualTag', targetHandle: 'in' },
+    { id: 'e11', source: 'audioCmp', sourceHandle: 'fail', target: 'subTag', targetHandle: 'in' },
+    { id: 'e12', source: 'dualTag', sourceHandle: 'items', target: 'scoreMg', targetHandle: 'in' },
+    { id: 'e13', source: 'subTag', sourceHandle: 'items', target: 'scoreMg', targetHandle: 'in' },
+    { id: 'e14', source: 'scoreMg', sourceHandle: 'items', target: 'keyTpl', targetHandle: 'in' },
+    { id: 'e15', source: 'keyTpl', sourceHandle: 'items', target: 'pick', targetHandle: 'in' },
+    // Winner per episode → import; also feeds the "keep" side of the safe-delete
+    // diff and the upgrade hunt.
+    { id: 'e16', source: 'pick', sourceHandle: 'picked', target: 'preSub', targetHandle: 'in' },
+    { id: 'e17', source: 'pick', sourceHandle: 'picked', target: 'safeDel', targetHandle: 'b' },
+    { id: 'e18', source: 'pick', sourceHandle: 'picked', target: 'subOnly', targetHandle: 'in' },
+    // Superseded losers whose torrent keeps no winning episode → delete.
+    { id: 'e19', source: 'pick', sourceHandle: 'rest', target: 'safeDel', targetHandle: 'a' },
+    { id: 'e20', source: 'safeDel', sourceHandle: 'missing', target: 'delDed', targetHandle: 'in' },
+    { id: 'e21', source: 'delDed', sourceHandle: 'items', target: 'del', targetHandle: 'in' },
+    // Upgrade hunt: one search per still-sub-only show → queue the dual release.
+    { id: 'e22', source: 'subOnly', sourceHandle: 'pass', target: 'upDed', targetHandle: 'in' },
+    { id: 'e23', source: 'upDed', sourceHandle: 'items', target: 'status', targetHandle: 'in' },
+    { id: 'e24', source: 'status', sourceHandle: 'out', target: 'upTpl', targetHandle: 'in' },
+    { id: 'e25', source: 'status', sourceHandle: 'unknown', target: 'upTpl', targetHandle: 'in' },
+    { id: 'e26', source: 'upTpl', sourceHandle: 'items', target: 'search', targetHandle: 'in' },
+    { id: 'e27', source: 'search', sourceHandle: 'found', target: 'upQb', targetHandle: 'in' },
+    // Subtitle handling on the import stream: keep an embedded track or fetch one.
+    { id: 'e28', source: 'preSub', sourceHandle: 'items', target: 'cmp', targetHandle: 'in' },
+    { id: 'e29', source: 'cmp', sourceHandle: 'pass', target: 'ext', targetHandle: 'in' },
+    { id: 'e30', source: 'cmp', sourceHandle: 'fail', target: 'fetch', targetHandle: 'in' },
     // Every branch converges on import — never drop a file just because subs failed.
-    { id: 'e10', source: 'ext', sourceHandle: 'extracted', target: 'mg', targetHandle: 'in' },
-    { id: 'e11', source: 'ext', sourceHandle: 'none', target: 'mg', targetHandle: 'in' },
-    { id: 'e12', source: 'fetch', sourceHandle: 'found', target: 'mg', targetHandle: 'in' },
-    { id: 'e13', source: 'fetch', sourceHandle: 'missed', target: 'mg', targetHandle: 'in' },
-    { id: 'e14', source: 'mg', sourceHandle: 'items', target: 'imp', targetHandle: 'in' },
-    { id: 'e15', source: 'imp', sourceHandle: 'imported', target: 'scan', targetHandle: 'in' },
+    { id: 'e31', source: 'ext', sourceHandle: 'extracted', target: 'mg', targetHandle: 'in' },
+    { id: 'e32', source: 'ext', sourceHandle: 'none', target: 'mg', targetHandle: 'in' },
+    { id: 'e33', source: 'fetch', sourceHandle: 'found', target: 'mg', targetHandle: 'in' },
+    { id: 'e34', source: 'fetch', sourceHandle: 'missed', target: 'mg', targetHandle: 'in' },
+    { id: 'e35', source: 'mg', sourceHandle: 'items', target: 'imp', targetHandle: 'in' },
+    { id: 'e36', source: 'imp', sourceHandle: 'imported', target: 'scan', targetHandle: 'in' },
+    { id: 'e37', source: 'scan', sourceHandle: 'items', target: 'coll', targetHandle: 'in' },
   ],
 }
 
@@ -165,7 +248,7 @@ function seedFlows(instance: ReturnType<typeof getDb>) {
   if (version < 3) {
     insert.run(
       'Library import',
-      'Places completed qBittorrent downloads into the media library: expand to files, match the catalog for metadata, keep or fetch a subtitle, hardlink into the library, refresh Jellyfin. Needs the downloads + library dirs mounted into the pod.',
+      'Places completed qBittorrent downloads into the media library and keeps them at the best quality: expand to files, pick the best release per episode (dual-audio over sub-only), hunt a dual-audio upgrade for sub-only shows, keep or fetch a subtitle, hardlink into the library (replacing superseded files and deleting their torrents), refresh Jellyfin. Needs the downloads + library dirs mounted into the pod.',
       JSON.stringify(LIBRARY_IMPORT_GRAPH),
     )
   }
@@ -224,4 +307,84 @@ export function updateFlow(
 
 export function deleteFlow(id: number): boolean {
   return db().prepare('DELETE FROM flows WHERE id = ?').run(id).changes > 0
+}
+
+// --- Activity log --------------------------------------------------------
+
+// One node's contribution to a run, as shown in the activity feed.
+export interface RunActivity {
+  node: string // human label, e.g. "Import to library"
+  type: string // node type, e.g. "sink.library-import"
+  status: 'ok' | 'error' | 'skipped'
+  notes: string[]
+  error?: string
+}
+
+export interface FlowRunRecord {
+  flow_id: number | null
+  flow_name: string
+  dry_run: boolean
+  ok: boolean
+  error: string | null
+  started_at: string
+  duration_ms: number
+  activity: RunActivity[]
+}
+
+export interface FlowRunRow {
+  id: number
+  flow_id: number | null
+  flow_name: string
+  dry_run: boolean
+  ok: boolean
+  error: string | null
+  started_at: string
+  duration_ms: number
+  activity: RunActivity[]
+}
+
+const RUN_LOG_LIMIT = 200
+
+export function recordRun(run: FlowRunRecord): void {
+  const instance = db()
+  instance
+    .prepare(
+      `INSERT INTO flow_runs (flow_id, flow_name, dry_run, ok, error, started_at, duration_ms, activity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      run.flow_id,
+      run.flow_name,
+      run.dry_run ? 1 : 0,
+      run.ok ? 1 : 0,
+      run.error,
+      run.started_at,
+      Math.round(run.duration_ms),
+      JSON.stringify(run.activity),
+    )
+  // Keep the log rolling: drop everything past the newest RUN_LOG_LIMIT rows.
+  instance
+    .prepare(
+      `DELETE FROM flow_runs WHERE id NOT IN (SELECT id FROM flow_runs ORDER BY id DESC LIMIT ?)`,
+    )
+    .run(RUN_LOG_LIMIT)
+}
+
+export function listRuns(limit = 100): FlowRunRow[] {
+  const rows = db()
+    .prepare('SELECT * FROM flow_runs ORDER BY id DESC LIMIT ?')
+    .all(Math.max(1, Math.min(limit, RUN_LOG_LIMIT))) as (Omit<FlowRunRow, 'dry_run' | 'ok' | 'activity'> & {
+    dry_run: number
+    ok: number
+    activity: string
+  })[]
+  return rows.map((r) => {
+    let activity: RunActivity[] = []
+    try {
+      activity = JSON.parse(r.activity) as RunActivity[]
+    } catch {
+      /* corrupt activity JSON — surfaced as empty */
+    }
+    return { ...r, dry_run: r.dry_run === 1, ok: r.ok === 1, activity }
+  })
 }

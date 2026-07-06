@@ -12,7 +12,8 @@ import {
 } from './jikan.js'
 import * as seriesDb from './db.js'
 import { publicRouter } from './publicRoutes.js'
-import { flowRouter } from './flowRoutes.js'
+import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
+import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
 import { warmScope } from './jellyfin.js'
 import { getSeriesDownloadStatus } from './downloads.js'
@@ -333,6 +334,64 @@ app.delete('/api/blacklist/:id', requireAuth, requireAdmin, (req, res) => {
     return
   }
   res.json({ ok: true })
+})
+
+// A one-off, single-series version of the acquisition flow: find the best
+// non-blacklisted, playable (h264/HEVC, no AV1) release for this series and
+// queue it in qBittorrent. Built from the same nodes as the "Missing videos"
+// flow, so blacklisted hashes are skipped automatically and the run shows up in
+// the Activity tab. Used by the series page's "Blacklist" action to swap a bad
+// source for a fresh one in one click.
+function buildResearchGraph(seriesId: number, query: string): FlowGraph {
+  return {
+    nodes: [
+      { id: 'idx', type: 'source.indexer', position: { x: 0, y: 0 }, config: {} },
+      { id: 'pick', type: 'filter.field', position: { x: 260, y: 0 }, config: { field: 'id', mode: 'equals', value: String(seriesId) } },
+      // Literal query (no {refs}) — the caller picks the English title, since
+      // dual-audio releases are usually English-named; romaji misses them.
+      { id: 'tpl', type: 'transform.template', position: { x: 520, y: 0 }, config: { field: 'torrent_query', template: query } },
+      { id: 'st', type: 'enrich.anime-status', position: { x: 780, y: 0 }, config: { malField: 'mal_id', maxItems: 0 } },
+      { id: 'tor', type: 'enrich.torrent-search', position: { x: 1040, y: 0 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
+      { id: 'qb', type: 'sink.qbittorrent', position: { x: 1300, y: 0 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
+    ],
+    edges: [
+      { id: 'e1', source: 'idx', sourceHandle: 'items', target: 'pick', targetHandle: 'in' },
+      { id: 'e2', source: 'pick', sourceHandle: 'pass', target: 'tpl', targetHandle: 'in' },
+      { id: 'e3', source: 'tpl', sourceHandle: 'items', target: 'st', targetHandle: 'in' },
+      { id: 'e4', source: 'st', sourceHandle: 'out', target: 'tor', targetHandle: 'in' },
+      { id: 'e5', source: 'st', sourceHandle: 'unknown', target: 'tor', targetHandle: 'in' },
+      { id: 'e6', source: 'tor', sourceHandle: 'found', target: 'qb', targetHandle: 'in' },
+    ],
+  }
+}
+
+app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) {
+    res.status(404).json({ error: 'Series not found' })
+    return
+  }
+  if (!acquireFlowLock()) {
+    res.status(409).json({ error: 'A flow is already running — try again in a moment' })
+    return
+  }
+  try {
+    const query = `${series.title_english || series.title} 1080p`
+    const report = await runFlowAndRecord(buildResearchGraph(id, query), {
+      dryRun: false,
+      flowId: null,
+      flowName: `Re-search: ${series.title_english || series.title}`,
+    })
+    const queued = report.nodes.qb?.counts?.sent ?? 0
+    const notes = [...(report.nodes.tor?.notes ?? []), ...(report.nodes.qb?.notes ?? [])]
+    res.json({ ok: report.ok, queued, notes })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Re-search failed' })
+  } finally {
+    releaseFlowLock()
+  }
 })
 
 app.get('/api/library/saved', requireAuth, (req, res) => {

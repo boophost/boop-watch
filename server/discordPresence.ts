@@ -64,12 +64,13 @@ function deleteLink(username: string) {
 
 // One live headless session per user, tracked in memory only: after a restart
 // the next beat simply creates a fresh session (the orphan expires on its own).
+type PresenceKind = 'watching' | 'paused' | 'browsing'
 interface LiveSession {
   token: string
-  itemId: string
-  endMs: number // predicted timestamps.end, for drift detection
+  kind: PresenceKind
+  itemId: string | null // the title being watched/paused; null while browsing
+  endMs: number // predicted timestamps.end, for drift detection (watching only)
   postedAt: number
-  paused: boolean
 }
 const sessions = new Map<string, LiveSession>()
 
@@ -118,6 +119,7 @@ interface Activity {
   type: 3 // Watching
   name: string
   details?: string
+  state?: string // second line — "⏸ Paused", "Browsing the library", …
   timestamps?: { start: number; end: number }
   assets?: { large_image: string; large_text?: string }
   application_id: string
@@ -136,6 +138,39 @@ async function postSession(access: string, activity: Activity, token?: string): 
   }
   const body = (await res.json()) as { token?: string }
   return body.token ?? token ?? null
+}
+
+/** Post (or update in place) the user's live activity, throttled: we only hit
+ * Discord when the state actually changes — a new kind (watching/paused/
+ * browsing), a different title, playback drift, or the headless session nearing
+ * its TTL. Reuses the existing session token so transitions don't flicker. */
+async function syncSession(
+  username: string,
+  row: LinkRow,
+  kind: PresenceKind,
+  itemId: string | null,
+  endMs: number,
+  activity: Activity,
+): Promise<{ linked: boolean; active: boolean }> {
+  const now = Date.now()
+  const live = sessions.get(username)
+  const needsPost =
+    !live ||
+    live.kind !== kind ||
+    live.itemId !== itemId ||
+    now - live.postedAt >= SESSION_REFRESH_MS ||
+    (kind === 'watching' && Math.abs(live.endMs - endMs) > DRIFT_MS)
+  if (!needsPost) return { linked: true, active: true }
+
+  const access = await freshAccessToken(row)
+  if (!access) return { linked: false, active: false }
+  const token = await postSession(access, activity, live?.token)
+  if (!token) {
+    sessions.delete(username)
+    return { linked: true, active: false }
+  }
+  sessions.set(username, { token, kind, itemId, endMs, postedAt: now })
+  return { linked: true, active: true }
 }
 
 async function endSession(username: string, row: LinkRow) {
@@ -282,9 +317,10 @@ export function discordPresenceRouter(requireAuth: AuthedHandler): Router {
     res.json({ ok: true })
   })
 
-  // Playback heartbeat from the Watch page. The client sends these freely
-  // (every ~30s + on pause); this end decides when Discord actually needs a
-  // new session post.
+  // Heartbeat from the portal. The Watch page sends playback beats (every ~30s
+  // + on play/pause edges); the portal shell sends `browsing: true` while the
+  // user is on the site but not in the player. The client sends these freely;
+  // this end decides when Discord actually needs a new session post.
   router.post('/api/discord/presence/beat', requireAuth, async (req, res) => {
     const username = res.locals.username as string
     const row = configured ? getLink(username) : undefined
@@ -292,38 +328,34 @@ export function discordPresenceRouter(requireAuth: AuthedHandler): Router {
       res.json({ linked: false })
       return
     }
-    const { itemId, position, duration, paused } = req.body as {
+    const { itemId, position, duration, paused, browsing } = req.body as {
       itemId?: unknown
       position?: unknown
       duration?: unknown
       paused?: unknown
+      browsing?: unknown
     }
-    if (typeof itemId !== 'string' || typeof position !== 'number' || typeof duration !== 'number') {
-      res.status(400).json({ error: 'itemId, position, duration required' })
+
+    // Browsing the library (no active player).
+    if (browsing) {
+      const activity: Activity = {
+        type: 3,
+        name: 'boopurnoes · watch',
+        state: 'Browsing the library',
+        application_id: CLIENT_ID,
+        platform: 'desktop',
+      }
+      res.json(await syncSession(username, row, 'browsing', null, 0, activity))
       return
     }
-    if (paused) {
-      await endSession(username, row)
-      res.json({ linked: true, active: false })
+
+    if (typeof itemId !== 'string' || typeof position !== 'number' || typeof duration !== 'number') {
+      res.status(400).json({ error: 'itemId, position, duration required' })
       return
     }
     const item = getPortalItem(itemId)
     if (!item || duration <= 0) {
       res.json({ linked: true, active: false })
-      return
-    }
-
-    const now = Date.now()
-    const start = now - Math.floor(position * 1000)
-    const end = start + Math.floor(duration * 1000)
-    const live = sessions.get(username)
-    const needsPost =
-      !live ||
-      live.itemId !== itemId ||
-      now - live.postedAt >= SESSION_REFRESH_MS ||
-      Math.abs(live.endMs - end) > DRIFT_MS
-    if (!needsPost) {
-      res.json({ linked: true, active: true })
       return
     }
 
@@ -338,32 +370,40 @@ export function discordPresenceRouter(requireAuth: AuthedHandler): Router {
       details = [se, item.name].filter(Boolean).join(' · ') || undefined
     }
     const origin = reqOrigin(req)
+    const assets = {
+      large_image: `${origin}/img/${encodeURIComponent(item.series_id || item.id)}`,
+      large_text: name,
+    }
+
+    // Paused: keep the title on the profile but drop the live countdown and
+    // flag it, instead of clearing the activity outright.
+    if (paused) {
+      const activity: Activity = {
+        type: 3,
+        name,
+        ...(details ? { details } : {}),
+        state: '⏸ Paused',
+        assets,
+        application_id: CLIENT_ID,
+        platform: 'desktop',
+      }
+      res.json(await syncSession(username, row, 'paused', itemId, 0, activity))
+      return
+    }
+
+    const now = Date.now()
+    const start = now - Math.floor(position * 1000)
+    const end = start + Math.floor(duration * 1000)
     const activity: Activity = {
       type: 3,
       name,
       ...(details ? { details } : {}),
       timestamps: { start, end },
-      assets: {
-        large_image: `${origin}/img/${encodeURIComponent(item.series_id || item.id)}`,
-        large_text: name,
-      },
+      assets,
       application_id: CLIENT_ID,
       platform: 'desktop',
     }
-
-    const access = await freshAccessToken(row)
-    if (!access) {
-      res.json({ linked: false })
-      return
-    }
-    const token = await postSession(access, activity, live?.token)
-    if (!token) {
-      sessions.delete(username)
-      res.json({ linked: true, active: false })
-      return
-    }
-    sessions.set(username, { token, itemId, endMs: end, postedAt: now, paused: false })
-    res.json({ linked: true, active: true })
+    res.json(await syncSession(username, row, 'watching', itemId, end, activity))
   })
 
   // Explicit stop (leaving the player). Fire-and-forget on the client.

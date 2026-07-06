@@ -63,6 +63,21 @@ export async function presenceBeat(
   }
 }
 
+/** Report that the user is browsing the portal (no active player). The server
+ * shows a "Browsing the library" activity and throttles the actual posts. */
+export async function presenceBrowse(): Promise<void> {
+  if (!(await presenceLinked())) return
+  const r = await fetchAuth('/api/discord/presence/beat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ browsing: true }),
+  })
+  if (r.ok) {
+    const body = (await r.json()) as { linked?: boolean }
+    if (body.linked === false) linkedCache = false
+  }
+}
+
 /** Clear the Discord activity when leaving the player. keepalive lets the
  * request survive pagehide/unmount navigation (sendBeacon can't carry the
  * Authorization header). */
