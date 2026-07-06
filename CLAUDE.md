@@ -155,6 +155,8 @@ drives flows against a port-forwarded staging backend for iteration.
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `NODE_ENV=production` — serve the built `dist/`
 - `PORT` — default `3000` (the Dockerfile sets it; the dev backend defaults to `3001`)
+- `POSTHOG_KEY` — PostHog project API key for portal analytics (public, exposed via `/config.js`;
+  unset ⇒ analytics no-op). Optional `POSTHOG_HOST` (default `https://us.i.posthog.com`)
 
 ## Routes
 

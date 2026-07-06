@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from 'react'
-import type { Session, UserIdentity } from '@supabase/supabase-js'
+import type { AuthChangeEvent, Session, UserIdentity } from '@supabase/supabase-js'
 import { supabase } from './supabase'
+import { resetAnalytics, track } from './analytics'
 
 interface User {
   username: string
@@ -14,6 +15,36 @@ interface User {
 // client-side (the /manage guard + sidebar link), so this allowlist is the
 // source of truth alongside user_metadata.admin / app_metadata.role.
 const ADMIN_EMAILS = ['ethanwhi@gmail.com']
+
+const NEW_USER_MS = 60_000
+
+function oauthProvider(session: Session): 'google' | 'discord' | null {
+  const provider =
+    session.user.app_metadata?.provider ?? session.user.identities?.[0]?.provider
+  if (provider === 'google' || provider === 'discord') return provider
+  return null
+}
+
+function isNewUser(session: Session): boolean {
+  const created = new Date(session.user.created_at).getTime()
+  return Number.isFinite(created) && Date.now() - created < NEW_USER_MS
+}
+
+function onSignedIn(session: Session): void {
+  const provider = oauthProvider(session)
+  if (!provider) return
+  resetAnalytics()
+  if (isNewUser(session)) {
+    track('user_signed_up', { method: provider, auth_state: 'authenticated' })
+  } else {
+    track('user_logged_in', { method: provider, auth_state: 'authenticated' })
+  }
+}
+
+function handleAuthChange(event: AuthChangeEvent, session: Session | null): void {
+  if (event === 'SIGNED_IN' && session) onSignedIn(session)
+  if (event === 'SIGNED_OUT') resetAnalytics()
+}
 
 // Google and Discord (via Supabase OAuth) both land the profile photo under
 // one of these user_metadata keys depending on provider.
@@ -67,7 +98,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      handleAuthChange(event, session)
       setUser(toUser(session))
       setLoading(false)
     })
@@ -81,6 +113,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password,
     })
     if (error) throw error
+    resetAnalytics()
+    track('user_logged_in', { method: 'email', auth_state: 'authenticated' })
   }
 
   const signup = async (email: string, password: string) => {
@@ -120,6 +154,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = async () => {
     await supabase.auth.signOut()
+    resetAnalytics()
     setUser(null)
   }
 

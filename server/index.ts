@@ -520,7 +520,9 @@ app.get('/config.js', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   res.send(`window.ENV = {
     SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
-    SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)}
+    SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)},
+    POSTHOG_KEY: ${JSON.stringify(process.env.POSTHOG_KEY || '')},
+    POSTHOG_HOST: ${JSON.stringify(process.env.POSTHOG_HOST || 'https://us.i.posthog.com')}
   };`)
 })
 

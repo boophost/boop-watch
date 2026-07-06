@@ -16,6 +16,7 @@ import {
   type Progress,
 } from '@/lib/progress'
 import { presenceBeat, presenceStop } from '@/lib/presence'
+import { track } from '@/lib/analytics'
 import '@vidstack/react/player/styles/default/theme.css'
 import '@vidstack/react/player/styles/default/layouts/video.css'
 
@@ -390,6 +391,11 @@ export default function Watch() {
   // change the next beat *updates* the session in place instead (no flicker,
   // and no stop/beat ordering race).
   const presenceRef = useRef<(paused?: boolean) => void>(() => {})
+  const playbackTracked = useRef(false)
+
+  useEffect(() => {
+    playbackTracked.current = false
+  }, [id])
   useEffect(() => {
     if (!data || !user) {
       presenceRef.current = () => {}
@@ -517,7 +523,16 @@ export default function Watch() {
                 onCanPlay={onCanPlay}
                 onTimeUpdate={onTimeUpdate}
                 onEnded={onEnded}
-                onPlay={() => presenceRef.current(false)}
+                onPlay={() => {
+                  presenceRef.current(false)
+                  if (!playbackTracked.current && data) {
+                    playbackTracked.current = true
+                    track('playback_started', {
+                      item_id: data.id,
+                      auth_state: user ? 'authenticated' : 'anonymous',
+                    })
+                  }
+                }}
                 onPause={() => presenceRef.current(true)}
               >
                 <MediaProvider />
