@@ -19,11 +19,13 @@ import {
 import '@xyflow/react/dist/style.css'
 import {
   AlertTriangle,
+  Box,
   Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
+  ExternalLink,
   Loader2,
   Play,
   Plus,
@@ -44,7 +46,9 @@ import {
   runFlowStream,
   type NodeSpec,
   type NodeCategory,
+  type ConfigField,
   type FlowGraph,
+  type FlowComponentMeta,
   type RunReport,
   type NodeReport,
   type ComponentInterface,
@@ -81,6 +85,15 @@ const CATEGORY_LABEL: Record<NodeCategory, string> = {
 }
 
 const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink', 'boundary']
+
+/** Categories a flow can publish itself as when exposed as a reusable component. */
+const COMPONENT_CATEGORIES: Exclude<NodeCategory, 'boundary'>[] = [
+  'source',
+  'filter',
+  'enrich',
+  'combine',
+  'sink',
+]
 
 /** Categories collapsed by default in the add-node picker (largest / less common first picks). */
 const DEFAULT_COLLAPSED: ReadonlySet<NodeCategory> = new Set(['enrich', 'sink'])
@@ -448,6 +461,8 @@ function FlowEditorInner() {
   const [specs, setSpecs] = useState<NodeSpec[]>([])
   const [components, setComponents] = useState<NodeSpec[]>([])
   const [name, setName] = useState('')
+  const [component, setComponent] = useState<FlowComponentMeta | null>(null)
+  const [componentPanelOpen, setComponentPanelOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -480,6 +495,7 @@ function FlowEditorInner() {
         setSpecs(types.nodeTypes)
         setComponents(comps)
         setName(flow.flow.name)
+        setComponent(flow.flow.component)
         const rf = toRF(flow.flow.graph)
         setNodes(rf.nodes)
         setEdges(rf.edges)
@@ -496,8 +512,51 @@ function FlowEditorInner() {
 
   const selected = nodes.find((n) => n.selected)
   const selectedSpec = selected ? specLookup.get(selected.data.specType) : undefined
+  const selectedFlowId =
+    selected?.data.specType === 'flow.subflow' ? Number(selected.data.config.flowId) : undefined
+  const selectedComponentIface = useComponentInterface(selectedFlowId)
+
+  // Every non-boundary node on the canvas that has configurable fields, for
+  // the "expose parameters" checklist in the Component panel.
+  const exposableFields = useMemo(() => {
+    const out: { node: RFNode; spec: NodeSpec; field: ConfigField }[] = []
+    for (const n of nodes) {
+      const spec = specLookup.get(n.data.specType)
+      if (!spec || spec.type.startsWith('boundary.')) continue
+      for (const field of spec.config) out.push({ node: n, spec, field })
+    }
+    return out
+  }, [nodes])
 
   const markDirty = () => setDirty(true)
+
+  const togglePublish = (published: boolean) => {
+    setComponent((prev) => {
+      if (published) {
+        return prev
+          ? { ...prev, published: true }
+          : { published: true, label: name, description: '', category: 'source', exposedParams: [] }
+      }
+      return prev ? { ...prev, published: false } : null
+    })
+    markDirty()
+  }
+
+  const setComponentField = <K extends keyof FlowComponentMeta>(key: K, value: FlowComponentMeta[K]) => {
+    setComponent((prev) => (prev ? { ...prev, [key]: value } : prev))
+    markDirty()
+  }
+
+  const toggleExposedParam = (nodeId: string, configKey: string, checked: boolean) => {
+    setComponent((prev) => {
+      if (!prev) return prev
+      const exposedParams = checked
+        ? [...prev.exposedParams, { nodeId, configKey }]
+        : prev.exposedParams.filter((p) => !(p.nodeId === nodeId && p.configKey === configKey))
+      return { ...prev, exposedParams }
+    })
+    markDirty()
+  }
 
   const onConnect = useCallback(
     (conn: Connection) => {
@@ -574,14 +633,22 @@ function FlowEditorInner() {
     setMenu({ kind, x: event.clientX, y: event.clientY, targetId })
   }
 
+  // Plain config keys set `config[key]` directly. Keys of the form
+  // `params.<nodeId>.<configKey>` (used for flow.subflow exposed-param
+  // overrides) instead merge into a nested `config.params` object, keyed by
+  // `<nodeId>.<configKey>` — matching what the flow.subflow executor reads.
   const setConfigValue = (key: string, value: unknown) => {
     if (!selected) return
     setNodes((ns) =>
-      ns.map((n) =>
-        n.id === selected.id
-          ? { ...n, data: { ...n.data, config: { ...n.data.config, [key]: value } } }
-          : n,
-      ),
+      ns.map((n) => {
+        if (n.id !== selected.id) return n
+        if (key.startsWith('params.')) {
+          const nestedKey = key.slice('params.'.length)
+          const params = { ...(n.data.config.params as Record<string, unknown> | undefined), [nestedKey]: value }
+          return { ...n, data: { ...n.data, config: { ...n.data.config, params } } }
+        }
+        return { ...n, data: { ...n.data, config: { ...n.data.config, [key]: value } } }
+      }),
     )
     setDirty(true)
   }
@@ -590,7 +657,7 @@ function FlowEditorInner() {
     setSaving(true)
     setError('')
     try {
-      await saveFlow(id, { name, graph: fromRF(nodes, edges) })
+      await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
       setDirty(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed')
@@ -611,7 +678,7 @@ function FlowEditorInner() {
       ns.map((n) => ({ ...n, data: { ...n.data, report: undefined, running: false } })),
     )
     try {
-      if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges) })
+      if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
       setDirty(false)
       const report = await runFlowStream(id, dryRun, (ev) => {
         if (ev.type === 'start') {
@@ -676,6 +743,18 @@ function FlowEditorInner() {
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1"
+            onClick={() => setComponentPanelOpen((v) => !v)}
+          >
+            <Box className="size-4" />
+            <span className="hidden sm:inline">Component</span>
+            {component?.published ? (
+              <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden />
+            ) : null}
+          </Button>
           <div className="relative">
             <Button
               variant="outline"
@@ -730,6 +809,109 @@ function FlowEditorInner() {
           </Button>
         </div>
       </header>
+
+      {componentPanelOpen ? (
+        <div className="space-y-3 border-b border-border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                type="checkbox"
+                className="size-4 rounded border-input"
+                checked={component?.published ?? false}
+                onChange={(e) => togglePublish(e.target.checked)}
+              />
+              Publish as component
+            </label>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2"
+              aria-label="Close component panel"
+              onClick={() => setComponentPanelOpen(false)}
+            >
+              <X className="size-3.5" />
+            </Button>
+          </div>
+
+          {component?.published ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <label className="text-xs font-medium" htmlFor="component-label">
+                  Label
+                </label>
+                <Input
+                  id="component-label"
+                  className="h-8"
+                  value={component.label}
+                  placeholder={name}
+                  onChange={(e) => setComponentField('label', e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium" htmlFor="component-category">
+                  Category
+                </label>
+                <select
+                  id="component-category"
+                  className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                  value={component.category}
+                  onChange={(e) =>
+                    setComponentField('category', e.target.value as FlowComponentMeta['category'])
+                  }
+                >
+                  {COMPONENT_CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {CATEGORY_LABEL[c]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1 sm:col-span-2">
+                <label className="text-xs font-medium" htmlFor="component-description">
+                  Description
+                </label>
+                <textarea
+                  id="component-description"
+                  className="min-h-16 w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={component.description}
+                  onChange={(e) => setComponentField('description', e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <p className="text-xs font-medium">Expose parameters</p>
+                {exposableFields.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No configurable nodes on the canvas.</p>
+                ) : (
+                  <div className="max-h-40 space-y-1 overflow-auto rounded-md border border-border p-2">
+                    {exposableFields.map(({ node, spec, field }) => {
+                      const checked = component.exposedParams.some(
+                        (p) => p.nodeId === node.id && p.configKey === field.key,
+                      )
+                      return (
+                        <label
+                          key={`${node.id}.${field.key}`}
+                          className="flex items-center gap-2 text-xs"
+                        >
+                          <input
+                            type="checkbox"
+                            className="size-3.5 rounded border-input"
+                            checked={checked}
+                            onChange={(e) => toggleExposedParam(node.id, field.key, e.target.checked)}
+                          />
+                          <span className={`size-1.5 shrink-0 rounded-full ${CATEGORY_DOT[spec.category]}`} />
+                          <span className="truncate">
+                            {spec.label} · {field.label}
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {error ? (
         <div className="border-b border-destructive/40 bg-destructive/10 px-4 py-1.5 text-xs text-destructive">
@@ -865,7 +1047,80 @@ function FlowEditorInner() {
             <div className="space-y-4 p-4">
               <p className="text-xs text-muted-foreground">{selectedSpec.description}</p>
 
-              {selectedSpec.config.length > 0 ? (
+              {selected.data.specType === 'flow.subflow' ? (
+                <div className="space-y-4">
+                  <Link
+                    to={`/manage/flows/${selected.data.config.flowId}`}
+                    className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+                  >
+                    <ExternalLink className="size-3.5" />
+                    Open component flow
+                  </Link>
+
+                  {selectedComponentIface && selectedComponentIface.exposedParams.length > 0 ? (
+                    <div className="space-y-3 border-t border-border pt-3">
+                      <p className="text-xs font-medium">Parameters</p>
+                      {selectedComponentIface.exposedParams.map((p) => {
+                        const nestedKey = `${p.nodeId}.${p.configKey}`
+                        const params = (selected.data.config.params ?? {}) as Record<string, unknown>
+                        const value = params[nestedKey] ?? p.default ?? ''
+                        const configKey = `params.${nestedKey}`
+                        return (
+                          <div key={nestedKey} className="space-y-1">
+                            <label className="text-xs font-medium" htmlFor={`param-${nestedKey}`}>
+                              {p.label ?? p.configKey}
+                            </label>
+                            {p.kind === 'select' ? (
+                              <select
+                                id={`param-${nestedKey}`}
+                                className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                                value={String(value)}
+                                onChange={(e) => setConfigValue(configKey, e.target.value)}
+                              >
+                                {(p.options ?? []).map((o) => (
+                                  <option key={o.value} value={o.value}>
+                                    {o.label}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : p.kind === 'boolean' ? (
+                              <select
+                                id={`param-${nestedKey}`}
+                                className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                                value={String(Boolean(value))}
+                                onChange={(e) => setConfigValue(configKey, e.target.value === 'true')}
+                              >
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                              </select>
+                            ) : (
+                              <Input
+                                id={`param-${nestedKey}`}
+                                className="h-8"
+                                type={
+                                  p.kind === 'number'
+                                    ? 'number'
+                                    : p.kind === 'password'
+                                      ? 'password'
+                                      : 'text'
+                                }
+                                autoComplete={p.kind === 'password' ? 'new-password' : undefined}
+                                value={String(value)}
+                                onChange={(e) =>
+                                  setConfigValue(
+                                    configKey,
+                                    p.kind === 'number' ? Number(e.target.value) : e.target.value,
+                                  )
+                                }
+                              />
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : selectedSpec.config.length > 0 ? (
                 <div className="space-y-3">
                   {selectedSpec.config.map((f) => {
                     const value = selected.data.config[f.key] ?? f.default ?? ''
