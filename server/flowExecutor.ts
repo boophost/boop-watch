@@ -166,24 +166,25 @@ export async function runFlow(
 
   for (const node of order) {
     const impl = NODE_REGISTRY.get(node.type)!
+    const reportKey = qid(node.id)
     const incoming = graph.edges.filter((e) => e.target === node.id)
 
     // Skip nodes downstream of a failure so one broken source doesn't cascade
     // into misleading per-node errors.
     if (incoming.some((e) => failed.has(e.source))) {
       failed.add(node.id)
-      reports[node.id] = {
+      reports[reportKey] = {
         status: 'skipped',
         durationMs: 0,
         counts: {},
         samples: {},
         notes: ['skipped: upstream node failed'],
       }
-      hooks?.onNodeDone?.(qid(node.id), reports[node.id])
+      hooks?.onNodeDone?.(reportKey, reports[reportKey])
       continue
     }
 
-    hooks?.onNodeStart?.(qid(node.id))
+    hooks?.onNodeStart?.(reportKey)
 
     const inputs: Record<string, FlowItem[]> = {}
     for (const port of impl.spec.inputs) inputs[port.id] = []
@@ -193,13 +194,21 @@ export async function runFlow(
     }
     finalInputs.set(node.id, inputs)
 
-    const ctx: RunContext = { dryRun, notes: [] }
+    const ctx: RunContext = {
+      dryRun,
+      notes: [],
+      nodeId: node.id,
+      hooks,
+      mergeNestedReports: (nested) => {
+        Object.assign(reports, nested)
+      },
+    }
     const nodeT0 = Date.now()
     try {
       const injected = node.type === 'boundary.input' ? injectOutput?.(node) ?? null : null
       const outputs = injected !== null ? { items: injected } : await impl.run(inputs, node.config ?? {}, ctx)
       buffers.set(node.id, outputs)
-      reports[node.id] = {
+      reports[reportKey] = {
         status: 'ok',
         durationMs: Date.now() - nodeT0,
         counts: Object.fromEntries(Object.entries(outputs).map(([k, v]) => [k, v.length])),
@@ -210,7 +219,7 @@ export async function runFlow(
       }
     } catch (e) {
       failed.add(node.id)
-      reports[node.id] = {
+      reports[reportKey] = {
         status: 'error',
         durationMs: Date.now() - nodeT0,
         counts: {},
@@ -219,7 +228,7 @@ export async function runFlow(
         error: e instanceof Error ? e.message : String(e),
       }
     }
-    hooks?.onNodeDone?.(qid(node.id), reports[node.id])
+    hooks?.onNodeDone?.(reportKey, reports[reportKey])
   }
 
   const ok = Object.values(reports).every((r) => r.status === 'ok')
