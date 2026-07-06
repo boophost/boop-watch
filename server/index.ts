@@ -342,12 +342,14 @@ app.delete('/api/blacklist/:id', requireAuth, requireAdmin, (req, res) => {
 // flow, so blacklisted hashes are skipped automatically and the run shows up in
 // the Activity tab. Used by the series page's "Blacklist" action to swap a bad
 // source for a fresh one in one click.
-function buildResearchGraph(seriesId: number): FlowGraph {
+function buildResearchGraph(seriesId: number, query: string): FlowGraph {
   return {
     nodes: [
       { id: 'idx', type: 'source.indexer', position: { x: 0, y: 0 }, config: {} },
       { id: 'pick', type: 'filter.field', position: { x: 260, y: 0 }, config: { field: 'id', mode: 'equals', value: String(seriesId) } },
-      { id: 'tpl', type: 'transform.template', position: { x: 520, y: 0 }, config: { field: 'torrent_query', template: '{title} 1080p' } },
+      // Literal query (no {refs}) — the caller picks the English title, since
+      // dual-audio releases are usually English-named; romaji misses them.
+      { id: 'tpl', type: 'transform.template', position: { x: 520, y: 0 }, config: { field: 'torrent_query', template: query } },
       { id: 'st', type: 'enrich.anime-status', position: { x: 780, y: 0 }, config: { malField: 'mal_id', maxItems: 0 } },
       { id: 'tor', type: 'enrich.torrent-search', position: { x: 1040, y: 0 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
       { id: 'qb', type: 'sink.qbittorrent', position: { x: 1300, y: 0 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
@@ -375,7 +377,8 @@ app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res)
     return
   }
   try {
-    const report = await runFlowAndRecord(buildResearchGraph(id), {
+    const query = `${series.title_english || series.title} 1080p`
+    const report = await runFlowAndRecord(buildResearchGraph(id, query), {
       dryRun: false,
       flowId: null,
       flowName: `Re-search: ${series.title_english || series.title}`,
