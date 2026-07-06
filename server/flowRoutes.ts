@@ -7,7 +7,14 @@ import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
 import type { RunReport, RunHooks } from './flowExecutor.js'
 import { randomUUID } from 'node:crypto'
+import {
+  deriveInterface,
+  validatePublish,
+  componentToNodeSpec,
+  type FlowComponentMeta,
+} from './flowComponents.js'
 import * as flowsDb from './flowsDb.js'
+import { listPublishedComponents, parseComponent } from './flowsDb.js'
 import type { FlowRunRow, RunActivity, ScheduleKind, ScheduleSpec, WeekDay } from './flowsDb.js'
 import { computeNextRun, runScheduleNow } from './scheduler.js'
 import { emitActivity, subscribeActivity } from './runEvents.js'
@@ -189,6 +196,32 @@ flowRouter.post('/api/flows', (req, res) => {
   res.status(201).json({ flow: { ...row, graph: JSON.parse(row.graph) } })
 })
 
+flowRouter.get('/api/flows/components', (_req, res) => {
+  const specs = listPublishedComponents().flatMap(({ row, graph, meta }) => {
+    const iface = deriveInterface(row.id, graph)
+    if ('error' in iface) return []
+    return [componentToNodeSpec(row.id, row.name, meta, iface)]
+  })
+  res.json({ components: specs })
+})
+
+flowRouter.get('/api/flows/:id/interface', (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' })
+  const row = flowsDb.getFlow(id)
+  if (!row) return res.status(404).json({ error: 'not found' })
+  let graph: FlowGraph
+  try {
+    graph = JSON.parse(row.graph) as FlowGraph
+  } catch {
+    return res.status(500).json({ error: 'corrupt graph' })
+  }
+  const meta = parseComponent(row.component)
+  const iface = deriveInterface(id, graph)
+  if ('error' in iface) return res.status(400).json({ error: iface.error })
+  res.json({ interface: iface, component: meta })
+})
+
 flowRouter.get('/api/flows/:id', (req, res) => {
   const id = Number(req.params.id)
   const row = Number.isFinite(id) ? flowsDb.getFlow(id) : undefined
@@ -196,7 +229,7 @@ flowRouter.get('/api/flows/:id', (req, res) => {
     res.status(404).json({ error: 'Flow not found' })
     return
   }
-  res.json({ flow: { ...row, graph: JSON.parse(row.graph) } })
+  res.json({ flow: { ...row, graph: JSON.parse(row.graph), component: parseComponent(row.component) } })
 })
 
 flowRouter.put('/api/flows/:id', (req, res) => {
@@ -205,7 +238,12 @@ flowRouter.put('/api/flows/:id', (req, res) => {
     res.status(400).json({ error: 'Invalid id' })
     return
   }
-  const body = req.body as { name?: unknown; description?: unknown; graph?: unknown }
+  const body = req.body as {
+    name?: unknown
+    description?: unknown
+    graph?: unknown
+    component?: unknown
+  }
   const patch: Parameters<typeof flowsDb.updateFlow>[1] = {}
   if (body.name !== undefined) {
     if (typeof body.name !== 'string' || !body.name.trim()) {
@@ -225,12 +263,31 @@ flowRouter.put('/api/flows/:id', (req, res) => {
     }
     patch.graph = parsed
   }
+  if (body.component !== undefined) {
+    patch.component = body.component as FlowComponentMeta | null
+  }
+  if (body.component !== undefined) {
+    const component = body.component as FlowComponentMeta | null
+    if (component?.published === true) {
+      const existing = flowsDb.getFlow(id)
+      if (!existing) {
+        res.status(404).json({ error: 'Flow not found' })
+        return
+      }
+      const graph = patch.graph ?? (JSON.parse(existing.graph) as FlowGraph)
+      const publishErr = validatePublish(graph)
+      if (publishErr) {
+        res.status(400).json({ error: publishErr })
+        return
+      }
+    }
+  }
   const row = flowsDb.updateFlow(id, patch)
   if (!row) {
     res.status(404).json({ error: 'Flow not found' })
     return
   }
-  res.json({ flow: { ...row, graph: JSON.parse(row.graph) } })
+  res.json({ flow: { ...row, graph: JSON.parse(row.graph), component: parseComponent(row.component) } })
 })
 
 flowRouter.delete('/api/flows/:id', (req, res) => {

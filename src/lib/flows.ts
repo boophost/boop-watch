@@ -50,11 +50,33 @@ export interface FlowGraph {
   edges: FlowEdgeData[]
 }
 
+export interface ExposedParam {
+  nodeId: string
+  configKey: string
+  label?: string
+}
+
+export interface FlowComponentMeta {
+  published: boolean
+  label: string
+  description: string
+  category: Exclude<NodeCategory, 'boundary'>
+  exposedParams: ExposedParam[]
+}
+
+export interface ComponentInterface {
+  flowId: number
+  inputs: NodePort[]
+  outputs: NodePort[]
+  exposedParams: (ExposedParam & { kind: ConfigField['kind']; default?: unknown; options?: ConfigField['options'] })[]
+}
+
 export interface Flow {
   id: number
   name: string
   description: string | null
   graph: FlowGraph
+  component: FlowComponentMeta | null
   created_at: string
   updated_at: string
 }
@@ -127,6 +149,16 @@ export const getNodeTypes = () =>
 export const getFlow = (id: number) =>
   fetchAuth(`/api/flows/${id}`).then((r) => json<{ flow: Flow }>(r))
 
+export const getFlowComponents = () =>
+  fetchAuth('/api/flows/components').then((r) =>
+    json<{ components: NodeSpec[] }>(r).then((d) => d.components),
+  )
+
+export const getFlowInterface = (id: number) =>
+  fetchAuth(`/api/flows/${id}/interface`).then((r) =>
+    json<{ interface: ComponentInterface; component: FlowComponentMeta | null }>(r),
+  )
+
 export const createFlow = (name: string, description?: string) =>
   fetchAuth('/api/flows', {
     method: 'POST',
@@ -134,7 +166,10 @@ export const createFlow = (name: string, description?: string) =>
     body: JSON.stringify({ name, description }),
   }).then((r) => json<{ flow: Flow }>(r))
 
-export const saveFlow = (id: number, patch: { name?: string; description?: string | null; graph?: FlowGraph }) =>
+export const saveFlow = (
+  id: number,
+  patch: { name?: string; description?: string | null; graph?: FlowGraph; component?: FlowComponentMeta | null },
+) =>
   fetchAuth(`/api/flows/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
