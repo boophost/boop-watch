@@ -1,4 +1,5 @@
 import type { FlowGraph } from './flowExecutor.js'
+import { NODE_REGISTRY } from './flowNodes.js'
 import type { ConfigField, NodePort, NodeSpec } from './flowNodes.js'
 
 export interface ExposedParam {
@@ -22,7 +23,31 @@ export interface ComponentInterface {
   exposedParams: (ExposedParam & Pick<ConfigField, 'kind' | 'options'> & { default?: unknown })[]
 }
 
-export function deriveInterface(flowId: number, graph: FlowGraph): ComponentInterface | { error: string } {
+export function enrichExposedParams(
+  graph: FlowGraph,
+  meta: FlowComponentMeta,
+): ComponentInterface['exposedParams'] {
+  return meta.exposedParams.flatMap((p) => {
+    const node = graph.nodes.find((n) => n.id === p.nodeId)
+    if (!node) return []
+    const spec = NODE_REGISTRY.get(node.type)?.spec
+    const field = spec?.config.find((f) => f.key === p.configKey)
+    if (!field) return []
+    return [{
+      ...p,
+      label: p.label ?? field.label,
+      kind: field.kind,
+      default: node.config[p.configKey] ?? field.default,
+      options: field.options,
+    }]
+  })
+}
+
+export function deriveInterface(
+  flowId: number,
+  graph: FlowGraph,
+  meta?: FlowComponentMeta | null,
+): ComponentInterface | { error: string } {
   const inputs: NodePort[] = []
   const outputs: NodePort[] = []
   const portIds = new Set<string>()
@@ -48,7 +73,12 @@ export function deriveInterface(flowId: number, graph: FlowGraph): ComponentInte
   if (inputs.length === 0) return { error: 'Published component needs at least one boundary input' }
   if (outputs.length === 0) return { error: 'Published component needs at least one boundary output' }
 
-  return { flowId, inputs, outputs, exposedParams: [] }
+  return {
+    flowId,
+    inputs,
+    outputs,
+    exposedParams: meta ? enrichExposedParams(graph, meta) : [],
+  }
 }
 
 export function validatePublish(graph: FlowGraph): string | null {

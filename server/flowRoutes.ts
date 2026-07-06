@@ -198,7 +198,7 @@ flowRouter.post('/api/flows', (req, res) => {
 
 flowRouter.get('/api/flows/components', (_req, res) => {
   const specs = listPublishedComponents().flatMap(({ row, graph, meta }) => {
-    const iface = deriveInterface(row.id, graph)
+    const iface = deriveInterface(row.id, graph, meta)
     if ('error' in iface) return []
     return [componentToNodeSpec(row.id, row.name, meta, iface)]
   })
@@ -217,7 +217,7 @@ flowRouter.get('/api/flows/:id/interface', (req, res) => {
     return res.status(500).json({ error: 'corrupt graph' })
   }
   const meta = parseComponent(row.component)
-  const iface = deriveInterface(id, graph)
+  const iface = deriveInterface(id, graph, meta)
   if ('error' in iface) return res.status(400).json({ error: iface.error })
   res.json({ interface: iface, component: meta })
 })
