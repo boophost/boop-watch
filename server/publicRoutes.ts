@@ -12,7 +12,7 @@ import { buildWatchData, type Segment } from './watch.js'
 import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
 import { getPortalItem, getPortalEpisodes } from './portalDb.js'
-import { getBanner, getSelectedBanner, type BannerRow } from './db.js'
+import { getBanner, getSelectedBanner, findByMalId, type BannerRow } from './db.js'
 
 export const publicRouter = Router()
 
@@ -203,6 +203,9 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
         genres: pItem.genres ? JSON.parse(pItem.genres) : [],
         year: pItem.production_year || null,
         episodes,
+        // Catalog id for the admin "Library settings" shortcut (harmless number;
+        // the /manage route is admin-gated). null when this title isn't catalogued.
+        manageId: pItem.mal_id != null ? (findByMalId(pItem.mal_id)?.id ?? null) : null,
       })
     } else if (pItem) {
       res.json({
@@ -289,7 +292,11 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
       return n ? { ...ep, Name: n } : ep
     })
   }
-  res.json(buildWatchData(id, item, siblings, segments))
+  // Catalog id for the admin "Library settings" shortcut — from the series
+  // (episodes) or the item itself (movies). null when not catalogued.
+  const manageMal = (item.SeriesId ? getPortalItem(item.SeriesId) : pSelf)?.mal_id
+  const manageId = manageMal != null ? (findByMalId(manageMal)?.id ?? null) : null
+  res.json({ ...buildWatchData(id, item, siblings, segments), manageId })
 })
 
 // Weekly anime schedule, filtered to the library.
