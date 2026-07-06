@@ -5,6 +5,7 @@
 import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
 import { getAllPortalItems } from './portalDb.js'
 import { getSeriesById } from './db.js'
+import { jellyfinConfigured, jfJson, type JfItem, type JfMediaStream } from './jellyfin.js'
 
 const norm = (s: unknown): string =>
   String(s ?? '')
@@ -128,4 +129,113 @@ export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesD
     .sort((a, b) => b.progress - a.progress)
 
   return { qbitConfigured: true, qbitError, torrents, siteEpisodes }
+}
+
+// ── Per-episode library media facts (what's actually on the server) ──────────
+// Distinct from the qBittorrent download list above: this reflects the *files in
+// the library* (after import/mux), so the manage page shows real codecs/audio.
+
+const LANG_NAMES: Record<string, string> = {
+  eng: 'English', jpn: 'Japanese', jap: 'Japanese', spa: 'Spanish', fre: 'French',
+  ger: 'German', por: 'Portuguese', ita: 'Italian', kor: 'Korean', chi: 'Chinese',
+  zho: 'Chinese', rus: 'Russian', ara: 'Arabic', und: 'Unknown',
+}
+const langLabel = (c?: string): string =>
+  c ? (LANG_NAMES[c.toLowerCase()] || c.toUpperCase()) : 'Unknown'
+const chLabel = (n?: number): string =>
+  n === 1 ? 'Mono' : n === 2 ? 'Stereo' : n === 6 ? '5.1' : n === 8 ? '7.1' : n ? `${n}ch` : ''
+// Height → a familiar resolution label.
+function resLabel(h?: number, w?: number): string {
+  if (!h) return ''
+  if (h >= 2000) return '4K'
+  if (h >= 1000) return '1080p'
+  if (h >= 700) return '720p'
+  if (h >= 500) return '576p'
+  if (h >= 380) return '480p'
+  return w && h ? `${w}×${h}` : `${h}p`
+}
+
+export interface EpisodeAudio { lang: string; label: string; codec: string; channels: string; def: boolean }
+export interface EpisodeMedia {
+  id: string
+  episode: number | null
+  resolution: string
+  videoCodec: string
+  audio: EpisodeAudio[]
+  subLangs: string[]
+  sizeBytes: number | null
+  container: string
+  runtimeMin: number | null
+}
+
+/** Media facts for every library episode of a series, keyed for the manage page.
+ * Sourced from Jellyfin (one /Shows/{id}/Episodes call with stream fields). */
+export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMedia[]> {
+  if (!jellyfinConfigured) return []
+  const series = getSeriesById(seriesId)
+  if (!series) return []
+
+  // Find the Jellyfin series id: prefer the catalogued portal Series item
+  // (mal_id-tagged by the sync), else the best title-token match.
+  const variantTokens = [series.title, series.title_english, series.title_japanese]
+    .filter((t): t is string => !!t)
+    .map(tokens)
+    .filter((t) => t.length > 0)
+  const seriesItems = getAllPortalItems().filter((it) => it.type === 'Series')
+  let jfSeriesId =
+    seriesItems.find((it) => it.mal_id != null && it.mal_id === series.mal_id)?.id ?? null
+  if (!jfSeriesId) {
+    let best = 0
+    for (const it of seriesItems) {
+      const s = bestOverlap(it.name, variantTokens)
+      if (s > best && s >= 0.5) { best = s; jfSeriesId = it.id }
+    }
+  }
+  if (!jfSeriesId) return []
+
+  let episodes: JfItem[] = []
+  try {
+    const r = await jfJson<{ Items?: JfItem[] }>(`/Shows/${jfSeriesId}/Episodes`, {
+      Fields: 'MediaStreams,MediaSources',
+    })
+    episodes = r.Items ?? []
+  } catch {
+    return []
+  }
+
+  const out: EpisodeMedia[] = episodes.map((ep) => {
+    const source = ep.MediaSources?.[0]
+    const streams: JfMediaStream[] = ep.MediaStreams || source?.MediaStreams || []
+    const video = streams.find((s) => s.Type === 'Video')
+    const audio = streams
+      .filter((s) => s.Type === 'Audio')
+      .map((s) => ({
+        lang: (s.Language || '').toLowerCase(),
+        label: langLabel(s.Language),
+        codec: (s.Codec || '').toUpperCase(),
+        channels: chLabel(s.Channels),
+        def: !!s.IsDefault,
+      }))
+    const subLangs = [
+      ...new Set(
+        streams
+          .filter((s) => s.Type === 'Subtitle')
+          .map((s) => langLabel(s.Language))
+          .filter(Boolean),
+      ),
+    ]
+    return {
+      id: ep.Id,
+      episode: ep.IndexNumber ?? null,
+      resolution: resLabel(video?.Height, video?.Width),
+      videoCodec: (video?.Codec || '').toUpperCase(),
+      audio,
+      subLangs,
+      sizeBytes: source?.Size ?? null,
+      container: (source?.Container || '').toUpperCase(),
+      runtimeMin: ep.RunTimeTicks ? Math.round(ep.RunTimeTicks / 600000000) : null,
+    }
+  })
+  out.sort((a, b) => (a.episode ?? 1e9) - (b.episode ?? 1e9))
+  return out
 }
