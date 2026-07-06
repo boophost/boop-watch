@@ -503,6 +503,10 @@
   & .subbar .t { color: var(--fg-muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   & .subbar .ep { font-family: var(--font-mono); font-size: 11px; color: var(--accent-soft-fg); background: var(--accent-soft);
     padding: 2px 7px; border-radius: 5px; flex: none; }
+  /* Admin-only "Library settings" shortcut, pinned to the right of the subbar. */
+  & .subbar .manage-link { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; flex: none;
+    color: var(--fg-muted); font-size: 13px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 7px; }
+  & .subbar .manage-link:hover { color: var(--fg); border-color: var(--fg-subtle); }
 
   & .wrap { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px;
     max-width: 1560px; margin: 0 auto; padding: 20px; align-items: start; }

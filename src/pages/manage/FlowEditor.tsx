@@ -36,7 +36,7 @@ import {
   getFlow,
   getNodeTypes,
   saveFlow,
-  runFlow,
+  runFlowStream,
   type NodeSpec,
   type NodeCategory,
   type FlowGraph,
@@ -50,6 +50,7 @@ interface FlowNodeData extends Record<string, unknown> {
   specType: string
   config: Record<string, unknown>
   report?: NodeReport
+  running?: boolean
 }
 
 type RFNode = Node<FlowNodeData, 'flow'>
@@ -85,14 +86,17 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
     .filter(Boolean)
     .slice(0, 3)
 
+  const running = data.running === true
   return (
     <div
       className={`min-w-44 max-w-56 rounded-md border bg-card text-card-foreground shadow-sm ${
         selected
           ? 'border-ring ring-2 ring-ring/40'
-          : report?.status === 'error'
-            ? 'border-destructive'
-            : 'border-border'
+          : running
+            ? 'border-ring ring-2 ring-ring/30'
+            : report?.status === 'error'
+              ? 'border-destructive'
+              : 'border-border'
       }`}
     >
       <div className="relative flex items-center gap-2 border-b border-border px-3 py-2">
@@ -106,7 +110,9 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
         ) : null}
         <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[spec.category]}`} />
         <span className="truncate text-xs font-medium">{spec.label}</span>
-        {report?.status === 'ok' ? (
+        {running ? (
+          <Loader2 className="ml-auto size-3.5 shrink-0 animate-spin text-ring" />
+        ) : report?.status === 'ok' ? (
           <Check className="ml-auto size-3.5 shrink-0 text-emerald-400" />
         ) : report?.status === 'error' ? (
           <AlertTriangle className="ml-auto size-3.5 shrink-0 text-destructive" />
@@ -363,17 +369,37 @@ function FlowEditorInner() {
     }
     setRunningKind(dryRun ? 'dry' : 'real')
     setError('')
+    // Clear last run's per-node results so live progress paints from scratch.
+    setReport(null)
+    setNodes((ns) =>
+      ns.map((n) => ({ ...n, data: { ...n.data, report: undefined, running: false } })),
+    )
     try {
       if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges) })
       setDirty(false)
-      const d = await runFlow(id, dryRun)
-      setReport(d.report)
-      if (d.report.error) setError(d.report.error)
+      const report = await runFlowStream(id, dryRun, (ev) => {
+        if (ev.type === 'start') {
+          setNodes((ns) =>
+            ns.map((n) => (n.id === ev.id ? { ...n, data: { ...n.data, running: true } } : n)),
+          )
+        } else if (ev.type === 'node') {
+          setNodes((ns) =>
+            ns.map((n) =>
+              n.id === ev.id ? { ...n, data: { ...n.data, report: ev.report, running: false } } : n,
+            ),
+          )
+        }
+      })
+      setReport(report)
+      if (report.error) setError(report.error)
+      // Reconcile against the final report (covers validation errors that emit
+      // no per-node events, and any node that never streamed).
       setNodes((ns) =>
-        ns.map((n) => ({ ...n, data: { ...n.data, report: d.report.nodes[n.id] } })),
+        ns.map((n) => ({ ...n, data: { ...n.data, report: report.nodes[n.id], running: false } })),
       )
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Run failed')
+      setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, running: false } })))
     } finally {
       setRunningKind(null)
     }

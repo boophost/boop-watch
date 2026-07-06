@@ -2,6 +2,7 @@ import express from 'express'
 import cookieParser from 'cookie-parser'
 import jwt from 'jsonwebtoken'
 import path from 'path'
+import fs from 'node:fs'
 import { fileURLToPath } from 'url'
 import {
   searchAnime,
@@ -11,7 +12,8 @@ import {
   episodeNumberFromUrl,
 } from './jikan.js'
 import * as seriesDb from './db.js'
-import { publicRouter } from './publicRoutes.js'
+import { publicRouter, BANNERS_DIR } from './publicRoutes.js'
+import { ensureSeriesBanners } from './banners.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
@@ -392,6 +394,86 @@ app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res)
   } finally {
     releaseFlowLock()
   }
+})
+
+// ---- Season-banner candidates (admin picker + upload) ---------------------
+// Shape a banner row for the client: `preview` is the public image route so an
+// <img> can render it (uploads aren't public URLs).
+function bannerView(b: seriesDb.BannerRow) {
+  return {
+    id: b.id,
+    source: b.source,
+    selected: b.selected === 1,
+    width: b.width,
+    height: b.height,
+    preview: `/api/banner/${b.id}/image`,
+  }
+}
+
+// List candidates (gathering them from remote sources on first view).
+app.get('/api/series/:id/banners', requireAuth, async (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  try { await ensureSeriesBanners(series.mal_id) } catch (e) { console.error('banner gather failed', e) }
+  res.json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
+})
+
+// Choose which candidate the portal serves.
+app.post('/api/series/:id/banners/select', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const bannerId = Number((req.body as { bannerId?: unknown })?.bannerId)
+  if (!Number.isFinite(bannerId) || !seriesDb.selectBanner(series.mal_id, bannerId)) {
+    res.status(400).json({ error: 'Unknown banner for this series' })
+    return
+  }
+  res.json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
+})
+
+// Upload a custom banner (raw image bytes; content-type sets the extension).
+const EXT_BY_TYPE: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif' }
+app.post(
+  '/api/series/:id/banners/upload',
+  requireAuth, requireAdmin,
+  express.raw({ type: Object.keys(EXT_BY_TYPE), limit: '12mb' }),
+  (req, res) => {
+    const id = Number(req.params.id)
+    const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+    if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+    const ext = EXT_BY_TYPE[String(req.headers['content-type'] ?? '').split(';')[0].trim()]
+    const body = req.body as Buffer
+    if (!ext || !Buffer.isBuffer(body) || body.length === 0) {
+      res.status(400).json({ error: 'Send raw image bytes (jpeg/png/webp/avif/gif)' })
+      return
+    }
+    const file = `${series.mal_id}-${Date.now()}.${ext}`
+    fs.mkdirSync(BANNERS_DIR, { recursive: true })
+    fs.writeFileSync(path.join(BANNERS_DIR, file), body)
+    const row = seriesDb.addBanner({ mal_id: series.mal_id, source: 'upload', local_file: file })
+    seriesDb.selectBanner(series.mal_id, row.id)
+    res.status(201).json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
+  },
+)
+
+// Remove a candidate (deletes an uploaded file; re-selects a default if needed).
+app.delete('/api/series/:id/banners/:bannerId', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const bannerId = Number(req.params.bannerId)
+  const removed = Number.isFinite(bannerId) ? seriesDb.deleteBanner(series.mal_id, bannerId) : undefined
+  if (!removed) { res.status(404).json({ error: 'Banner not found' }); return }
+  if (removed.local_file) {
+    try { fs.unlinkSync(path.join(BANNERS_DIR, path.basename(removed.local_file))) } catch { /* already gone */ }
+  }
+  // If we just deleted the selection, promote the next candidate.
+  if (removed.selected === 1) {
+    const next = seriesDb.listBanners(series.mal_id)[0]
+    if (next) seriesDb.selectBanner(series.mal_id, next.id)
+  }
+  res.json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
 })
 
 app.get('/api/library/saved', requireAuth, (req, res) => {
