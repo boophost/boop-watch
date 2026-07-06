@@ -18,7 +18,7 @@ export interface NodePort {
   label: string
 }
 
-export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink'
+export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'boundary'
 
 export interface NodeSpec {
   type: string

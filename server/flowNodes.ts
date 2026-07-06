@@ -32,10 +32,12 @@ export interface NodePort {
   label: string
 }
 
+export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'boundary'
+
 export interface NodeSpec {
   type: string
   label: string
-  category: 'source' | 'filter' | 'enrich' | 'combine' | 'sink'
+  category: NodeCategory
   description: string
   inputs: NodePort[]
   outputs: NodePort[]
