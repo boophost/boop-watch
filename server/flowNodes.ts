@@ -2029,6 +2029,52 @@ const qbittorrentSink: NodeImpl = {
   },
 }
 
+const qbittorrentDelete: NodeImpl = {
+  spec: {
+    type: 'sink.qbittorrent-delete',
+    label: 'Remove from qBittorrent',
+    category: 'sink',
+    description:
+      'Removes each item’s torrent from qBittorrent (deduped by hash), optionally deleting its downloaded files. Use it to retire a release a better one has replaced — safe when the library copy is a hardlink of the NEW release (a different inode survives the delete).',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'removed', label: 'removed' }],
+    config: [
+      { key: 'url', label: 'qBittorrent URL', kind: 'text', default: '', help: 'Empty = QBIT_URL env.' },
+      { key: 'username', label: 'Username', kind: 'text', default: '', help: 'Empty = QBIT_USERNAME env.' },
+      { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
+      { key: 'hashField', label: 'Torrent hash field', kind: 'text', default: 'torrent_hash' },
+      { key: 'deleteFiles', label: 'Delete downloaded files', kind: 'boolean', default: true, help: 'On = also remove the files from disk. Only feed this fully-superseded torrents (see the Difference node in the seed).' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const hashField = str(config, 'hashField', 'torrent_hash')
+    const deleteFiles = bool(config, 'deleteFiles', true)
+    const items = allInputs(inputs)
+    const hashes = [
+      ...new Set(items.map((it) => String(it[hashField] ?? '').toLowerCase()).filter(Boolean)),
+    ]
+    if (hashes.length === 0) {
+      ctx.notes.push('no torrent hashes to remove')
+      return { removed: [] }
+    }
+    if (ctx.dryRun) {
+      ctx.notes.push(`dry run — would remove ${hashes.length} torrent(s)${deleteFiles ? ' + files' : ''}`)
+      return { removed: items }
+    }
+    const { base, user, pass } = qbitCreds(config)
+    const cookie = await qbitLogin(base, user, pass)
+    const res = await fetch(`${base}/api/v2/torrents/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+      body: new URLSearchParams({ hashes: hashes.join('|'), deleteFiles: String(deleteFiles) }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!res.ok) throw new Error(`qBittorrent delete failed (${res.status})`)
+    ctx.notes.push(`removed ${hashes.length} torrent(s)${deleteFiles ? ' + files' : ''}`)
+    return { removed: items }
+  },
+}
+
 // Fills a path template with an item's fields. {field} is the raw value;
 // {field:2} zero-pads a number to 2 digits (season/episode). Unknown fields ->
 // empty. Slashes in the template make directories.
@@ -2062,6 +2108,22 @@ function sanitizeSegments(rel: string): string {
 }
 
 const LIBRARY_DIR = () => process.env.LIBRARY_DIR ?? '/library'
+
+// "Is the file already in the library this exact release?" Our imports hardlink,
+// so a re-run's src and the dest it produced share an inode — cheap, exact skip
+// that keeps scheduled runs idempotent. Fall back to size for copy-mode imports
+// (different inode); a genuine upgrade — e.g. a dual-audio re-encode — is a
+// larger, distinct file, so it still replaces the old one.
+function sameLibraryFile(src: string, dest: string): boolean {
+  try {
+    const a = fs.statSync(src)
+    const b = fs.statSync(dest)
+    if (a.ino !== 0 && a.ino === b.ino && a.dev === b.dev) return true
+    return a.size === b.size
+  } catch {
+    return false
+  }
+}
 
 const libraryImport: NodeImpl = {
   spec: {
@@ -2163,18 +2225,31 @@ const libraryImport: NodeImpl = {
       }
       const dest = path.join(root, rel + ext)
 
-      if (!overwrite && fs.existsSync(dest)) {
-        skipped.push({ ...item, library_path: dest, import_status: 'exists' })
-        continue
+      if (fs.existsSync(dest)) {
+        // Nothing there to upgrade → honour the plain skip.
+        if (!overwrite) {
+          skipped.push({ ...item, library_path: dest, import_status: 'exists' })
+          continue
+        }
+        // Overwrite mode: only re-place when the incoming file actually differs
+        // from what's already there, so re-runs don't churn (or re-trigger a
+        // Jellyfin scan) but a real upgrade does replace the old file.
+        if (sameLibraryFile(src, dest)) {
+          skipped.push({ ...item, library_path: dest, import_status: 'current' })
+          continue
+        }
       }
+      // dest still present here (with overwrite) means we're replacing a
+      // superseded release, e.g. swapping the sub-only file for a dual-audio one.
+      const replacing = fs.existsSync(dest)
       if (ctx.dryRun) {
-        imported.push({ ...item, library_path: dest, import_method: method })
+        imported.push({ ...item, library_path: dest, import_method: method, import_status: replacing ? 'replaced' : 'new' })
         continue
       }
       try {
         const used = place(src, dest)
         if (used === 'copy' && method === 'hardlink') copied++
-        const out: FlowItem = { ...item, library_path: dest, import_method: used }
+        const out: FlowItem = { ...item, library_path: dest, import_method: used, import_status: replacing ? 'replaced' : 'new' }
         // Bring subtitle + font sidecars next to the video (same basename).
         if (moveSubs && item.subtitle_path) {
           const subSrc = String(item.subtitle_path)
@@ -2458,6 +2533,7 @@ const IMPLS: NodeImpl[] = [
   merge,
   portalSink,
   qbittorrentSink,
+  qbittorrentDelete,
   libraryImport,
   jellyfinScan,
   jellyfinCollection,
