@@ -99,6 +99,18 @@ export function getDb(): Database.Database {
       UNIQUE(username, item_id)
     );
     CREATE INDEX IF NOT EXISTS idx_history_user ON watch_history(username);
+
+    -- MAL episode titles, cached so the portal can show real episode names
+    -- without hitting Jikan on every sync. Keyed by (mal_id, episode number).
+    CREATE TABLE IF NOT EXISTS series_episodes (
+      mal_id INTEGER NOT NULL,
+      number INTEGER NOT NULL,
+      title TEXT,
+      title_japanese TEXT,
+      aired TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (mal_id, number)
+    );
   `)
 
   // Additive migration for the richer metadata columns.
@@ -189,4 +201,53 @@ export function getSeriesById(id: number): SeriesRow | undefined {
   return getDb().prepare('SELECT * FROM series WHERE id = ?').get(id) as
     | SeriesRow
     | undefined
+}
+
+export interface EpisodeRow {
+  number: number
+  title: string | null
+  title_japanese?: string | null
+  aired?: string | null
+}
+
+/** How many episode titles are cached for a series (0 = never fetched). */
+export function countCachedEpisodes(mal_id: number): number {
+  return (
+    getDb().prepare('SELECT COUNT(*) AS c FROM series_episodes WHERE mal_id = ?').get(mal_id) as {
+      c: number
+    }
+  ).c
+}
+
+/** Cached episode number -> title for a series. */
+export function getEpisodeTitles(mal_id: number): Map<number, string> {
+  const rows = getDb()
+    .prepare('SELECT number, title FROM series_episodes WHERE mal_id = ?')
+    .all(mal_id) as { number: number; title: string | null }[]
+  return new Map(rows.filter((r) => r.title).map((r) => [r.number, r.title as string]))
+}
+
+export function upsertEpisodes(mal_id: number, episodes: EpisodeRow[]): void {
+  const stmt = getDb().prepare(`
+    INSERT INTO series_episodes (mal_id, number, title, title_japanese, aired, updated_at)
+    VALUES (@mal_id, @number, @title, @title_japanese, @aired, datetime('now'))
+    ON CONFLICT(mal_id, number) DO UPDATE SET
+      title = excluded.title,
+      title_japanese = excluded.title_japanese,
+      aired = excluded.aired,
+      updated_at = excluded.updated_at
+  `)
+  const tx = getDb().transaction((rows: EpisodeRow[]) => {
+    for (const e of rows) {
+      if (!Number.isFinite(e.number)) continue
+      stmt.run({
+        mal_id,
+        number: e.number,
+        title: e.title ?? null,
+        title_japanese: e.title_japanese ?? null,
+        aired: e.aired ?? null,
+      })
+    }
+  })
+  tx(episodes)
 }

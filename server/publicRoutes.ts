@@ -255,6 +255,23 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
       new Promise<Segment[]>((r) => setTimeout(() => r([]), 8000)),
     ])
   }
+
+  // Prefer our catalog-sourced names (portalDb) over Jellyfin's for everything
+  // the player shows — episode/movie title, the series back-link, and the
+  // sidebar list. Done after AniSkip so its matching still uses Jellyfin's title.
+  const pSelf = getPortalItem(id)
+  if (pSelf?.name) item.Name = pSelf.name
+  if (item.SeriesId) {
+    const pSeries = getPortalItem(item.SeriesId)
+    if (pSeries?.name) item.SeriesName = pSeries.name
+  }
+  if (item.SeriesId && siblings.length) {
+    const names = new Map(getPortalEpisodes(item.SeriesId).map((e) => [e.id, e.name]))
+    siblings = siblings.map((ep) => {
+      const n = names.get(ep.Id)
+      return n ? { ...ep, Name: n } : ep
+    })
+  }
   res.json(buildWatchData(id, item, siblings, segments))
 })
 
