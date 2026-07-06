@@ -121,6 +121,11 @@ export default function Flows() {
                     <span className="flex items-center gap-2 font-medium">
                       <Workflow className="size-4 shrink-0 text-muted-foreground" />
                       {f.name}
+                      {f.published ? (
+                        <span className="rounded bg-violet-500/20 px-1.5 py-0.5 text-[10px] text-violet-300">
+                          Component
+                        </span>
+                      ) : null}
                     </span>
                     <Button
                       type="button"

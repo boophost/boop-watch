@@ -86,6 +86,7 @@ export interface FlowSummary {
   name: string
   description: string | null
   node_count: number
+  published: boolean
   updated_at: string
 }
 
