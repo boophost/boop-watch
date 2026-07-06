@@ -2788,6 +2788,40 @@ const IMPLS: NodeImpl[] = [
   libraryImport,
   jellyfinScan,
   jellyfinCollection,
+  {
+    spec: {
+      type: 'boundary.input',
+      label: 'Input',
+      category: 'boundary',
+      description: 'External input port for a published component flow.',
+      inputs: [],
+      outputs: [{ id: 'items', label: 'items' }],
+      config: [
+        { key: 'portId', label: 'Port id', kind: 'text', default: 'in' },
+        { key: 'label', label: 'Label', kind: 'text', default: 'Input' },
+      ],
+    },
+    run: async (inputs) => {
+      return { items: inputs.items ?? [] }
+    },
+  },
+  {
+    spec: {
+      type: 'boundary.output',
+      label: 'Output',
+      category: 'boundary',
+      description: 'External output port for a published component flow.',
+      inputs: [{ id: 'items', label: 'items' }],
+      outputs: [],
+      config: [
+        { key: 'portId', label: 'Port id', kind: 'text', default: 'out' },
+        { key: 'label', label: 'Label', kind: 'text', default: 'Output' },
+      ],
+    },
+    run: async () => {
+      return {}
+    },
+  },
 ]
 
 export const NODE_REGISTRY: Map<string, NodeImpl> = new Map(IMPLS.map((n) => [n.spec.type, n]))
