@@ -307,8 +307,10 @@ publicRouter.get('/img/:id', async (req, res) => {
   await proxy(req, res, jfUrl(`/Items/${id}/Images/Primary`, { maxWidth: '400', quality: '90' }))
 })
 
-// Wide backdrop art for the featured banner (top-level titles only; the client
-// falls back to the poster when a title has no backdrop).
+// Wide banner art (top-level titles only) for the season hero and featured
+// rail. Prefer our AniList banner, then Jellyfin's own backdrop, and only as a
+// last resort the poster — so the hero is never empty but avoids a stretched
+// portrait whenever a real wide image exists.
 publicRouter.get('/img/:id/backdrop', async (req, res) => {
   if (!ensureConfigured(res)) return
   await ensureScope().catch(() => {})
@@ -317,7 +319,13 @@ publicRouter.get('/img/:id/backdrop', async (req, res) => {
     res.status(404).end()
     return
   }
-  await proxy(req, res, jfUrl(`/Items/${id}/Images/Backdrop/0`, { maxWidth: '1600', quality: '80' }))
+  const pItem = getPortalItem(id)
+  if (pItem?.backdrop_url) {
+    res.redirect(302, pItem.backdrop_url)
+    return
+  }
+  const image = pItem?.has_backdrop ? 'Backdrop/0' : 'Primary'
+  await proxy(req, res, jfUrl(`/Items/${id}/Images/${image}`, { maxWidth: '1600', quality: '80' }))
 })
 
 // HLS entry point: build the master playlist request with transcode params.

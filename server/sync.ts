@@ -2,9 +2,10 @@ import { jfJson, JfItem } from './jellyfin.js'
 import { getPortalDb, upsertPortalItem, PortalItem, getPortalItem } from './portalDb.js'
 import {
   listSeries, SeriesRow, EpisodeRow,
-  countCachedEpisodes, getEpisodeTitles, upsertEpisodes,
+  countCachedEpisodes, getEpisodeTitles, upsertEpisodes, setSeriesBanner,
 } from './db.js'
 import { searchAnime, pickPosterUrl, fetchAnimeEpisodesPage, episodeNumberFromUrl } from './jikan.js'
+import { fetchAniListBanner } from './anilist.js'
 
 const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
 
@@ -71,6 +72,18 @@ export async function syncJellyfinToPortal() {
     // its poster; Jellyfin's own name/art is the fallback.
     const match = matchCatalog(it, dbSeries)
     const displayName = match?.title_english || match?.title || it.Name || ''
+
+    // Wide season banner from AniList, fetched once per series and cached in the
+    // catalog (a stretched poster makes a poor hero). null = not yet fetched.
+    if (match) {
+      let banner = match.banner_url
+      if (banner == null) {
+        banner = (await fetchAniListBanner(match.mal_id)) ?? ''
+        setSeriesBanner(match.mal_id, banner)
+        await new Promise((r) => setTimeout(r, 300)) // be polite to AniList
+      }
+      if (banner) backdropUrl = banner
+    }
 
     if (!imageUrl && !it.PrimaryImageAspectRatio) {
       if (match && match.image_url) {
