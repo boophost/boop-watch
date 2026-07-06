@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Icon } from './Icon'
 import { loadCatalog, imgUrl, type CatalogItem } from '@/lib/api'
+import { useAuth } from '@/lib/AuthContext'
+import { track } from '@/lib/analytics'
 
 const initials = (n: string) =>
   (String(n).match(/[A-Za-z0-9]+/g) || []).slice(0, 2).map((s) => s[0]).join('').toUpperCase()
@@ -26,6 +28,7 @@ function score(name: string, q: string): number {
  * Used by the Chrome header and the player topbar. */
 export function SearchBar() {
   const navigate = useNavigate()
+  const { user } = useAuth()
   const [catalog, setCatalog] = useState<CatalogItem[]>([])
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(false)
@@ -75,7 +78,15 @@ export function SearchBar() {
   const showBox = open && q.trim().length > 0
   useEffect(() => { setActive(0) }, [q])
 
-  const go = (it: CatalogItem) => { setOpen(false); navigate(hrefFor(it)) }
+  const go = (it: CatalogItem) => {
+    setOpen(false)
+    track('search_selected', {
+      item_id: it.id,
+      item_type: it.type === 'Series' ? 'series' : 'movie',
+      auth_state: user ? 'authenticated' : 'anonymous',
+    })
+    navigate(hrefFor(it))
+  }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (!showBox) return
