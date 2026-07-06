@@ -18,7 +18,7 @@ import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from '
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
 import { warmScope } from './jellyfin.js'
-import { getSeriesDownloadStatus } from './downloads.js'
+import { getSeriesDownloadStatus, getSeriesLibraryMedia } from './downloads.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
 
@@ -271,6 +271,22 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to load downloads' })
+  }
+})
+
+// Per-episode media facts for the files actually in the library (codec, audio
+// tracks, resolution, size) — what the mux/import produced, not the torrents.
+app.get('/api/series/:id/library', requireAuth, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  try {
+    res.json({ episodes: await getSeriesLibraryMedia(id) })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to load library media' })
   }
 })
 

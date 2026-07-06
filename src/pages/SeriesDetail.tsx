@@ -121,6 +121,19 @@ interface Banner {
   preview: string
 }
 
+interface EpisodeAudio { lang: string; label: string; codec: string; channels: string; def: boolean }
+interface EpisodeMedia {
+  id: string
+  episode: number | null
+  resolution: string
+  videoCodec: string
+  audio: EpisodeAudio[]
+  subLangs: string[]
+  sizeBytes: number | null
+  container: string
+  runtimeMin: number | null
+}
+
 function heroImage(mal: MalDetail | null, series: SeriesEntry): string | null {
   if (mal?.images) {
     const w = mal.images.webp?.large_image_url || mal.images.webp?.image_url
@@ -129,6 +142,39 @@ function heroImage(mal: MalDetail | null, series: SeriesEntry): string | null {
     if (u) return u
   }
   return series.image_url
+}
+
+// Compact per-episode media summary for the library file: resolution + codec,
+// audio-track badges, and size. Renders "—" when the episode isn't in the library.
+function MediaCell({ m }: { m: EpisodeMedia | undefined }) {
+  if (!m) return <span className="text-muted-foreground">—</span>
+  return (
+    <div className="min-w-0 space-y-1">
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+        {m.resolution ? <span className="font-medium">{m.resolution}</span> : null}
+        {m.videoCodec ? <span className="text-muted-foreground">{m.videoCodec}</span> : null}
+        {m.sizeBytes ? (
+          <span className="text-muted-foreground">· {formatBytes(m.sizeBytes)}</span>
+        ) : null}
+      </div>
+      {m.audio.length ? (
+        <div className="flex flex-wrap gap-1">
+          {m.audio.map((a, i) => (
+            <span
+              key={i}
+              className="rounded bg-secondary px-1.5 py-0.5 text-[10px] text-secondary-foreground"
+              title={`${a.label} ${a.codec}${a.channels ? ' ' + a.channels : ''}${a.def ? ' (default)' : ''}`}
+            >
+              {(a.lang || 'und').toUpperCase()} {a.codec}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {m.subLangs.length ? (
+        <div className="text-[10px] text-muted-foreground">Subs: {m.subLangs.join(', ')}</div>
+      ) : null}
+    </div>
+  )
 }
 
 function formatAired(iso: string | null): string {
@@ -236,12 +282,26 @@ export default function SeriesDetail() {
     }
   }
 
+  const [libMedia, setLibMedia] = useState<Map<number, EpisodeMedia>>(new Map())
+
   const loadDownloads = useCallback(async () => {
     if (!Number.isFinite(id)) return
     try {
       const r = await fetchAuth(`/api/series/${id}/downloads`)
       if (!r.ok) return
       setDl((await r.json()) as DownloadStatus)
+    } catch {
+      /* leave prior state */
+    }
+  }, [id])
+
+  const loadLibrary = useCallback(async () => {
+    if (!Number.isFinite(id)) return
+    try {
+      const r = await fetchAuth(`/api/series/${id}/library`)
+      if (!r.ok) return
+      const { episodes } = (await r.json()) as { episodes: EpisodeMedia[] }
+      setLibMedia(new Map(episodes.filter((e) => e.episode != null).map((e) => [e.episode as number, e])))
     } catch {
       /* leave prior state */
     }
@@ -382,6 +442,11 @@ export default function SeriesDetail() {
     if (!series) return
     void loadBanners()
   }, [series, loadBanners])
+
+  useEffect(() => {
+    if (!series) return
+    void loadLibrary()
+  }, [series, loadLibrary])
 
   useEffect(() => {
     const active = dl?.torrents.some((t) => t.progress < 1 && !t.state.includes('paused'))
@@ -608,7 +673,14 @@ export default function SeriesDetail() {
         </section>
 
         <section>
-          <h2 className="mb-4 text-lg font-semibold">Downloads</h2>
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold">Downloads</h2>
+            <p className="text-xs text-muted-foreground">
+              Torrents in qBittorrent — the source releases (and any dual-audio donor
+              kept for muxing), not the library files. See “Library file” per episode
+              below for what’s actually on the server.
+            </p>
+          </div>
           {!dl ? (
             <p className="text-sm text-muted-foreground">Loading downloads…</p>
           ) : !dl.qbitConfigured ? (
@@ -739,6 +811,7 @@ export default function SeriesDetail() {
                 <tr>
                   <th className="w-14 px-3 py-2 font-medium">Ep</th>
                   <th className="px-3 py-2 font-medium">Title</th>
+                  <th className="w-48 px-3 py-2 font-medium">Library file</th>
                   <th className="w-28 px-3 py-2 font-medium">Aired</th>
                   <th className="w-24 px-3 py-2 font-medium">On site</th>
                   <th className="w-44 px-3 py-2 font-medium">Download</th>
@@ -775,6 +848,9 @@ export default function SeriesDetail() {
                           ) : null}
                         </span>
                       ) : null}
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <MediaCell m={ep.episode != null ? libMedia.get(ep.episode) : undefined} />
                     </td>
                     <td className="px-3 py-2 align-top text-muted-foreground">
                       {formatAired(ep.aired)}
@@ -857,6 +933,11 @@ export default function SeriesDetail() {
                 <p className="mt-1 text-xs text-muted-foreground">
                   {formatAired(ep.aired)}
                 </p>
+                {ep.episode != null && libMedia.get(ep.episode) ? (
+                  <div className="mt-2">
+                    <MediaCell m={libMedia.get(ep.episode)} />
+                  </div>
+                ) : null}
                 {(() => {
                   const t = episodeDownload(ep.episode, dl?.torrents ?? [])
                   const watchId = dl?.siteEpisodes[String(ep.episode)]
