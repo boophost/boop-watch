@@ -9,9 +9,10 @@ const initials = (n: string) =>
   String(n || '?').split(/[^a-z0-9]/i).filter(Boolean).slice(0, 2).map((s) => s[0]).join('').toUpperCase()
 
 function DetailShell({
-  id, name, badges, sub, overview, children,
-}: { id: string; name: string; badges: ReactNode; sub?: string; overview?: string; children: ReactNode }) {
+  id, name, badges, sub, overview, manageId, children,
+}: { id: string; name: string; badges: ReactNode; sub?: string; overview?: string; manageId?: number | null; children: ReactNode }) {
   const { user } = useAuth()
+  const isAdmin = user?.isAdmin ?? false
   const [isSaved, setIsSaved] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -58,12 +59,20 @@ function DetailShell({
           <div className="series-meta-row">{badges}</div>
           <h1 className="k-h1" style={{ fontSize: 32 }}>{name}</h1>
           {sub && <div className="series-sub">{sub}</div>}
-          {user && (
-            <button className={`btn ${isSaved ? 'btn-secondary' : 'btn-primary'}`} style={{ marginTop: 12 }} onClick={toggleSave} disabled={saving}>
-              <Icon name="bookmark" size={15} fill={isSaved ? 'currentColor' : 'none'} />
-              {isSaved ? 'Saved in Library' : 'Save to Library'}
-            </button>
-          )}
+          <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {user && (
+              <button className={`btn ${isSaved ? 'btn-secondary' : 'btn-primary'}`} onClick={toggleSave} disabled={saving}>
+                <Icon name="bookmark" size={15} fill={isSaved ? 'currentColor' : 'none'} />
+                {isSaved ? 'Saved in Library' : 'Save to Library'}
+              </button>
+            )}
+            {isAdmin && manageId != null && (
+              <Link className="btn btn-secondary" to={`/manage/series/${manageId}`}>
+                <Icon name="gear" size={15} />
+                Library settings
+              </Link>
+            )}
+          </div>
         </div>
       </div>
       <div className="series-body">
@@ -112,7 +121,7 @@ export default function Title() {
     )
     return (
       <PortalLayout crumb={BackCrumb}>
-        <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview}>
+        <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview} manageId={data.manageId}>
           <div className="ep-head">
             <h2 className="k-h3">Episodes</h2>
             <span className="badge badge-mono">{data.episodes.length}</span>
