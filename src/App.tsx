@@ -8,6 +8,7 @@ import Library from './pages/manage/Library'
 import Flows from './pages/manage/Flows'
 import Schedules from './pages/manage/Schedules'
 import Activity from './pages/manage/Activity'
+import Users from './pages/manage/Users'
 import AdminSeriesDetail from './pages/SeriesDetail'
 
 // The graph editor pulls in @xyflow/react — keep it out of the portal bundle.
@@ -93,6 +94,7 @@ export default function App() {
             <Route index element={<Library />} />
             <Route path="series/:seriesId" element={<AdminSeriesDetail />} />
             <Route path="activity" element={<Activity />} />
+            <Route path="users" element={<Users />} />
             <Route path="flows" element={<Flows />} />
             <Route path="schedules" element={<Schedules />} />
             <Route
