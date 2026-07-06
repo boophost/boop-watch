@@ -2,10 +2,10 @@ import { jfJson, JfItem } from './jellyfin.js'
 import { getPortalDb, upsertPortalItem, PortalItem, getPortalItem } from './portalDb.js'
 import {
   listSeries, SeriesRow, EpisodeRow,
-  countCachedEpisodes, getEpisodeTitles, upsertEpisodes, setSeriesBanner,
+  countCachedEpisodes, getEpisodeTitles, upsertEpisodes,
 } from './db.js'
 import { searchAnime, pickPosterUrl, fetchAnimeEpisodesPage, episodeNumberFromUrl } from './jikan.js'
-import { fetchAniListBanner } from './anilist.js'
+import { ensureSeriesBanners } from './banners.js'
 
 const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
 
@@ -73,16 +73,10 @@ export async function syncJellyfinToPortal() {
     const match = matchCatalog(it, dbSeries)
     const displayName = match?.title_english || match?.title || it.Name || ''
 
-    // Wide season banner from AniList, fetched once per series and cached in the
-    // catalog (a stretched poster makes a poor hero). null = not yet fetched.
+    // Gather wide season-banner candidates (AniList/Kitsu) once per series; the
+    // portal serves whichever candidate the admin has selected (see banners.ts).
     if (match) {
-      let banner = match.banner_url
-      if (banner == null) {
-        banner = (await fetchAniListBanner(match.mal_id)) ?? ''
-        setSeriesBanner(match.mal_id, banner)
-        await new Promise((r) => setTimeout(r, 300)) // be polite to AniList
-      }
-      if (banner) backdropUrl = banner
+      try { await ensureSeriesBanners(match.mal_id) } catch (e) { console.error('banner gather failed', e) }
     }
 
     if (!imageUrl && !it.PrimaryImageAspectRatio) {
@@ -118,7 +112,8 @@ export async function syncJellyfinToPortal() {
       series_name: it.SeriesName || null,
       image_url: imageUrl,
       backdrop_url: backdropUrl,
-      has_backdrop: (it.BackdropImageTags && it.BackdropImageTags.length > 0) ? 1 : 0
+      has_backdrop: (it.BackdropImageTags && it.BackdropImageTags.length > 0) ? 1 : 0,
+      mal_id: match?.mal_id ?? null,
     }
     upsertPortalItem(pItem)
 
@@ -149,7 +144,8 @@ export async function syncJellyfinToPortal() {
           series_name: displayName || null,
           image_url: epExisting?.image_url || null,
           backdrop_url: epExisting?.backdrop_url || null,
-          has_backdrop: (ep.BackdropImageTags && ep.BackdropImageTags.length > 0) ? 1 : 0
+          has_backdrop: (ep.BackdropImageTags && ep.BackdropImageTags.length > 0) ? 1 : 0,
+          mal_id: null,
         }
         upsertPortalItem(pEp)
       }

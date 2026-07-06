@@ -2,6 +2,7 @@
 // HLS/subtitle/image proxies, and the schedule. Every content route runs through
 // the scope guard — a request 403s/404s unless the id is in the Public collection.
 import crypto from 'node:crypto'
+import path from 'node:path'
 import { Router, type Request, type Response } from 'express'
 import {
   jellyfinConfigured, ensureScope, jfItem, jfJson, jfUrl, proxy,
@@ -11,8 +12,24 @@ import { buildWatchData, type Segment } from './watch.js'
 import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
 import { getPortalItem, getPortalEpisodes } from './portalDb.js'
+import { getBanner, getSelectedBanner, type BannerRow } from './db.js'
 
 export const publicRouter = Router()
+
+// Uploaded banner files live under DATA_DIR/banners (a mounted volume in prod).
+export const BANNERS_DIR = path.join(process.env.DATA_DIR ?? path.join(process.cwd(), 'data'), 'banners')
+
+// Serve a banner candidate: redirect to its remote URL, or stream the uploaded
+// file. Returns false when the row points at nothing servable.
+function serveBanner(res: Response, b: Pick<BannerRow, 'url' | 'local_file'>): boolean {
+  if (b.url) { res.redirect(302, b.url); return true }
+  if (b.local_file) {
+    // basename guards against path traversal; filenames are server-generated.
+    res.sendFile(path.join(BANNERS_DIR, path.basename(b.local_file)))
+    return true
+  }
+  return false
+}
 
 const qStr = (v: unknown): string => (typeof v === 'string' ? v : Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '')
 
@@ -320,12 +337,26 @@ publicRouter.get('/img/:id/backdrop', async (req, res) => {
     return
   }
   const pItem = getPortalItem(id)
+  // The admin-selected banner candidate wins (AniList/Kitsu/upload)…
+  if (pItem?.mal_id != null) {
+    const sel = getSelectedBanner(pItem.mal_id)
+    if (sel && serveBanner(res, sel)) return
+  }
   if (pItem?.backdrop_url) {
     res.redirect(302, pItem.backdrop_url)
     return
   }
+  // …then Jellyfin's own backdrop, then the poster as a last resort.
   const image = pItem?.has_backdrop ? 'Backdrop/0' : 'Primary'
   await proxy(req, res, jfUrl(`/Items/${id}/Images/${image}`, { maxWidth: '1600', quality: '80' }))
+})
+
+// Serve any banner candidate by id (public art — used by the admin picker's
+// thumbnails and reachable from an <img> tag without auth).
+publicRouter.get('/api/banner/:bannerId/image', (req, res) => {
+  const bid = Number(req.params.bannerId)
+  const b = Number.isFinite(bid) ? getBanner(bid) : undefined
+  if (!b || !serveBanner(res, b)) res.status(404).end()
 })
 
 // HLS entry point: build the master playlist request with transcode params.
