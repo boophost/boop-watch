@@ -1,9 +1,15 @@
-# Base stage with dependencies
-FROM node:20-alpine AS deps
-RUN apk add --no-cache python3 make g++
+# Dependency stages. node:22-alpine gets better-sqlite3's prebuilt linuxmusl-x64
+# binary (Node 20's ABI has no musl prebuild), so no python3/make/g++ toolchain.
+FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
+
+# Production-only deps, cached independently of source changes.
+FROM node:22-alpine AS prod-deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
 
 # Frontend build stage
 FROM deps AS build-frontend
@@ -21,16 +27,15 @@ COPY server ./server
 RUN npm run build:server
 
 # Final production stage
-FROM node:20-alpine
+FROM node:22-alpine
 # ffmpeg/ffprobe are used by the library-import flow nodes (probe + subtitle
-# extraction). python3/make/g++ are only needed to rebuild better-sqlite3.
-RUN apk add --no-cache python3 make g++ ffmpeg
+# extraction).
+RUN apk add --no-cache ffmpeg
 WORKDIR /app
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=prod-deps /app/package*.json ./
 COPY --from=build-frontend /app/dist ./dist
 COPY --from=build-backend /app/dist-server ./dist-server
-COPY --from=deps /app/package*.json ./
-# Use npm ci from deps layer without dev dependencies (keep ffmpeg)
-RUN npm ci --omit=dev && apk del python3 make g++
 EXPOSE 3000
 ENV PORT=3000
 ENV NODE_ENV=production
