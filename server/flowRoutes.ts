@@ -7,7 +7,8 @@ import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
 import type { RunReport, RunHooks } from './flowExecutor.js'
 import * as flowsDb from './flowsDb.js'
-import type { RunActivity } from './flowsDb.js'
+import type { RunActivity, ScheduleKind, ScheduleSpec, WeekDay } from './flowsDb.js'
+import { computeNextRun, runScheduleNow } from './scheduler.js'
 
 export const flowRouter = Router()
 
@@ -33,6 +34,14 @@ function activityFromReport(graph: FlowGraph, report: RunReport): RunActivity[] 
   return activity
 }
 
+// The flow_runs id produced by the most recent runFlowAndRecord call, or null if
+// logging failed. The scheduler reads this right after its run to stamp
+// flow_schedules.last_run_id — safe because the flow lock serializes all runs.
+let lastRecordedRunId: number | null = null
+export function getLastRecordedRunId(): number | null {
+  return lastRecordedRunId
+}
+
 // Run a graph and log it to the rolling activity feed. Shared by the flow-run
 // route and the per-series re-search action so both show up in the Activity tab.
 // Logging never fails the run.
@@ -42,8 +51,9 @@ export async function runFlowAndRecord(
   hooks?: RunHooks,
 ): Promise<RunReport> {
   const report = await runFlow(graph, opts.dryRun, hooks)
+  lastRecordedRunId = null
   try {
-    flowsDb.recordRun({
+    lastRecordedRunId = flowsDb.recordRun({
       flow_id: opts.flowId,
       flow_name: opts.flowName,
       dry_run: report.dryRun,
@@ -227,5 +237,173 @@ flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
   } finally {
     releaseFlowLock()
     res.end()
+  }
+})
+
+// --- Schedules -----------------------------------------------------------
+// CRUD + manual run for scheduled flow runs. Mounted (like the flow routes)
+// behind requireAuth + requireAdmin via the /api/schedules gate in index.ts.
+// The scheduler tick (server/scheduler.ts) fires these when next_run is due.
+
+const KINDS: ScheduleKind[] = ['interval', 'daily', 'weekly', 'once']
+const WEEK_DAYS: WeekDay[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+
+function validHHMM(v: unknown): boolean {
+  if (typeof v !== 'string') return false
+  const m = /^(\d{1,2}):(\d{2})$/.exec(v)
+  if (!m) return false
+  return +m[1] >= 0 && +m[1] <= 23 && +m[2] >= 0 && +m[2] <= 59
+}
+
+// Validate a raw spec against its kind; returns an error string or null.
+function specError(kind: ScheduleKind, raw: unknown): string | null {
+  if (typeof raw !== 'object' || raw === null) return 'spec must be an object'
+  const s = raw as Record<string, unknown>
+  if (kind === 'interval') {
+    if (typeof s.every !== 'number' || !Number.isFinite(s.every) || s.every < 1)
+      return 'spec.every must be a positive number'
+    if (s.unit !== 'minutes' && s.unit !== 'hours') return "spec.unit must be 'minutes' or 'hours'"
+    return null
+  }
+  if (kind === 'daily') return validHHMM(s.at) ? null : 'spec.at must be HH:MM'
+  if (kind === 'weekly') {
+    if (!WEEK_DAYS.includes(s.day as WeekDay)) return 'spec.day must be sun..sat'
+    return validHHMM(s.at) ? null : 'spec.at must be HH:MM'
+  }
+  // once
+  if (!Number.isFinite(Date.parse(String(s.runAt)))) return 'spec.runAt must be an ISO datetime'
+  return null
+}
+
+// Canonicalise a validated spec so only the expected fields are stored.
+function normalizeSpec(kind: ScheduleKind, raw: Record<string, unknown>): ScheduleSpec {
+  if (kind === 'interval')
+    return { every: Math.floor(raw.every as number), unit: raw.unit as 'minutes' | 'hours' }
+  if (kind === 'daily') return { at: raw.at as string }
+  if (kind === 'weekly') return { day: raw.day as WeekDay, at: raw.at as string }
+  return { runAt: new Date(Date.parse(String(raw.runAt))).toISOString() }
+}
+
+flowRouter.get('/api/schedules', (_req, res) => {
+  res.json({ schedules: flowsDb.listSchedules() })
+})
+
+flowRouter.get('/api/schedules/:id', (req, res) => {
+  const id = Number(req.params.id)
+  const schedule = Number.isFinite(id) ? flowsDb.getSchedule(id) : undefined
+  if (!schedule) {
+    res.status(404).json({ error: 'Schedule not found' })
+    return
+  }
+  res.json({ schedule })
+})
+
+flowRouter.post('/api/schedules', (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>
+  const flowId = Number(body.flowId)
+  if (!Number.isFinite(flowId) || !flowsDb.getFlow(flowId)) {
+    res.status(400).json({ error: 'flowId must reference an existing flow' })
+    return
+  }
+  const kind = body.kind as ScheduleKind
+  if (!KINDS.includes(kind)) {
+    res.status(400).json({ error: 'kind must be interval | daily | weekly | once' })
+    return
+  }
+  const err = specError(kind, body.spec)
+  if (err) {
+    res.status(400).json({ error: err })
+    return
+  }
+  const spec = normalizeSpec(kind, body.spec as Record<string, unknown>)
+  const enabled = body.enabled === undefined ? true : !!body.enabled
+  const dry_run = body.dryRun === undefined ? true : !!body.dryRun
+  const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : null
+  const next_run = enabled ? computeNextRun(kind, spec) : null
+  const schedule = flowsDb.createSchedule({ flow_id: flowId, name, kind, spec, dry_run, enabled, next_run })
+  res.json({ schedule })
+})
+
+flowRouter.put('/api/schedules/:id', (req, res) => {
+  const id = Number(req.params.id)
+  const existing = Number.isFinite(id) ? flowsDb.getSchedule(id) : undefined
+  if (!existing) {
+    res.status(404).json({ error: 'Schedule not found' })
+    return
+  }
+  const body = (req.body ?? {}) as Record<string, unknown>
+  const patch: Partial<flowsDb.ScheduleInput> = {}
+
+  if (body.flowId !== undefined) {
+    const fid = Number(body.flowId)
+    if (!Number.isFinite(fid) || !flowsDb.getFlow(fid)) {
+      res.status(400).json({ error: 'flowId must reference an existing flow' })
+      return
+    }
+    patch.flow_id = fid
+  }
+  if (body.name !== undefined)
+    patch.name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : null
+  if (body.dryRun !== undefined) patch.dry_run = !!body.dryRun
+  if (body.enabled !== undefined) patch.enabled = !!body.enabled
+
+  // kind and spec move together — the spec shape is dictated by the kind.
+  const cadenceChanged = body.kind !== undefined || body.spec !== undefined
+  if (cadenceChanged) {
+    const kind = (body.kind !== undefined ? body.kind : existing.kind) as ScheduleKind
+    if (!KINDS.includes(kind)) {
+      res.status(400).json({ error: 'kind must be interval | daily | weekly | once' })
+      return
+    }
+    const rawSpec = body.spec !== undefined ? body.spec : existing.spec
+    const err = specError(kind, rawSpec)
+    if (err) {
+      res.status(400).json({ error: err })
+      return
+    }
+    patch.kind = kind
+    patch.spec = normalizeSpec(kind, rawSpec as Record<string, unknown>)
+  }
+
+  // Recompute next_run whenever the cadence or the enabled flag changed.
+  if (cadenceChanged || body.enabled !== undefined) {
+    const enabled = patch.enabled === undefined ? existing.enabled : patch.enabled
+    const kind = patch.kind ?? existing.kind
+    const spec = patch.spec ?? existing.spec
+    patch.next_run = enabled ? computeNextRun(kind, spec) : null
+  }
+
+  const schedule = flowsDb.updateSchedule(id, patch)
+  res.json({ schedule })
+})
+
+flowRouter.delete('/api/schedules/:id', (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id) || !flowsDb.deleteSchedule(id)) {
+    res.status(404).json({ error: 'Schedule not found' })
+    return
+  }
+  res.json({ ok: true })
+})
+
+flowRouter.post('/api/schedules/:id/run', async (req, res) => {
+  const id = Number(req.params.id)
+  const sched = Number.isFinite(id) ? flowsDb.getSchedule(id) : undefined
+  if (!sched) {
+    res.status(404).json({ error: 'Schedule not found' })
+    return
+  }
+  if (!acquireFlowLock()) {
+    res.status(409).json({ error: 'A flow is already running' })
+    return
+  }
+  try {
+    const report = await runScheduleNow(sched)
+    res.json({ report })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Run failed' })
+  } finally {
+    releaseFlowLock()
   }
 })

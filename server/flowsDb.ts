@@ -50,6 +50,23 @@ function db() {
         duration_ms INTEGER NOT NULL DEFAULT 0,
         activity TEXT NOT NULL DEFAULT '[]'
       );
+      -- Scheduled flow runs: the scheduler (server/scheduler.ts) ticks these and
+      -- fires the referenced flow when next_run is due. kind/spec describe the
+      -- cadence (interval | daily | weekly | once); see computeNextRun.
+      CREATE TABLE IF NOT EXISTS flow_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        flow_id INTEGER NOT NULL,
+        name TEXT,
+        kind TEXT NOT NULL,
+        spec TEXT NOT NULL,
+        dry_run INTEGER NOT NULL DEFAULT 1,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        next_run TEXT,
+        last_run TEXT,
+        last_run_id INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `)
     ready = true
     seedFlows(instance)
@@ -339,7 +356,10 @@ export function updateFlow(
 }
 
 export function deleteFlow(id: number): boolean {
-  return db().prepare('DELETE FROM flows WHERE id = ?').run(id).changes > 0
+  const instance = db()
+  // Cascade: a schedule pointing at a deleted flow can never run.
+  instance.prepare('DELETE FROM flow_schedules WHERE flow_id = ?').run(id)
+  return instance.prepare('DELETE FROM flows WHERE id = ?').run(id).changes > 0
 }
 
 // --- Activity log --------------------------------------------------------
@@ -378,9 +398,11 @@ export interface FlowRunRow {
 
 const RUN_LOG_LIMIT = 200
 
-export function recordRun(run: FlowRunRecord): void {
+// Returns the id of the inserted flow_runs row (so a scheduled fire can record
+// which run it produced in flow_schedules.last_run_id).
+export function recordRun(run: FlowRunRecord): number {
   const instance = db()
-  instance
+  const info = instance
     .prepare(
       `INSERT INTO flow_runs (flow_id, flow_name, dry_run, ok, error, started_at, duration_ms, activity)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -401,6 +423,7 @@ export function recordRun(run: FlowRunRecord): void {
       `DELETE FROM flow_runs WHERE id NOT IN (SELECT id FROM flow_runs ORDER BY id DESC LIMIT ?)`,
     )
     .run(RUN_LOG_LIMIT)
+  return Number(info.lastInsertRowid)
 }
 
 export function listRuns(limit = 100): FlowRunRow[] {
@@ -420,4 +443,179 @@ export function listRuns(limit = 100): FlowRunRow[] {
     }
     return { ...r, dry_run: r.dry_run === 1, ok: r.ok === 1, activity }
   })
+}
+
+// --- Schedules -----------------------------------------------------------
+
+// Cadence spec, discriminated by ScheduleRow.kind. Validated at the REST edge
+// (parseScheduleInput in flowRoutes.ts); stored as JSON in flow_schedules.spec.
+export type ScheduleKind = 'interval' | 'daily' | 'weekly' | 'once'
+export type WeekDay = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat'
+export type ScheduleSpec =
+  | { every: number; unit: 'minutes' | 'hours' } // interval
+  | { at: string } // daily, 'HH:MM'
+  | { day: WeekDay; at: string } // weekly
+  | { runAt: string } // once, ISO instant
+
+export interface ScheduleInput {
+  flow_id: number
+  name: string | null
+  kind: ScheduleKind
+  spec: ScheduleSpec
+  dry_run: boolean
+  enabled: boolean
+  next_run: string | null
+}
+
+export interface FlowSchedule {
+  id: number
+  flow_id: number
+  flow_name: string | null // joined from flows; null if the flow was deleted
+  name: string | null
+  kind: ScheduleKind
+  spec: ScheduleSpec
+  dry_run: boolean
+  enabled: boolean
+  next_run: string | null
+  last_run: string | null
+  last_run_id: number | null
+  last_run_ok: boolean | null // joined from flow_runs
+  created_at: string
+  updated_at: string
+}
+
+// Raw DB shape before booleans/JSON are decoded.
+interface ScheduleRaw {
+  id: number
+  flow_id: number
+  flow_name: string | null
+  name: string | null
+  kind: ScheduleKind
+  spec: string
+  dry_run: number
+  enabled: number
+  next_run: string | null
+  last_run: string | null
+  last_run_id: number | null
+  last_run_ok: number | null
+  created_at: string
+  updated_at: string
+}
+
+const SCHEDULE_SELECT = `
+  SELECT s.*, f.name AS flow_name, r.ok AS last_run_ok
+  FROM flow_schedules s
+  LEFT JOIN flows f ON f.id = s.flow_id
+  LEFT JOIN flow_runs r ON r.id = s.last_run_id
+`
+
+function decodeSchedule(r: ScheduleRaw): FlowSchedule {
+  let spec: ScheduleSpec
+  try {
+    spec = JSON.parse(r.spec) as ScheduleSpec
+  } catch {
+    spec = { at: '00:00' } // corrupt spec — surfaced as a harmless default
+  }
+  return {
+    id: r.id,
+    flow_id: r.flow_id,
+    flow_name: r.flow_name,
+    name: r.name,
+    kind: r.kind,
+    spec,
+    dry_run: r.dry_run === 1,
+    enabled: r.enabled === 1,
+    next_run: r.next_run,
+    last_run: r.last_run,
+    last_run_id: r.last_run_id,
+    last_run_ok: r.last_run_ok === null ? null : r.last_run_ok === 1,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  }
+}
+
+export function listSchedules(): FlowSchedule[] {
+  const rows = db()
+    .prepare(`${SCHEDULE_SELECT} ORDER BY s.enabled DESC, s.next_run ASC`)
+    .all() as ScheduleRaw[]
+  return rows.map(decodeSchedule)
+}
+
+export function getSchedule(id: number): FlowSchedule | undefined {
+  const row = db().prepare(`${SCHEDULE_SELECT} WHERE s.id = ?`).get(id) as ScheduleRaw | undefined
+  return row ? decodeSchedule(row) : undefined
+}
+
+// Schedules whose next_run has arrived, soonest first. Disabled or once-fired
+// (next_run NULL) schedules never appear.
+export function dueSchedules(nowIso: string): FlowSchedule[] {
+  const rows = db()
+    .prepare(
+      `${SCHEDULE_SELECT} WHERE s.enabled = 1 AND s.next_run IS NOT NULL AND s.next_run <= ? ORDER BY s.next_run ASC`,
+    )
+    .all(nowIso) as ScheduleRaw[]
+  return rows.map(decodeSchedule)
+}
+
+export function createSchedule(input: ScheduleInput): FlowSchedule {
+  const info = db()
+    .prepare(
+      `INSERT INTO flow_schedules (flow_id, name, kind, spec, dry_run, enabled, next_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.flow_id,
+      input.name,
+      input.kind,
+      JSON.stringify(input.spec),
+      input.dry_run ? 1 : 0,
+      input.enabled ? 1 : 0,
+      input.next_run,
+    )
+  return getSchedule(Number(info.lastInsertRowid))!
+}
+
+export function updateSchedule(
+  id: number,
+  patch: Partial<ScheduleInput>,
+): FlowSchedule | undefined {
+  const existing = getSchedule(id)
+  if (!existing) return undefined
+  db()
+    .prepare(
+      `UPDATE flow_schedules
+       SET flow_id = ?, name = ?, kind = ?, spec = ?, dry_run = ?, enabled = ?, next_run = ?,
+           updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .run(
+      patch.flow_id ?? existing.flow_id,
+      patch.name === undefined ? existing.name : patch.name,
+      patch.kind ?? existing.kind,
+      JSON.stringify(patch.spec ?? existing.spec),
+      (patch.dry_run === undefined ? existing.dry_run : patch.dry_run) ? 1 : 0,
+      (patch.enabled === undefined ? existing.enabled : patch.enabled) ? 1 : 0,
+      patch.next_run === undefined ? existing.next_run : patch.next_run,
+      id,
+    )
+  return getSchedule(id)
+}
+
+export function deleteSchedule(id: number): boolean {
+  return db().prepare('DELETE FROM flow_schedules WHERE id = ?').run(id).changes > 0
+}
+
+// Record the outcome of a fire: stamp last_run/last_run_id and roll next_run
+// forward (null + disabled for a spent one-time schedule).
+export function markScheduleFired(
+  id: number,
+  fields: { last_run: string; last_run_id: number | null; next_run: string | null; enabled: boolean },
+): void {
+  db()
+    .prepare(
+      `UPDATE flow_schedules
+       SET last_run = ?, last_run_id = ?, next_run = ?, enabled = ?, updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .run(fields.last_run, fields.last_run_id, fields.next_run, fields.enabled ? 1 : 0, id)
 }
