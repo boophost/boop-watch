@@ -207,3 +207,66 @@ export async function runFlowStream(
 
 export const listRuns = (limit = 100) =>
   fetchAuth(`/api/flows/runs?limit=${limit}`).then((r) => json<{ runs: FlowRun[] }>(r))
+
+// --- Schedules -----------------------------------------------------------
+
+export type ScheduleKind = 'interval' | 'daily' | 'weekly' | 'once'
+export type WeekDay = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat'
+export type ScheduleSpec =
+  | { every: number; unit: 'minutes' | 'hours' }
+  | { at: string }
+  | { day: WeekDay; at: string }
+  | { runAt: string }
+
+export interface FlowSchedule {
+  id: number
+  flow_id: number
+  flow_name: string | null
+  name: string | null
+  kind: ScheduleKind
+  spec: ScheduleSpec
+  dry_run: boolean
+  enabled: boolean
+  next_run: string | null
+  last_run: string | null
+  last_run_id: number | null
+  last_run_ok: boolean | null
+  created_at: string
+  updated_at: string
+}
+
+// Shape sent to POST/PUT /api/schedules. flowId + kind + spec are required on
+// create; every field is optional on update.
+export interface ScheduleInput {
+  flowId: number
+  name?: string | null
+  kind: ScheduleKind
+  spec: ScheduleSpec
+  dryRun?: boolean
+  enabled?: boolean
+}
+
+export const listSchedules = () =>
+  fetchAuth('/api/schedules').then((r) => json<{ schedules: FlowSchedule[] }>(r))
+
+export const createSchedule = (input: ScheduleInput) =>
+  fetchAuth('/api/schedules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then((r) => json<{ schedule: FlowSchedule }>(r))
+
+export const updateSchedule = (id: number, patch: Partial<ScheduleInput>) =>
+  fetchAuth(`/api/schedules/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  }).then((r) => json<{ schedule: FlowSchedule }>(r))
+
+export const deleteSchedule = (id: number) =>
+  fetchAuth(`/api/schedules/${id}`, { method: 'DELETE' }).then((r) => json<{ ok: boolean }>(r))
+
+export const runScheduleNow = (id: number) =>
+  fetchAuth(`/api/schedules/${id}/run`, { method: 'POST' }).then((r) =>
+    json<{ report: RunReport }>(r),
+  )

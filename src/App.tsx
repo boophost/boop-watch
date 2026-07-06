@@ -6,6 +6,7 @@ import Login from './pages/Login'
 import ManageLayout from './pages/manage/ManageLayout'
 import Library from './pages/manage/Library'
 import Flows from './pages/manage/Flows'
+import Schedules from './pages/manage/Schedules'
 import Activity from './pages/manage/Activity'
 import AdminSeriesDetail from './pages/SeriesDetail'
 
@@ -93,6 +94,7 @@ export default function App() {
             <Route path="series/:seriesId" element={<AdminSeriesDetail />} />
             <Route path="activity" element={<Activity />} />
             <Route path="flows" element={<Flows />} />
+            <Route path="schedules" element={<Schedules />} />
             <Route
               path="flows/:flowId"
               element={

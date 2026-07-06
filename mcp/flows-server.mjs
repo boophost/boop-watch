@@ -8,7 +8,7 @@
 // Code after a restart (MCP config is read at startup). The CLI needs no
 // restart, so it's the way to drive flows within a live session.
 
-import { flows, cfg } from './flows-client.mjs'
+import { flows, schedules, cfg } from './flows-client.mjs'
 
 // --------------------------------------------------------------------------
 // CLI mode
@@ -49,11 +49,69 @@ async function cli(argv) {
       out(report)
       return
     }
+    case 'runs': {
+      const { runs } = await flows.runs(rest[0] ? Number(rest[0]) : 100)
+      out(
+        runs
+          .map((r) => {
+            const head = `${r.ok ? 'ok ' : 'ERR'} ${r.dry_run ? '[dry] ' : ''}${r.flow_name}  (${r.duration_ms}ms)  ${r.started_at}`
+            const lines = r.activity.map((a) => `    · ${a.node}: ${a.notes.join(' | ') || a.error || ''}`)
+            return [head, ...lines].join('\n')
+          })
+          .join('\n') || '(no runs)',
+      )
+      return
+    }
+    case 'schedules': {
+      const { schedules: list } = await schedules.list()
+      out(
+        list
+          .map(
+            (s) =>
+              `#${s.id}  flow ${s.flow_id}${s.flow_name ? ` (${s.flow_name})` : ''}  ${s.kind} ${JSON.stringify(s.spec)}  ${s.dry_run ? 'dry' : 'LIVE'}  ${s.enabled ? 'on' : 'off'}  next=${s.next_run ?? '—'}`,
+          )
+          .join('\n') || '(no schedules)',
+      )
+      return
+    }
+    case 'schedule-get':
+      out(await schedules.get(rest[0]))
+      return
+    case 'schedule-create': {
+      // schedule-create <flowId> <kind> <specJson> [--live] [--disabled]
+      const [flowId, kind, specJson] = rest
+      out(
+        await schedules.create({
+          flowId: Number(flowId),
+          kind,
+          spec: JSON.parse(specJson),
+          dryRun: !rest.includes('--live'),
+          enabled: !rest.includes('--disabled'),
+        }),
+      )
+      return
+    }
+    case 'schedule-update':
+      // schedule-update <id> <patchJson>
+      out(await schedules.update(rest[0], JSON.parse(rest[1])))
+      return
+    case 'schedule-run':
+      out(await schedules.run(rest[0]))
+      return
+    case 'schedule-delete':
+      out(await schedules.remove(rest[0]))
+      return
     case 'whoami':
       out({ ...cfg(), token: cfg().token ? '(set)' : '', secret: cfg().secret ? '(set)' : '' })
       return
     default:
-      out('commands: node-types | list | get <id> | create <name> [desc] | save <id> <graph.json> | run <id> [--live] | delete <id> | whoami')
+      out(
+        'commands:\n' +
+          '  node-types | list | get <id> | create <name> [desc] | save <id> <graph.json> | run <id> [--live] | delete <id>\n' +
+          '  runs [limit]\n' +
+          '  schedules | schedule-get <id> | schedule-create <flowId> <kind> <specJson> [--live] [--disabled] | schedule-update <id> <patchJson> | schedule-run <id> | schedule-delete <id>\n' +
+          '  whoami',
+      )
       process.exit(cmd ? 1 : 0)
   }
 }
@@ -127,6 +185,75 @@ async function serve() {
       inputSchema: { id: z.number().int(), dryRun: z.boolean().optional() },
     },
     wrap(({ id, dryRun }) => flows.run(id, dryRun !== false)),
+  )
+  server.registerTool(
+    'list_runs',
+    {
+      description:
+        'Read the rolling flow activity log (most recent first): one entry per run (editor, scheduler, or MCP) with ok/dry/duration and the distilled per-node notes.',
+      inputSchema: { limit: z.number().int().optional() },
+    },
+    wrap(({ limit }) => flows.runs(limit ?? 100)),
+  )
+
+  // --- Schedules ---
+  const specSchema = z
+    .object({})
+    .passthrough()
+    .describe(
+      "cadence spec by kind: interval {every,unit:'minutes'|'hours'} | daily {at:'HH:MM'} | weekly {day:'sun'..'sat',at} | once {runAt:ISO}",
+    )
+  server.registerTool(
+    'list_schedules',
+    { description: 'List scheduled flow runs (id, flow, kind/spec, dry/live, enabled, next_run).', inputSchema: {} },
+    wrap(() => schedules.list()),
+  )
+  server.registerTool(
+    'create_schedule',
+    {
+      description:
+        'Schedule a flow to run. kind is interval|daily|weekly|once; spec shape depends on kind. dryRun defaults true, enabled defaults true.',
+      inputSchema: {
+        flowId: z.number().int(),
+        kind: z.enum(['interval', 'daily', 'weekly', 'once']),
+        spec: specSchema,
+        name: z.string().optional(),
+        dryRun: z.boolean().optional(),
+        enabled: z.boolean().optional(),
+      },
+    },
+    wrap(({ flowId, kind, spec, name, dryRun, enabled }) =>
+      schedules.create({ flowId, kind, spec, name, dryRun, enabled }),
+    ),
+  )
+  server.registerTool(
+    'update_schedule',
+    {
+      description: 'Update a schedule. Any field optional; kind+spec change together. Recomputes next_run.',
+      inputSchema: {
+        id: z.number().int(),
+        flowId: z.number().int().optional(),
+        kind: z.enum(['interval', 'daily', 'weekly', 'once']).optional(),
+        spec: specSchema.optional(),
+        name: z.string().nullable().optional(),
+        dryRun: z.boolean().optional(),
+        enabled: z.boolean().optional(),
+      },
+    },
+    wrap(({ id, ...patch }) => schedules.update(id, patch)),
+  )
+  server.registerTool(
+    'delete_schedule',
+    { description: 'Delete a schedule by id.', inputSchema: { id: z.number().int() } },
+    wrap(({ id }) => schedules.remove(id)),
+  )
+  server.registerTool(
+    'run_schedule',
+    {
+      description: "Run a schedule's flow now (uses its dry/live mode) without altering its cadence.",
+      inputSchema: { id: z.number().int() },
+    },
+    wrap(({ id }) => schedules.run(id)),
   )
 
   await server.connect(new StdioServerTransport())

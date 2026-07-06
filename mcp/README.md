@@ -37,10 +37,23 @@ node mcp/flows-server.mjs create "My flow" "description"
 node mcp/flows-server.mjs save 2 path/to/graph.json    # graph = {nodes, edges}
 node mcp/flows-server.mjs run 2                         # dry run (no side effects)
 node mcp/flows-server.mjs run 2 --live                  # real run
+node mcp/flows-server.mjs runs                          # activity log (recent runs)
+
+# Schedules — run a flow on a repeat or once. kind/spec:
+#   interval {every,unit:'minutes'|'hours'} | daily {at:'HH:MM'}
+#   weekly {day:'sun'..'sat',at} | once {runAt:ISO}. Default dry-run.
+node mcp/flows-server.mjs schedules
+node mcp/flows-server.mjs schedule-create 2 interval '{"every":30,"unit":"minutes"}'
+node mcp/flows-server.mjs schedule-create 2 weekly '{"day":"sun","at":"03:00"}' --live
+node mcp/flows-server.mjs schedule-run 5                # run its flow now
+node mcp/flows-server.mjs schedule-update 5 '{"enabled":false}'
+node mcp/flows-server.mjs schedule-delete 5
 ```
 
 ## MCP server (for Claude Code)
 
 Registered in `.mcp.json` as `boop-flows`. Claude Code reads MCP config at
 startup, so it becomes available **after a restart**. Tools: `node_types`,
-`list_flows`, `get_flow`, `create_flow`, `save_flow`, `delete_flow`, `run_flow`.
+`list_flows`, `get_flow`, `create_flow`, `save_flow`, `delete_flow`, `run_flow`,
+`list_runs` (activity log), and the scheduler: `list_schedules`,
+`create_schedule`, `update_schedule`, `delete_schedule`, `run_schedule`.
