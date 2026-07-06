@@ -65,6 +65,7 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
   enrich: 'bg-amber-400',
   combine: 'bg-emerald-400',
   sink: 'bg-rose-400',
+  boundary: 'bg-slate-400',
 }
 
 const CATEGORY_LABEL: Record<NodeCategory, string> = {
@@ -73,6 +74,7 @@ const CATEGORY_LABEL: Record<NodeCategory, string> = {
   enrich: 'Enrich',
   combine: 'Combine',
   sink: 'Sink',
+  boundary: 'Boundary',
 }
 
 const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink']
