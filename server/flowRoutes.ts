@@ -33,6 +33,31 @@ function activityFromReport(graph: FlowGraph, report: RunReport): RunActivity[] 
   return activity
 }
 
+// Run a graph and log it to the rolling activity feed. Shared by the flow-run
+// route and the per-series re-search action so both show up in the Activity tab.
+// Logging never fails the run.
+export async function runFlowAndRecord(
+  graph: FlowGraph,
+  opts: { dryRun: boolean; flowId: number | null; flowName: string },
+): Promise<RunReport> {
+  const report = await runFlow(graph, opts.dryRun)
+  try {
+    flowsDb.recordRun({
+      flow_id: opts.flowId,
+      flow_name: opts.flowName,
+      dry_run: report.dryRun,
+      ok: report.ok,
+      error: report.error ?? null,
+      started_at: report.startedAt,
+      duration_ms: report.durationMs,
+      activity: activityFromReport(graph, report),
+    })
+  } catch (logErr) {
+    console.error('failed to record flow run', logErr)
+  }
+  return report
+}
+
 function parseGraph(raw: unknown): FlowGraph | { error: string } {
   if (typeof raw !== 'object' || raw === null) return { error: 'graph must be an object' }
   const g = raw as Partial<FlowGraph>
@@ -125,8 +150,17 @@ flowRouter.delete('/api/flows/:id', (req, res) => {
 })
 
 // One run at a time — flows hit rate-limited upstreams (Jikan) and there is a
-// single admin; a second concurrent run is always a mistake.
+// single admin; a second concurrent run is always a mistake. Exported so the
+// per-series re-search shares the same lock.
 let running = false
+export function acquireFlowLock(): boolean {
+  if (running) return false
+  running = true
+  return true
+}
+export function releaseFlowLock(): void {
+  running = false
+}
 
 flowRouter.post('/api/flows/:id/run', async (req, res) => {
   const id = Number(req.params.id)
@@ -135,36 +169,19 @@ flowRouter.post('/api/flows/:id/run', async (req, res) => {
     res.status(404).json({ error: 'Flow not found' })
     return
   }
-  if (running) {
+  if (!acquireFlowLock()) {
     res.status(409).json({ error: 'A flow is already running' })
     return
   }
   const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
-  running = true
   try {
     const graph = JSON.parse(row.graph) as FlowGraph
-    const report = await runFlow(graph, dryRun)
-    // Record every run (editor or MCP) in the rolling activity log. Never let a
-    // logging failure fail the run itself.
-    try {
-      flowsDb.recordRun({
-        flow_id: row.id,
-        flow_name: row.name,
-        dry_run: report.dryRun,
-        ok: report.ok,
-        error: report.error ?? null,
-        started_at: report.startedAt,
-        duration_ms: report.durationMs,
-        activity: activityFromReport(graph, report),
-      })
-    } catch (logErr) {
-      console.error('failed to record flow run', logErr)
-    }
+    const report = await runFlowAndRecord(graph, { dryRun, flowId: row.id, flowName: row.name })
     res.json({ report })
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: e instanceof Error ? e.message : 'Run failed' })
   } finally {
-    running = false
+    releaseFlowLock()
   }
 })
