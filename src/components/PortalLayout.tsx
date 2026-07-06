@@ -3,6 +3,7 @@ import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { Chrome } from './Chrome'
 import { Icon } from './Icon'
 import { useAuth } from '@/lib/AuthContext'
+import { presenceBrowse, presenceStop } from '@/lib/presence'
 
 /** Collapse state for the side nav, remembered per browser. Lives on the shell
  * root (via data-collapsed) so both the portal and the player can share it. */
@@ -83,6 +84,27 @@ export function MobileNav() {
  * to the viewport and collapses to an icon rail (remembered per browser). */
 export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children: ReactNode }) {
   const [collapsed, setCollapsed] = useSidebarCollapsed()
+  const { user } = useAuth()
+
+  // Discord "Browsing the library" presence for opted-in users. We beat on
+  // mount and every 60s while the tab is visible; the server throttles the
+  // actual Discord posts. Intra-portal navigation remounts this shell, so we
+  // deliberately *don't* stop on unmount — the next page's beat (or the Watch
+  // page's playback beat) updates the same session in place, no flicker. Only
+  // leaving the tab (pagehide) clears the activity.
+  useEffect(() => {
+    if (!user) return
+    presenceBrowse()
+    const iv = setInterval(() => {
+      if (document.visibilityState === 'visible') presenceBrowse()
+    }, 60000)
+    const onHide = () => presenceStop()
+    window.addEventListener('pagehide', onHide)
+    return () => {
+      clearInterval(iv)
+      window.removeEventListener('pagehide', onHide)
+    }
+  }, [user])
 
   return (
     <div className="kagura shell" data-collapsed={collapsed}>

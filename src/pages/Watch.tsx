@@ -402,8 +402,10 @@ export default function Watch() {
       presenceBeat(data.id, p.currentTime || 0, d, pausedOverride ?? p.paused).catch(() => {})
     }
     presenceRef.current = send
-    const t0 = setTimeout(() => { const p = playerRef.current; if (p && !p.paused) send(false) }, 4000)
-    const iv = setInterval(() => { const p = playerRef.current; if (p && !p.paused) send(false) }, 30000)
+    // Beat regardless of play/pause state (send() reports the real paused
+    // flag) so the paused "⏸ Paused" activity stays alive within its TTL.
+    const t0 = setTimeout(() => { if (playerRef.current) send() }, 4000)
+    const iv = setInterval(() => { if (playerRef.current) send() }, 30000)
     return () => {
       clearTimeout(t0)
       clearInterval(iv)
