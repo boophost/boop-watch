@@ -30,9 +30,6 @@ export interface SeriesRow {
   studios: string | null // JSON array of names
   genres: string | null // JSON array of names
   metadata_updated_at: string | null
-  // Wide banner (AniList bannerImage) for the portal season hero. null = not yet
-  // fetched, '' = fetched but AniList had none, otherwise the URL.
-  banner_url: string | null
 }
 
 // Columns added after the original 5-field schema. Applied as additive ALTERs so
@@ -51,7 +48,6 @@ const SERIES_EXTRA_COLUMNS: [string, string][] = [
   ['studios', 'TEXT'],
   ['genres', 'TEXT'],
   ['metadata_updated_at', 'TEXT'],
-  ['banner_url', 'TEXT'],
 ]
 
 export interface SeriesMetadata {
@@ -115,6 +111,26 @@ export function getDb(): Database.Database {
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (mal_id, number)
     );
+
+    -- Candidate season-banner images per series, gathered from multiple sources
+    -- plus admin uploads. Exactly one row per mal_id is 'selected' (the one the
+    -- portal serves). Remote candidates store a url; uploads store a local_file
+    -- under DATA_DIR/banners.
+    CREATE TABLE IF NOT EXISTS series_banners (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mal_id INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      url TEXT,
+      local_file TEXT,
+      width INTEGER,
+      height INTEGER,
+      selected INTEGER NOT NULL DEFAULT 0,
+      added_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_banners_mal ON series_banners(mal_id);
+    -- Dedupe remote candidates by URL; uploads (url NULL) stay distinct since
+    -- SQLite treats NULLs as unequal in a UNIQUE index.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_banners_url ON series_banners(mal_id, url);
   `)
 
   // Additive migration for the richer metadata columns.
@@ -231,9 +247,98 @@ export function getEpisodeTitles(mal_id: number): Map<number, string> {
   return new Map(rows.filter((r) => r.title).map((r) => [r.number, r.title as string]))
 }
 
-/** Persist the AniList banner for a series (store '' to mark "fetched, none"). */
-export function setSeriesBanner(mal_id: number, banner_url: string): void {
-  getDb().prepare('UPDATE series SET banner_url = ? WHERE mal_id = ?').run(banner_url, mal_id)
+export interface BannerRow {
+  id: number
+  mal_id: number
+  source: string
+  url: string | null
+  local_file: string | null
+  width: number | null
+  height: number | null
+  selected: number
+  added_at: string
+}
+
+export function listBanners(mal_id: number): BannerRow[] {
+  return getDb()
+    .prepare('SELECT * FROM series_banners WHERE mal_id = ? ORDER BY selected DESC, id ASC')
+    .all(mal_id) as BannerRow[]
+}
+
+export function countBanners(mal_id: number): number {
+  return (
+    getDb().prepare('SELECT COUNT(*) AS c FROM series_banners WHERE mal_id = ?').get(mal_id) as {
+      c: number
+    }
+  ).c
+}
+
+export function getBanner(id: number): BannerRow | undefined {
+  return getDb().prepare('SELECT * FROM series_banners WHERE id = ?').get(id) as BannerRow | undefined
+}
+
+export function getSelectedBanner(mal_id: number): BannerRow | undefined {
+  return getDb()
+    .prepare('SELECT * FROM series_banners WHERE mal_id = ? AND selected = 1 LIMIT 1')
+    .get(mal_id) as BannerRow | undefined
+}
+
+/**
+ * Add a banner candidate. Remote candidates dedupe by URL (returns the existing
+ * row); uploads (no url) always insert. Never changes the current selection.
+ */
+export function addBanner(b: {
+  mal_id: number
+  source: string
+  url?: string | null
+  local_file?: string | null
+  width?: number | null
+  height?: number | null
+}): BannerRow {
+  const db = getDb()
+  if (b.url) {
+    const existing = db
+      .prepare('SELECT * FROM series_banners WHERE mal_id = ? AND url = ?')
+      .get(b.mal_id, b.url) as BannerRow | undefined
+    if (existing) return existing
+  }
+  const info = db
+    .prepare(
+      `INSERT INTO series_banners (mal_id, source, url, local_file, width, height)
+       VALUES (@mal_id, @source, @url, @local_file, @width, @height)`,
+    )
+    .run({
+      mal_id: b.mal_id,
+      source: b.source,
+      url: b.url ?? null,
+      local_file: b.local_file ?? null,
+      width: b.width ?? null,
+      height: b.height ?? null,
+    })
+  return getBanner(Number(info.lastInsertRowid))!
+}
+
+/** Make one candidate the selected banner for its series (clears the rest). */
+export function selectBanner(mal_id: number, bannerId: number): boolean {
+  const db = getDb()
+  const row = db
+    .prepare('SELECT id FROM series_banners WHERE id = ? AND mal_id = ?')
+    .get(bannerId, mal_id) as { id: number } | undefined
+  if (!row) return false
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE series_banners SET selected = 0 WHERE mal_id = ?').run(mal_id)
+    db.prepare('UPDATE series_banners SET selected = 1 WHERE id = ?').run(bannerId)
+  })
+  tx()
+  return true
+}
+
+/** Delete a candidate; returns the deleted row (so callers can drop its file). */
+export function deleteBanner(mal_id: number, bannerId: number): BannerRow | undefined {
+  const row = getBanner(bannerId)
+  if (!row || row.mal_id !== mal_id) return undefined
+  getDb().prepare('DELETE FROM series_banners WHERE id = ?').run(bannerId)
+  return row
 }
 
 export function upsertEpisodes(mal_id: number, episodes: EpisodeRow[]): void {

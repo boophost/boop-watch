@@ -2756,6 +2756,7 @@ const portalSink: NodeImpl = {
         image_url: (item.image_url ?? existing?.image_url ?? null) as string | null,
         backdrop_url: (item.backdrop_url ?? existing?.backdrop_url ?? null) as string | null,
         has_backdrop: (item.has_backdrop ?? existing?.has_backdrop ?? 0) as number | null,
+        mal_id: (item.mal_id ?? existing?.mal_id ?? null) as number | null,
       }
       if (!ctx.dryRun) upsertPortalItem(row)
       written.push(item)
