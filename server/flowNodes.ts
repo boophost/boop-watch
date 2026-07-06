@@ -1345,10 +1345,17 @@ const torrentSearch: NodeImpl = {
             : await toshoCandidates(q, base)
 
         let relevant: Candidate[]
-        if (haveAid && raw.some((c) => c.aid === knownAid)) {
-          // Exact season match — discard everything else, including
-          // higher-seeded releases of adjacent seasons.
+        if (haveAid) {
+          // We know the exact AniDB season id → trust it strictly. Keep only
+          // that season's releases, discarding everything else (adjacent seasons
+          // share the title). If none exist yet — e.g. no dual-audio release of
+          // this season has been posted — this is empty and the item exits
+          // "missed", never a different season. Grabbing e.g. Frieren S2 for an
+          // S1 upgrade would overwrite S1 (episode numbers reset per season).
           relevant = raw.filter((c) => c.aid === knownAid)
+          if (relevant.length === 0 && raw.length > 0) {
+            ctx.notes.push(`no season-${knownAid} releases for "${q}" (${raw.length} other-season results ignored)`)
+          }
         } else {
           // No AniDB id (unknown status, or TsukiHime provider): anchor on the
           // most title-relevant release, then trust its AniDB id to gather that
