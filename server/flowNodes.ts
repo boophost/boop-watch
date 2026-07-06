@@ -1065,6 +1065,10 @@ interface Candidate {
   isBatch: boolean
   episode: number | null
   aid: number | null // AniDB series id (AnimeTosho) — canonical show identity
+  // Provider's canonical *per-season* id, used to pin the exact season (they
+  // share titles): AnimeTosho's AniDB aid, or TsukiHime's anime.id. TsukiHime is
+  // the more reliable of the two — AnimeTosho occasionally mis-tags a season.
+  pinId: number | null
   seriesTitle: string | null // AnimeTosho canonical series title
 }
 
@@ -1128,6 +1132,7 @@ async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
         isBatch: Boolean(r.is_batch) || titleIsBatch(title),
         episode: parseEpisode(title),
         aid: series?.anidb_aid != null ? Number(series.anidb_aid) : null,
+        pinId: series?.anidb_aid != null ? Number(series.anidb_aid) : null,
         seriesTitle: series?.title != null ? String(series.title) : null,
       }
     })
@@ -1144,6 +1149,10 @@ async function tsukiCandidates(q: string, base: string): Promise<Candidate[]> {
       const hash = String(r.btih)
       const audio = Array.isArray(r.audiolangs) ? (r.audiolangs as string[]) : []
       const ep = r.episode_no != null ? Number(r.episode_no) : parseEpisode(title)
+      // TsukiHime tags each release with its per-season anime entry (id +
+      // titles), so "Frieren S1" (id 19) and "Frieren 2nd Season" (id 284) are
+      // distinguishable even though the release names both say "Frieren".
+      const anime = (r.anime ?? null) as { id?: number; title?: string } | null
       return {
         name: title || q,
         magnet: magnetFromHash(hash, title || q),
@@ -1156,7 +1165,8 @@ async function tsukiCandidates(q: string, base: string): Promise<Candidate[]> {
         isBatch: r.episode_no == null && (titleIsBatch(title) || Number(r.filecount ?? 0) > 2),
         episode: ep,
         aid: null,
-        seriesTitle: null,
+        pinId: anime?.id != null ? Number(anime.id) : null,
+        seriesTitle: anime?.title != null ? String(anime.title) : null,
       }
     })
 }
@@ -1331,12 +1341,12 @@ const torrentSearch: NodeImpl = {
       const titleNorm = norm(showTitle)
       const qTokens = significantTokens(showTitle + ' ' + q)
 
-      // Authoritative AniDB season id (set by the Anime status node from the
-      // MAL id). AnimeTosho tags every release with series.anidb_aid, so this
-      // pins the exact season — the only reliable way to tell e.g. Frieren S1
-      // (aid 17617) from S2 (aid 18886), which share a title.
-      const knownAid = Number(item.anidb_id)
-      const haveAid = Number.isFinite(knownAid) && knownAid > 0
+      // Authoritative per-season id (set by the Anime status node from the MAL
+      // id). Each provider tags releases with its own canonical id — AnimeTosho's
+      // AniDB aid, TsukiHime's anime.id — so this pins the exact season, the only
+      // reliable way to tell e.g. Frieren S1 from S2, which share a title.
+      const knownPin = provider === 'tsukihime' ? Number(item.tsuki_id) : Number(item.anidb_id)
+      const havePin = Number.isFinite(knownPin) && knownPin > 0
 
       try {
         const raw =
@@ -1345,20 +1355,21 @@ const torrentSearch: NodeImpl = {
             : await toshoCandidates(q, base)
 
         let relevant: Candidate[]
-        if (haveAid) {
-          // We know the exact AniDB season id → trust it strictly. Keep only
-          // that season's releases, discarding everything else (adjacent seasons
-          // share the title). If none exist yet — e.g. no dual-audio release of
-          // this season has been posted — this is empty and the item exits
-          // "missed", never a different season. Grabbing e.g. Frieren S2 for an
-          // S1 upgrade would overwrite S1 (episode numbers reset per season).
-          relevant = raw.filter((c) => c.aid === knownAid)
+        // Only trust the pin when the results actually carry ids (a provider can
+        // return untagged releases); otherwise fall through to title relevance.
+        if (havePin && raw.some((c) => c.pinId != null)) {
+          // Keep only this season's releases, discarding everything else. If none
+          // exist yet — e.g. no dual-audio release of this season is posted — this
+          // is empty and the item exits "missed", never a different season.
+          // Grabbing e.g. Frieren S2 for an S1 upgrade would overwrite S1
+          // (episode numbers reset per season).
+          relevant = raw.filter((c) => c.pinId === knownPin)
           if (relevant.length === 0 && raw.length > 0) {
-            ctx.notes.push(`no season-${knownAid} releases for "${q}" (${raw.length} other-season results ignored)`)
+            ctx.notes.push(`no season-${knownPin} releases for "${q}" (${raw.length} other-season results ignored)`)
           }
         } else {
-          // No AniDB id (unknown status, or TsukiHime provider): anchor on the
-          // most title-relevant release, then trust its AniDB id to gather that
+          // No season id (unknown status, or an untagged result set): anchor on
+          // the most title-relevant release, then trust its id to gather that
           // show's other releases (English + romaji variants).
           let best = { c: null as Candidate | null, rel: 0 }
           for (const c of raw) {
@@ -1367,8 +1378,8 @@ const torrentSearch: NodeImpl = {
           }
           relevant =
             best.c && best.rel >= minTitleMatch
-              ? best.c.aid != null
-                ? raw.filter((c) => c.aid === best.c!.aid)
+              ? best.c.pinId != null
+                ? raw.filter((c) => c.pinId === best.c!.pinId)
                 : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
               : []
         }
@@ -1469,9 +1480,13 @@ const animeStatus: NodeImpl = {
           total_episodes: a.total_episodes ?? null,
           is_movie: isMovie,
           want_mode: wantMode,
-          // Authoritative AniDB id for this exact season — lets torrent search
-          // disambiguate seasons that share a title (Frieren S1 vs S2).
+          // Authoritative per-season ids — let torrent search disambiguate
+          // seasons that share a title (Frieren S1 vs S2). anidb_id pins
+          // AnimeTosho; tsuki_id (TsukiHime's own anime.id) pins TsukiHime, which
+          // tags seasons more reliably than AnimeTosho does.
           anidb_id: a.anidb != null ? Number(a.anidb) : null,
+          tsuki_id: a.id != null ? Number(a.id) : null,
+          anilist_id: a.anilist != null ? Number(a.anilist) : null,
         })
       } catch {
         // Unknown status → default to batch downstream, but route separately.

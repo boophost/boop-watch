@@ -137,7 +137,10 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
     { id: 'upDed', type: 'filter.dedupe', position: { x: 3120, y: 680 }, config: { field: 'mal_id' } },
     { id: 'status', type: 'enrich.anime-status', position: { x: 3380, y: 680 }, config: { malField: 'mal_id', maxItems: 0 } },
     { id: 'upTpl', type: 'transform.template', position: { x: 3640, y: 680 }, config: { field: 'torrent_query', template: '{title_english} 1080p' } },
-    { id: 'search', type: 'enrich.torrent-search', position: { x: 3900, y: 680 }, config: { provider: 'animetosho', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: true, minSeeders: 1, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
+    // TsukiHime: it tags each release with its per-season anime id (so the
+    // season pin is reliable) and structured audio langs (so dual-audio is
+    // detected without title-guessing). It reports no seeders, so minSeeders=0.
+    { id: 'search', type: 'enrich.torrent-search', position: { x: 3900, y: 680 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: true, minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
     { id: 'upQb', type: 'sink.qbittorrent', position: { x: 4160, y: 680 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
     // Import path (best-per-episode winners + unmatched files).
     { id: 'preSub', type: 'combine.merge', position: { x: 2860, y: 220 }, config: {} },
