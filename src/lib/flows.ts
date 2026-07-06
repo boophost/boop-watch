@@ -151,5 +151,59 @@ export const runFlow = (id: number, dryRun: boolean) =>
     body: JSON.stringify({ dryRun }),
   }).then((r) => json<{ report: RunReport }>(r))
 
+/** One streamed progress event from POST /api/flows/:id/run/stream. */
+export type RunStreamEvent =
+  | { type: 'start'; id: string }
+  | { type: 'node'; id: string; report: NodeReport }
+  | { type: 'done'; report: RunReport }
+  | { type: 'error'; error: string }
+
+/**
+ * Run a flow and receive live per-node progress. Calls `onEvent` for each
+ * node as it starts/finishes; resolves with the final RunReport. Falls back to
+ * throwing on transport/HTTP errors like the other helpers.
+ */
+export async function runFlowStream(
+  id: number,
+  dryRun: boolean,
+  onEvent: (ev: RunStreamEvent) => void,
+): Promise<RunReport> {
+  const res = await fetchAuth(`/api/flows/${id}/run/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dryRun }),
+  })
+  if (!res.ok || !res.body) {
+    // Non-stream error (e.g. 409 already running, 404) — parse it like the rest.
+    await json<unknown>(res)
+    throw new Error(`Request failed (${res.status})`)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let final: RunReport | null = null
+  const handleLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    const ev = JSON.parse(trimmed) as RunStreamEvent
+    if (ev.type === 'done') final = ev.report
+    if (ev.type === 'error') throw new Error(ev.error)
+    onEvent(ev)
+  }
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let nl: number
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      handleLine(buffer.slice(0, nl))
+      buffer = buffer.slice(nl + 1)
+    }
+  }
+  if (buffer.trim()) handleLine(buffer)
+  if (!final) throw new Error('Run ended without a final report')
+  return final
+}
+
 export const listRuns = (limit = 100) =>
   fetchAuth(`/api/flows/runs?limit=${limit}`).then((r) => json<{ runs: FlowRun[] }>(r))

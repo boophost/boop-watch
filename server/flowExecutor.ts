@@ -90,7 +90,19 @@ function topoOrder(graph: FlowGraph): FlowNode[] | null {
   return order.length === graph.nodes.length ? order : null
 }
 
-export async function runFlow(graph: FlowGraph, dryRun: boolean): Promise<RunReport> {
+/** Live per-node progress callbacks, fired as the executor walks the graph. */
+export interface RunHooks {
+  /** A node is about to run (after its inputs are gathered). */
+  onNodeStart?: (nodeId: string) => void
+  /** A node finished (ok, error, or skipped); its report is final. */
+  onNodeDone?: (nodeId: string, report: NodeReport) => void
+}
+
+export async function runFlow(
+  graph: FlowGraph,
+  dryRun: boolean,
+  hooks?: RunHooks,
+): Promise<RunReport> {
   const startedAt = new Date().toISOString()
   const t0 = Date.now()
   const reports: Record<string, NodeReport> = {}
@@ -120,8 +132,11 @@ export async function runFlow(graph: FlowGraph, dryRun: boolean): Promise<RunRep
         samples: {},
         notes: ['skipped: upstream node failed'],
       }
+      hooks?.onNodeDone?.(node.id, reports[node.id])
       continue
     }
+
+    hooks?.onNodeStart?.(node.id)
 
     const inputs: Record<string, FlowItem[]> = {}
     for (const port of impl.spec.inputs) inputs[port.id] = []
@@ -155,6 +170,7 @@ export async function runFlow(graph: FlowGraph, dryRun: boolean): Promise<RunRep
         error: e instanceof Error ? e.message : String(e),
       }
     }
+    hooks?.onNodeDone?.(node.id, reports[node.id])
   }
 
   const ok = Object.values(reports).every((r) => r.status === 'ok')
