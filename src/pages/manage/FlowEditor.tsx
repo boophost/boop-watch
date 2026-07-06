@@ -20,12 +20,15 @@ import '@xyflow/react/dist/style.css'
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
   ChevronLeft,
+  ChevronRight,
   Copy,
   Loader2,
   Play,
   Plus,
   Save,
+  Search,
   Trash2,
   Unlink,
   X,
@@ -62,6 +65,130 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
   enrich: 'bg-amber-400',
   combine: 'bg-emerald-400',
   sink: 'bg-rose-400',
+}
+
+const CATEGORY_LABEL: Record<NodeCategory, string> = {
+  source: 'Source',
+  filter: 'Filter',
+  enrich: 'Enrich',
+  combine: 'Combine',
+  sink: 'Sink',
+}
+
+const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink']
+
+/** Categories collapsed by default in the add-node picker (largest / less common first picks). */
+const DEFAULT_COLLAPSED: ReadonlySet<NodeCategory> = new Set(['enrich', 'sink'])
+
+function matchesNodeSearch(spec: NodeSpec, query: string): boolean {
+  if (!query) return true
+  const q = query.toLowerCase()
+  return (
+    spec.label.toLowerCase().includes(q) ||
+    spec.description.toLowerCase().includes(q) ||
+    spec.type.toLowerCase().includes(q)
+  )
+}
+
+function groupSpecs(specs: NodeSpec[], query: string) {
+  return NODE_CATEGORIES.map((category) => ({
+    category,
+    specs: specs.filter((s) => s.category === category && matchesNodeSearch(s, query)),
+  })).filter((g) => g.specs.length > 0)
+}
+
+/** Shared add-node palette: search + collapsible category folders. */
+function NodePicker({
+  specs,
+  onSelect,
+  compact = false,
+}: {
+  specs: NodeSpec[]
+  onSelect: (spec: NodeSpec) => void
+  compact?: boolean
+}) {
+  const [query, setQuery] = useState('')
+  const [collapsed, setCollapsed] = useState<Set<NodeCategory>>(() => new Set(DEFAULT_COLLAPSED))
+
+  const grouped = useMemo(() => groupSpecs(specs, query), [specs, query])
+  const searching = query.trim().length > 0
+
+  const isCollapsed = (category: NodeCategory) => !searching && collapsed.has(category)
+
+  const toggleCategory = (category: NodeCategory) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(category)) next.delete(category)
+      else next.add(category)
+      return next
+    })
+  }
+
+  return (
+    <div className="flex flex-col">
+      <div className="sticky top-0 z-10 border-b border-border bg-popover p-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by name or description…"
+            className="h-8 pl-8 text-sm"
+            autoFocus
+            onKeyDown={(e) => e.stopPropagation()}
+          />
+        </div>
+      </div>
+      <div className={compact ? 'max-h-64 overflow-auto' : 'max-h-72 overflow-auto'}>
+        {grouped.length === 0 ? (
+          <p className="px-2 py-4 text-center text-xs text-muted-foreground">No matching nodes</p>
+        ) : (
+          grouped.map((g) => (
+            <div key={g.category}>
+              <button
+                type="button"
+                className="flex w-full items-center gap-1.5 px-2 pb-0.5 pt-2 text-left text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                onClick={() => toggleCategory(g.category)}
+              >
+                {isCollapsed(g.category) ? (
+                  <ChevronRight className="size-3 shrink-0" />
+                ) : (
+                  <ChevronDown className="size-3 shrink-0" />
+                )}
+                {CATEGORY_LABEL[g.category]}
+                <span className="ml-auto tabular-nums">{g.specs.length}</span>
+              </button>
+              {!isCollapsed(g.category)
+                ? g.specs.map((s) => (
+                    <button
+                      key={s.type}
+                      type="button"
+                      role="menuitem"
+                      className={
+                        compact
+                          ? 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted'
+                          : 'flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted'
+                      }
+                      onClick={() => onSelect(s)}
+                    >
+                      <span className="flex items-center gap-2 text-sm">
+                        <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
+                        {s.label}
+                      </span>
+                      {!compact ? (
+                        <span className="line-clamp-2 text-[11px] text-muted-foreground">
+                          {s.description}
+                        </span>
+                      ) : null}
+                    </button>
+                  ))
+                : null}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
 }
 
 let specLookup: Map<string, NodeSpec> = new Map()
@@ -405,13 +532,6 @@ function FlowEditorInner() {
     }
   }
 
-  const grouped = useMemo(() => {
-    const cats: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink']
-    return cats
-      .map((c) => ({ category: c, specs: specs.filter((s) => s.category === c) }))
-      .filter((g) => g.specs.length > 0)
-  }, [specs])
-
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center">
@@ -465,30 +585,8 @@ function FlowEditorInner() {
                   aria-label="Close node palette"
                   onClick={() => setPaletteOpen(false)}
                 />
-                <div className="fixed inset-x-3 top-28 z-30 max-h-96 overflow-auto rounded-md border border-border bg-popover p-1 shadow-md sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-1 sm:w-64">
-                {grouped.map((g) => (
-                  <div key={g.category}>
-                    <p className="px-2 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                      {g.category}
-                    </p>
-                    {g.specs.map((s) => (
-                      <button
-                        key={s.type}
-                        type="button"
-                        className="flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted"
-                        onClick={() => addNode(s)}
-                      >
-                        <span className="flex items-center gap-2 text-sm">
-                          <span className={`size-2 rounded-full ${CATEGORY_DOT[s.category]}`} />
-                          {s.label}
-                        </span>
-                        <span className="line-clamp-2 text-[11px] text-muted-foreground">
-                          {s.description}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                ))}
+                <div className="fixed inset-x-3 top-28 z-30 overflow-hidden rounded-md border border-border bg-popover shadow-md sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-1 sm:w-72">
+                  <NodePicker specs={specs} onSelect={addNode} />
                 </div>
               </>
             ) : null}
@@ -570,35 +668,26 @@ function FlowEditorInner() {
               }}
             />
             <div
-              className="fixed z-40 w-56 rounded-md border border-border bg-popover p-1 shadow-md"
+              className={`fixed z-40 overflow-hidden rounded-md border border-border bg-popover shadow-md ${
+                menu.kind === 'pane' ? 'w-72' : 'w-56 p-1'
+              }`}
               style={{
-                left: Math.min(menu.x, window.innerWidth - 232),
-                top: Math.min(menu.y, window.innerHeight - (menu.kind === 'pane' ? 340 : 120)),
+                left: Math.min(menu.x, window.innerWidth - (menu.kind === 'pane' ? 296 : 232)),
+                top: Math.min(menu.y, window.innerHeight - (menu.kind === 'pane' ? 380 : 120)),
               }}
               role="menu"
             >
               {menu.kind === 'pane' ? (
-                <div className="max-h-80 overflow-auto">
-                  <p className="px-2 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                <>
+                  <p className="px-3 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                     Add node here
                   </p>
-                  {grouped.map((g) =>
-                    g.specs.map((s) => (
-                      <button
-                        key={s.type}
-                        type="button"
-                        role="menuitem"
-                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
-                        onClick={() =>
-                          addNode(s, screenToFlowPosition({ x: menu.x, y: menu.y }))
-                        }
-                      >
-                        <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
-                        {s.label}
-                      </button>
-                    )),
-                  )}
-                </div>
+                  <NodePicker
+                    specs={specs}
+                    compact
+                    onSelect={(s) => addNode(s, screenToFlowPosition({ x: menu.x, y: menu.y }))}
+                  />
+                </>
               ) : menu.kind === 'node' ? (
                 <>
                   <button
