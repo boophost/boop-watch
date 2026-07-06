@@ -36,6 +36,20 @@ function db() {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      -- Rolling activity log: one row per flow run (editor or MCP), pruned to
+      -- the most recent RUN_LOG_LIMIT. activity is a distilled JSON array of the
+      -- meaningful per-node notes (metadata writes, downloads, imports, …).
+      CREATE TABLE IF NOT EXISTS flow_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        flow_id INTEGER,
+        flow_name TEXT NOT NULL,
+        dry_run INTEGER NOT NULL DEFAULT 0,
+        ok INTEGER NOT NULL DEFAULT 1,
+        error TEXT,
+        started_at TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        activity TEXT NOT NULL DEFAULT '[]'
+      );
     `)
     ready = true
     seedFlows(instance)
@@ -293,4 +307,84 @@ export function updateFlow(
 
 export function deleteFlow(id: number): boolean {
   return db().prepare('DELETE FROM flows WHERE id = ?').run(id).changes > 0
+}
+
+// --- Activity log --------------------------------------------------------
+
+// One node's contribution to a run, as shown in the activity feed.
+export interface RunActivity {
+  node: string // human label, e.g. "Import to library"
+  type: string // node type, e.g. "sink.library-import"
+  status: 'ok' | 'error' | 'skipped'
+  notes: string[]
+  error?: string
+}
+
+export interface FlowRunRecord {
+  flow_id: number | null
+  flow_name: string
+  dry_run: boolean
+  ok: boolean
+  error: string | null
+  started_at: string
+  duration_ms: number
+  activity: RunActivity[]
+}
+
+export interface FlowRunRow {
+  id: number
+  flow_id: number | null
+  flow_name: string
+  dry_run: boolean
+  ok: boolean
+  error: string | null
+  started_at: string
+  duration_ms: number
+  activity: RunActivity[]
+}
+
+const RUN_LOG_LIMIT = 200
+
+export function recordRun(run: FlowRunRecord): void {
+  const instance = db()
+  instance
+    .prepare(
+      `INSERT INTO flow_runs (flow_id, flow_name, dry_run, ok, error, started_at, duration_ms, activity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      run.flow_id,
+      run.flow_name,
+      run.dry_run ? 1 : 0,
+      run.ok ? 1 : 0,
+      run.error,
+      run.started_at,
+      Math.round(run.duration_ms),
+      JSON.stringify(run.activity),
+    )
+  // Keep the log rolling: drop everything past the newest RUN_LOG_LIMIT rows.
+  instance
+    .prepare(
+      `DELETE FROM flow_runs WHERE id NOT IN (SELECT id FROM flow_runs ORDER BY id DESC LIMIT ?)`,
+    )
+    .run(RUN_LOG_LIMIT)
+}
+
+export function listRuns(limit = 100): FlowRunRow[] {
+  const rows = db()
+    .prepare('SELECT * FROM flow_runs ORDER BY id DESC LIMIT ?')
+    .all(Math.max(1, Math.min(limit, RUN_LOG_LIMIT))) as (Omit<FlowRunRow, 'dry_run' | 'ok' | 'activity'> & {
+    dry_run: number
+    ok: number
+    activity: string
+  })[]
+  return rows.map((r) => {
+    let activity: RunActivity[] = []
+    try {
+      activity = JSON.parse(r.activity) as RunActivity[]
+    } catch {
+      /* corrupt activity JSON — surfaced as empty */
+    }
+    return { ...r, dry_run: r.dry_run === 1, ok: r.ok === 1, activity }
+  })
 }
