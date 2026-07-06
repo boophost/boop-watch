@@ -4,6 +4,7 @@ import { Icon } from '@/components/Icon'
 import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
 import { getTitle, imgUrl, backdropUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
 import { useAuth } from '@/lib/AuthContext'
+import { track } from '@/lib/analytics'
 
 const initials = (n: string) =>
   String(n || '?').split(/[^a-z0-9]/i).filter(Boolean).slice(0, 2).map((s) => s[0]).join('').toUpperCase()
@@ -34,6 +35,7 @@ function DetailShell({
       } else {
         await saveAnime(id)
         setIsSaved(true)
+        track('title_saved', { item_id: id, auth_state: 'authenticated' })
       }
     } catch (e) {
       console.error('Failed to toggle save', e)

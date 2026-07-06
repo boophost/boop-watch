@@ -207,3 +207,116 @@ export async function runFlowStream(
 
 export const listRuns = (limit = 100) =>
   fetchAuth(`/api/flows/runs?limit=${limit}`).then((r) => json<{ runs: FlowRun[] }>(r))
+
+// Live activity stream events (GET /api/flows/runs/stream). `snapshot` arrives
+// first, then run lifecycle events as they happen; `ping` is a keepalive.
+export type ActivityStreamEvent =
+  | { type: 'snapshot'; runs: FlowRun[] }
+  | { type: 'start'; runToken: string; flowId: number | null; flowName: string; dryRun: boolean; startedAt: string }
+  | { type: 'node-start'; runToken: string; nodeId: string }
+  | {
+      type: 'node'
+      runToken: string
+      nodeId: string
+      node: string
+      nodeType: string
+      status: 'ok' | 'error' | 'skipped'
+      notes: string[]
+      error?: string
+    }
+  | { type: 'done'; runToken: string; run: FlowRun }
+  | { type: 'aborted'; runToken: string; error: string }
+  | { type: 'ping' }
+
+// Subscribe to the live activity feed. Calls `onEvent` per event until the
+// stream ends or `signal` aborts; throws on transport/HTTP errors so the caller
+// can reconnect.
+export async function streamActivity(
+  onEvent: (ev: ActivityStreamEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const res = await fetchAuth('/api/flows/runs/stream', { signal })
+  if (!res.ok || !res.body) throw new Error(`Request failed (${res.status})`)
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  const handleLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    onEvent(JSON.parse(trimmed) as ActivityStreamEvent)
+  }
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let nl: number
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      handleLine(buffer.slice(0, nl))
+      buffer = buffer.slice(nl + 1)
+    }
+  }
+  if (buffer.trim()) handleLine(buffer)
+}
+
+// --- Schedules -----------------------------------------------------------
+
+export type ScheduleKind = 'interval' | 'daily' | 'weekly' | 'once'
+export type WeekDay = 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat'
+export type ScheduleSpec =
+  | { every: number; unit: 'minutes' | 'hours' }
+  | { at: string }
+  | { day: WeekDay; at: string }
+  | { runAt: string }
+
+export interface FlowSchedule {
+  id: number
+  flow_id: number
+  flow_name: string | null
+  name: string | null
+  kind: ScheduleKind
+  spec: ScheduleSpec
+  dry_run: boolean
+  enabled: boolean
+  next_run: string | null
+  last_run: string | null
+  last_run_id: number | null
+  last_run_ok: boolean | null
+  created_at: string
+  updated_at: string
+}
+
+// Shape sent to POST/PUT /api/schedules. flowId + kind + spec are required on
+// create; every field is optional on update.
+export interface ScheduleInput {
+  flowId: number
+  name?: string | null
+  kind: ScheduleKind
+  spec: ScheduleSpec
+  dryRun?: boolean
+  enabled?: boolean
+}
+
+export const listSchedules = () =>
+  fetchAuth('/api/schedules').then((r) => json<{ schedules: FlowSchedule[] }>(r))
+
+export const createSchedule = (input: ScheduleInput) =>
+  fetchAuth('/api/schedules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }).then((r) => json<{ schedule: FlowSchedule }>(r))
+
+export const updateSchedule = (id: number, patch: Partial<ScheduleInput>) =>
+  fetchAuth(`/api/schedules/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  }).then((r) => json<{ schedule: FlowSchedule }>(r))
+
+export const deleteSchedule = (id: number) =>
+  fetchAuth(`/api/schedules/${id}`, { method: 'DELETE' }).then((r) => json<{ ok: boolean }>(r))
+
+export const runScheduleNow = (id: number) =>
+  fetchAuth(`/api/schedules/${id}/run`, { method: 'POST' }).then((r) =>
+    json<{ report: RunReport }>(r),
+  )
