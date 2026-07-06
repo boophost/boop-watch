@@ -676,9 +676,7 @@ export default function SeriesDetail() {
           <div className="mb-4">
             <h2 className="text-lg font-semibold">Downloads</h2>
             <p className="text-xs text-muted-foreground">
-              Torrents in qBittorrent — the source releases (and any dual-audio donor
-              kept for muxing), not the library files. See “Library file” per episode
-              below for what’s actually on the server.
+              qBittorrent sources — not the library files below.
             </p>
           </div>
           {!dl ? (
@@ -692,10 +690,7 @@ export default function SeriesDetail() {
               qBittorrent: {dl.qbitError}
             </p>
           ) : dl.torrents.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No downloads for this series. The “Missing videos” flow queues them
-              in qBittorrent.
-            </p>
+            <p className="text-sm text-muted-foreground">No active torrents.</p>
           ) : (
             <ul className="space-y-3">
               {dl.torrents.map((t) => {
