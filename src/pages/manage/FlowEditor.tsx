@@ -37,6 +37,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   getFlow,
+  getFlowComponents,
+  getFlowInterface,
   getNodeTypes,
   saveFlow,
   runFlowStream,
@@ -45,6 +47,7 @@ import {
   type FlowGraph,
   type RunReport,
   type NodeReport,
+  type ComponentInterface,
 } from '@/lib/flows'
 
 // ---- graph <-> React Flow conversion ---------------------------------------
@@ -99,29 +102,39 @@ function groupSpecs(specs: NodeSpec[], query: string) {
   })).filter((g) => g.specs.length > 0)
 }
 
+/** Synthetic key for the collapsible "Custom" folder, tracked alongside NodeCategory keys. */
+const CUSTOM_FOLDER = 'custom' as const
+type FolderKey = NodeCategory | typeof CUSTOM_FOLDER
+
 /** Shared add-node palette: search + collapsible category folders. */
 function NodePicker({
   specs,
+  components = [],
   onSelect,
   compact = false,
 }: {
   specs: NodeSpec[]
+  components?: NodeSpec[]
   onSelect: (spec: NodeSpec) => void
   compact?: boolean
 }) {
   const [query, setQuery] = useState('')
-  const [collapsed, setCollapsed] = useState<Set<NodeCategory>>(() => new Set(DEFAULT_COLLAPSED))
+  const [collapsed, setCollapsed] = useState<Set<FolderKey>>(() => new Set(DEFAULT_COLLAPSED))
 
   const grouped = useMemo(() => groupSpecs(specs, query), [specs, query])
+  const matchedComponents = useMemo(
+    () => components.filter((s) => matchesNodeSearch(s, query)),
+    [components, query],
+  )
   const searching = query.trim().length > 0
 
-  const isCollapsed = (category: NodeCategory) => !searching && collapsed.has(category)
+  const isCollapsed = (folder: FolderKey) => !searching && collapsed.has(folder)
 
-  const toggleCategory = (category: NodeCategory) => {
+  const toggleCategory = (folder: FolderKey) => {
     setCollapsed((prev) => {
       const next = new Set(prev)
-      if (next.has(category)) next.delete(category)
-      else next.add(category)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
       return next
     })
   }
@@ -142,51 +155,95 @@ function NodePicker({
         </div>
       </div>
       <div className={compact ? 'max-h-64 overflow-auto' : 'max-h-72 overflow-auto'}>
-        {grouped.length === 0 ? (
+        {grouped.length === 0 && matchedComponents.length === 0 ? (
           <p className="px-2 py-4 text-center text-xs text-muted-foreground">No matching nodes</p>
         ) : (
-          grouped.map((g) => (
-            <div key={g.category}>
-              <button
-                type="button"
-                className="flex w-full items-center gap-1.5 px-2 pb-0.5 pt-2 text-left text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
-                onClick={() => toggleCategory(g.category)}
-              >
-                {isCollapsed(g.category) ? (
-                  <ChevronRight className="size-3 shrink-0" />
-                ) : (
-                  <ChevronDown className="size-3 shrink-0" />
-                )}
-                {CATEGORY_LABEL[g.category]}
-                <span className="ml-auto tabular-nums">{g.specs.length}</span>
-              </button>
-              {!isCollapsed(g.category)
-                ? g.specs.map((s) => (
-                    <button
-                      key={s.type}
-                      type="button"
-                      role="menuitem"
-                      className={
-                        compact
-                          ? 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted'
-                          : 'flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted'
-                      }
-                      onClick={() => onSelect(s)}
-                    >
-                      <span className="flex items-center gap-2 text-sm">
-                        <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
-                        {s.label}
-                      </span>
-                      {!compact ? (
-                        <span className="line-clamp-2 text-[11px] text-muted-foreground">
-                          {s.description}
+          <>
+            {grouped.map((g) => (
+              <div key={g.category}>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 px-2 pb-0.5 pt-2 text-left text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                  onClick={() => toggleCategory(g.category)}
+                >
+                  {isCollapsed(g.category) ? (
+                    <ChevronRight className="size-3 shrink-0" />
+                  ) : (
+                    <ChevronDown className="size-3 shrink-0" />
+                  )}
+                  {CATEGORY_LABEL[g.category]}
+                  <span className="ml-auto tabular-nums">{g.specs.length}</span>
+                </button>
+                {!isCollapsed(g.category)
+                  ? g.specs.map((s) => (
+                      <button
+                        key={s.type}
+                        type="button"
+                        role="menuitem"
+                        className={
+                          compact
+                            ? 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted'
+                            : 'flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted'
+                        }
+                        onClick={() => onSelect(s)}
+                      >
+                        <span className="flex items-center gap-2 text-sm">
+                          <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
+                          {s.label}
                         </span>
-                      ) : null}
-                    </button>
-                  ))
-                : null}
-            </div>
-          ))
+                        {!compact ? (
+                          <span className="line-clamp-2 text-[11px] text-muted-foreground">
+                            {s.description}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))
+                  : null}
+              </div>
+            ))}
+            {matchedComponents.length > 0 ? (
+              <div key={CUSTOM_FOLDER}>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 px-2 pb-0.5 pt-2 text-left text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                  onClick={() => toggleCategory(CUSTOM_FOLDER)}
+                >
+                  {isCollapsed(CUSTOM_FOLDER) ? (
+                    <ChevronRight className="size-3 shrink-0" />
+                  ) : (
+                    <ChevronDown className="size-3 shrink-0" />
+                  )}
+                  Custom
+                  <span className="ml-auto tabular-nums">{matchedComponents.length}</span>
+                </button>
+                {!isCollapsed(CUSTOM_FOLDER)
+                  ? matchedComponents.map((s) => (
+                      <button
+                        key={s.type + ':' + String(s.config.find((f) => f.key === 'flowId')?.default)}
+                        type="button"
+                        role="menuitem"
+                        className={
+                          compact
+                            ? 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted'
+                            : 'flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted'
+                        }
+                        onClick={() => onSelect(s)}
+                      >
+                        <span className="flex items-center gap-2 text-sm">
+                          <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
+                          {s.label}
+                        </span>
+                        {!compact ? (
+                          <span className="line-clamp-2 text-[11px] text-muted-foreground">
+                            {s.description}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))
+                  : null}
+              </div>
+            ) : null}
+          </>
         )}
       </div>
     </div>
@@ -195,8 +252,46 @@ function NodePicker({
 
 let specLookup: Map<string, NodeSpec> = new Map()
 
+/** Fetches the derived interface (ports + exposed params) for a flow.subflow
+ * node's referenced flow, refetching whenever flowId changes. */
+function useComponentInterface(flowId: number | undefined) {
+  const [iface, setIface] = useState<ComponentInterface | null>(null)
+  useEffect(() => {
+    if (!Number.isFinite(flowId)) {
+      setIface(null)
+      return
+    }
+    let cancelled = false
+    void getFlowInterface(flowId!)
+      .then((r) => {
+        if (!cancelled) setIface(r.interface)
+      })
+      .catch(() => {
+        if (!cancelled) setIface(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [flowId])
+  return iface
+}
+
 function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
-  const spec = specLookup.get(data.specType)
+  const flowId = data.specType === 'flow.subflow' ? Number(data.config.flowId) : undefined
+  const componentIface = useComponentInterface(flowId)
+  const spec =
+    specLookup.get(data.specType) ??
+    (data.specType === 'flow.subflow'
+      ? {
+          type: 'flow.subflow',
+          label: `Sub-flow ${data.config.flowId}`,
+          category: 'combine' as const,
+          description: '',
+          inputs: [],
+          outputs: [],
+          config: [],
+        }
+      : null)
   const report = data.report
   if (!spec) {
     return (
@@ -205,6 +300,8 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
       </div>
     )
   }
+  const inputs = componentIface?.inputs ?? spec.inputs
+  const outputs = componentIface?.outputs ?? spec.outputs
   const configLines = spec.config
     .map((f) => {
       const v = data.config[f.key] ?? f.default
@@ -229,9 +326,9 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
       }`}
     >
       <div className="relative flex items-center gap-2 border-b border-border px-3 py-2">
-        {spec.inputs.length === 1 ? (
+        {inputs.length === 1 ? (
           <Handle
-            id={spec.inputs[0].id}
+            id={inputs[0].id}
             type="target"
             position={Position.Left}
             className="!size-2.5 !border-border !bg-muted-foreground"
@@ -247,9 +344,9 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
           <AlertTriangle className="ml-auto size-3.5 shrink-0 text-destructive" />
         ) : null}
       </div>
-      {spec.inputs.length > 1 ? (
+      {inputs.length > 1 ? (
         <div className="border-b border-border py-1">
-          {spec.inputs.map((port) => (
+          {inputs.map((port) => (
             <div key={port.id} className="relative flex items-center gap-2 px-3 py-0.5">
               <Handle
                 id={port.id}
@@ -273,7 +370,7 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
         </div>
       ) : null}
       <div className="py-1">
-        {spec.outputs.map((port) => (
+        {outputs.map((port) => (
           <div key={port.id} className="relative flex items-center justify-end gap-2 px-3 py-0.5">
             {report ? (
               <span className="rounded bg-muted px-1 text-[10px] tabular-nums text-muted-foreground">
@@ -349,6 +446,7 @@ function FlowEditorInner() {
   const id = Number(flowId)
 
   const [specs, setSpecs] = useState<NodeSpec[]>([])
+  const [components, setComponents] = useState<NodeSpec[]>([])
   const [name, setName] = useState('')
   const [loading, setLoading] = useState(true)
   const [dirty, setDirty] = useState(false)
@@ -372,10 +470,15 @@ function FlowEditorInner() {
     let cancelled = false
     void (async () => {
       try {
-        const [types, flow] = await Promise.all([getNodeTypes(), getFlow(id)])
+        const [types, flow, comps] = await Promise.all([
+          getNodeTypes(),
+          getFlow(id),
+          getFlowComponents(),
+        ])
         if (cancelled) return
         specLookup = new Map(types.nodeTypes.map((s) => [s.type, s]))
         setSpecs(types.nodeTypes)
+        setComponents(comps)
         setName(flow.flow.name)
         const rf = toRF(flow.flow.graph)
         setNodes(rf.nodes)
@@ -406,18 +509,22 @@ function FlowEditorInner() {
 
   const addNode = (spec: NodeSpec, position?: { x: number; y: number }) => {
     const n = addAt.current++
+    const config =
+      spec.type === 'flow.subflow'
+        ? {
+            flowId: Number(spec.config.find((f) => f.key === 'flowId')?.default),
+            params: {},
+          }
+        : Object.fromEntries(
+            spec.config.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]),
+          )
     setNodes((ns) => [
       ...ns.map((node) => ({ ...node, selected: false })),
       {
         id: `n${Date.now().toString(36)}${n}`,
         type: 'flow' as const,
         position: position ?? { x: 80 + n * 24, y: 80 + n * 24 },
-        data: {
-          specType: spec.type,
-          config: Object.fromEntries(
-            spec.config.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]),
-          ),
-        },
+        data: { specType: spec.type, config },
         selected: true,
       },
     ])
@@ -588,7 +695,7 @@ function FlowEditorInner() {
                   onClick={() => setPaletteOpen(false)}
                 />
                 <div className="fixed inset-x-3 top-28 z-30 overflow-hidden rounded-md border border-border bg-popover shadow-md sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-1 sm:w-72">
-                  <NodePicker specs={specs} onSelect={addNode} />
+                  <NodePicker specs={specs} components={components} onSelect={addNode} />
                 </div>
               </>
             ) : null}
@@ -686,6 +793,7 @@ function FlowEditorInner() {
                   </p>
                   <NodePicker
                     specs={specs}
+                    components={components}
                     compact
                     onSelect={(s) => addNode(s, screenToFlowPosition({ x: menu.x, y: menu.y }))}
                   />
