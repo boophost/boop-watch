@@ -77,7 +77,7 @@ const CATEGORY_LABEL: Record<NodeCategory, string> = {
   boundary: 'Boundary',
 }
 
-const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink']
+const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink', 'boundary']
 
 /** Categories collapsed by default in the add-node picker (largest / less common first picks). */
 const DEFAULT_COLLAPSED: ReadonlySet<NodeCategory> = new Set(['enrich', 'sink'])
