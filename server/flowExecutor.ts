@@ -125,6 +125,14 @@ export interface RunFlowOptions {
   /** Prefix applied to node ids passed to hooks — lets a subflow's nested run
    * report progress under a qualified id in the parent's live feed. */
   qualifyId?: (nodeId: string) => string
+  /**
+   * Resolves flow.subflow node ports against the referenced flow's published
+   * interface, same as passed to validateGraph directly. Without this, the
+   * internal pre-flight validateGraph call falls back to flow.subflow's
+   * static placeholder spec (single "in"/"out" ports) and rejects any graph
+   * whose subflow nodes use their real, derived port ids.
+   */
+  resolveSpec?: SpecResolver
 }
 
 export interface RunFlowResult extends RunReport {
@@ -147,14 +155,14 @@ export async function runFlow(
   dryRun: boolean,
   hooksOrOptions?: RunHooks | RunFlowOptions,
 ): Promise<RunFlowResult> {
-  const { hooks, injectOutput, qualifyId } = normalizeRunOptions(hooksOrOptions)
+  const { hooks, injectOutput, qualifyId, resolveSpec } = normalizeRunOptions(hooksOrOptions)
   const qid = qualifyId ?? ((id: string) => id)
   const startedAt = new Date().toISOString()
   const t0 = Date.now()
   const reports: Record<string, NodeReport> = {}
   const finalInputs = new Map<string, Record<string, FlowItem[]>>()
 
-  const invalid = validateGraph(graph)
+  const invalid = validateGraph(graph, resolveSpec)
   if (invalid) {
     return { ok: false, dryRun, startedAt, durationMs: Date.now() - t0, nodes: {}, error: invalid }
   }

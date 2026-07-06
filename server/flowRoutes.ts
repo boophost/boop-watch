@@ -5,7 +5,7 @@
 import { Router } from 'express'
 import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
-import type { RunReport, RunHooks } from './flowExecutor.js'
+import type { RunReport, RunHooks, SpecResolver } from './flowExecutor.js'
 import { randomUUID } from 'node:crypto'
 import {
   deriveInterface,
@@ -61,7 +61,16 @@ export function getLastRecordedRunId(): number | null {
 // the Activity page can watch the run live. Logging never fails the run.
 export async function runFlowAndRecord(
   graph: FlowGraph,
-  opts: { dryRun: boolean; flowId: number | null; flowName: string },
+  opts: {
+    dryRun: boolean
+    flowId: number | null
+    flowName: string
+    /** Resolves flow.subflow ports against their referenced flow's published
+     * interface — pass buildSpecResolver(flowId, ...) so a graph containing
+     * sub-flow nodes with real (non-placeholder) ports doesn't fail the
+     * internal pre-flight validateGraph in runFlow. */
+    resolveSpec?: SpecResolver
+  },
   hooks?: RunHooks,
 ): Promise<RunReport> {
   const runToken = randomUUID()
@@ -98,7 +107,7 @@ export async function runFlowAndRecord(
   }
 
   try {
-    const report = await runFlow(graph, opts.dryRun, wrapped)
+    const report = await runFlow(graph, opts.dryRun, { hooks: wrapped, resolveSpec: opts.resolveSpec })
     lastRecordedRunId = null
     const activity = activityFromReport(graph, report)
     try {
@@ -382,7 +391,18 @@ flowRouter.post('/api/flows/:id/run', async (req, res) => {
   const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
   try {
     const graph = JSON.parse(row.graph) as FlowGraph
-    const report = await runFlowAndRecord(graph, { dryRun, flowId: row.id, flowName: row.name })
+    const resolver = buildSpecResolver(row.id, (fid) => flowsDb.getFlow(fid))
+    const invalid = validateGraph(graph, resolver)
+    if (invalid) {
+      res.status(400).json({ error: invalid })
+      return
+    }
+    const report = await runFlowAndRecord(graph, {
+      dryRun,
+      flowId: row.id,
+      flowName: row.name,
+      resolveSpec: resolver,
+    })
     res.json({ report })
   } catch (e) {
     console.error(e)
@@ -417,9 +437,15 @@ flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
   const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
   try {
     const graph = JSON.parse(row.graph) as FlowGraph
+    const resolver = buildSpecResolver(row.id, (fid) => flowsDb.getFlow(fid))
+    const invalid = validateGraph(graph, resolver)
+    if (invalid) {
+      send({ type: 'error', error: invalid })
+      return
+    }
     const report = await runFlowAndRecord(
       graph,
-      { dryRun, flowId: row.id, flowName: row.name },
+      { dryRun, flowId: row.id, flowName: row.name, resolveSpec: resolver },
       {
         onNodeStart: (nodeId) => send({ type: 'start', id: nodeId }),
         onNodeDone: (nodeId, nodeReport) => send({ type: 'node', id: nodeId, report: nodeReport }),

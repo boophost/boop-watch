@@ -15,7 +15,7 @@ import { blacklistedHashes } from './blacklist.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
-import { deriveInterface } from './flowComponents.js'
+import { deriveInterface, buildSpecResolver } from './flowComponents.js'
 
 const execFileP = promisify(execFile)
 
@@ -2827,6 +2827,10 @@ const subflow: NodeImpl = {
       },
       qualifyId: (id) => (ctx.nodeId ? `${ctx.nodeId}/${id}` : id),
       hooks: ctx.hooks,
+      // This flow's own graph may itself contain flow.subflow nodes
+      // referencing further published components — resolve those too so
+      // nested composites of composites validate correctly.
+      resolveSpec: buildSpecResolver(flowId, getFlow),
     })
 
     ctx.mergeNestedReports?.(inner.nodes)
