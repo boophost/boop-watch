@@ -113,14 +113,46 @@ export interface RunHooks {
   onNodeDone?: (nodeId: string, report: NodeReport) => void
 }
 
+export interface RunFlowOptions {
+  hooks?: RunHooks
+  /**
+   * For boundary.input nodes: return items to use as that node's output
+   * instead of running its (empty, pass-through) impl. Returning null falls
+   * back to the normal impl.run. Used by flow.subflow to feed the caller's
+   * per-port inputs into the nested graph.
+   */
+  injectOutput?: (node: FlowNode) => FlowItem[] | null
+  /** Prefix applied to node ids passed to hooks — lets a subflow's nested run
+   * report progress under a qualified id in the parent's live feed. */
+  qualifyId?: (nodeId: string) => string
+}
+
+export interface RunFlowResult extends RunReport {
+  /** Inputs gathered for each node right before it ran, keyed by node id then
+   * input handle. boundary.output collection reads `items` off of this to
+   * recover what a published component produced on each output port. */
+  finalInputs?: Map<string, Record<string, FlowItem[]>>
+}
+
+function normalizeRunOptions(hooksOrOptions?: RunHooks | RunFlowOptions): RunFlowOptions {
+  if (!hooksOrOptions) return {}
+  if ('onNodeStart' in hooksOrOptions || 'onNodeDone' in hooksOrOptions) {
+    return { hooks: hooksOrOptions as RunHooks }
+  }
+  return hooksOrOptions as RunFlowOptions
+}
+
 export async function runFlow(
   graph: FlowGraph,
   dryRun: boolean,
-  hooks?: RunHooks,
-): Promise<RunReport> {
+  hooksOrOptions?: RunHooks | RunFlowOptions,
+): Promise<RunFlowResult> {
+  const { hooks, injectOutput, qualifyId } = normalizeRunOptions(hooksOrOptions)
+  const qid = qualifyId ?? ((id: string) => id)
   const startedAt = new Date().toISOString()
   const t0 = Date.now()
   const reports: Record<string, NodeReport> = {}
+  const finalInputs = new Map<string, Record<string, FlowItem[]>>()
 
   const invalid = validateGraph(graph)
   if (invalid) {
@@ -147,11 +179,11 @@ export async function runFlow(
         samples: {},
         notes: ['skipped: upstream node failed'],
       }
-      hooks?.onNodeDone?.(node.id, reports[node.id])
+      hooks?.onNodeDone?.(qid(node.id), reports[node.id])
       continue
     }
 
-    hooks?.onNodeStart?.(node.id)
+    hooks?.onNodeStart?.(qid(node.id))
 
     const inputs: Record<string, FlowItem[]> = {}
     for (const port of impl.spec.inputs) inputs[port.id] = []
@@ -159,11 +191,13 @@ export async function runFlow(
       const produced = buffers.get(e.source)?.[e.sourceHandle] ?? []
       inputs[e.targetHandle] = [...(inputs[e.targetHandle] ?? []), ...produced]
     }
+    finalInputs.set(node.id, inputs)
 
     const ctx: RunContext = { dryRun, notes: [] }
     const nodeT0 = Date.now()
     try {
-      const outputs = await impl.run(inputs, node.config ?? {}, ctx)
+      const injected = node.type === 'boundary.input' ? injectOutput?.(node) ?? null : null
+      const outputs = injected !== null ? { items: injected } : await impl.run(inputs, node.config ?? {}, ctx)
       buffers.set(node.id, outputs)
       reports[node.id] = {
         status: 'ok',
@@ -185,9 +219,9 @@ export async function runFlow(
         error: e instanceof Error ? e.message : String(e),
       }
     }
-    hooks?.onNodeDone?.(node.id, reports[node.id])
+    hooks?.onNodeDone?.(qid(node.id), reports[node.id])
   }
 
   const ok = Object.values(reports).every((r) => r.status === 'ok')
-  return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports }
+  return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports, finalInputs }
 }
