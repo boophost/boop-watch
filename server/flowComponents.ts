@@ -1,6 +1,7 @@
-import type { FlowGraph } from './flowExecutor.js'
+import type { FlowGraph, SpecResolver } from './flowExecutor.js'
 import { NODE_REGISTRY } from './flowNodes.js'
 import type { ConfigField, NodePort, NodeSpec } from './flowNodes.js'
+import { parseComponent } from './flowsDb.js'
 
 export interface ExposedParam {
   nodeId: string
@@ -85,6 +86,77 @@ export function validatePublish(graph: FlowGraph): string | null {
   const iface = deriveInterface(0, graph)
   if ('error' in iface) return iface.error
   return null
+}
+
+/** flow.subflow node ids reference other flows by config.flowId. */
+export function findSubflowReferences(graph: FlowGraph): number[] {
+  return graph.nodes
+    .filter((n) => n.type === 'flow.subflow')
+    .map((n) => Number(n.config.flowId))
+    .filter((id) => Number.isFinite(id))
+}
+
+/**
+ * Walks flow.subflow references starting at rootFlowId looking for a cycle
+ * (a flow that, transitively, embeds itself). loadGraph should return null
+ * for a missing/corrupt flow so a dangling reference doesn't crash the walk.
+ */
+export function detectReferenceCycle(
+  rootFlowId: number,
+  loadGraph: (id: number) => FlowGraph | null,
+): string | null {
+  const stack = new Set<number>()
+  const visited = new Set<number>()
+
+  function dfs(flowId: number): string | null {
+    if (stack.has(flowId)) return `Reference cycle involving flow ${flowId}`
+    if (visited.has(flowId)) return null
+    visited.add(flowId)
+    stack.add(flowId)
+    const graph = loadGraph(flowId)
+    if (graph) {
+      for (const ref of findSubflowReferences(graph)) {
+        const err = dfs(ref)
+        if (err) return err
+      }
+    }
+    stack.delete(flowId)
+    return null
+  }
+
+  return dfs(rootFlowId)
+}
+
+/**
+ * Builds a SpecResolver for validateGraph that resolves flow.subflow nodes to
+ * the published interface of the flow they reference — the only node type
+ * not in the static NODE_REGISTRY. parentFlowId is the id of the flow being
+ * saved (null when creating/validating a graph with no flow id yet), used to
+ * reject a component embedding itself directly.
+ */
+export function buildSpecResolver(
+  parentFlowId: number | null,
+  getFlowRow: (id: number) => { graph: string; component: string | null } | undefined,
+): SpecResolver {
+  return (node) => {
+    if (node.type !== 'flow.subflow') return null
+    const flowId = Number(node.config.flowId)
+    if (!Number.isFinite(flowId)) return null
+    if (parentFlowId !== null && flowId === parentFlowId) return null // self-ref
+    const row = getFlowRow(flowId)
+    if (!row) return null
+    const meta = parseComponent(row.component)
+    if (!meta?.published) return null
+    let graph: FlowGraph
+    try {
+      graph = JSON.parse(row.graph) as FlowGraph
+    } catch {
+      return null
+    }
+    const iface = deriveInterface(flowId, graph, meta)
+    if ('error' in iface) return null
+    return { inputs: iface.inputs, outputs: iface.outputs }
+  }
 }
 
 export function componentToNodeSpec(
