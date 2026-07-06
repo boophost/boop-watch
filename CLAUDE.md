@@ -155,8 +155,11 @@ drives flows against a port-forwarded staging backend for iteration.
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `NODE_ENV=production` — serve the built `dist/`
 - `PORT` — default `3000` (the Dockerfile sets it; the dev backend defaults to `3001`)
-- `POSTHOG_KEY` — PostHog project API key for portal analytics (public, exposed via `/config.js`;
-  unset ⇒ analytics no-op). Optional `POSTHOG_HOST` (default `https://us.i.posthog.com`)
+- `POSTHOG_KEY` — PostHog project token for portal analytics (public, exposed via `/config.js`;
+  unset ⇒ analytics no-op). Events route through `/ingest` reverse proxy on this server.
+  Optional `POSTHOG_HOST` (default US API host, used by the proxy) and `POSTHOG_UI_HOST`
+  (default `https://us.posthog.com`, passed to the SDK for toolbar links). In PostHog project
+  settings, add **Authorized URLs**: `https://watch.boopurno.es` (and `http://localhost:5173` for dev).
 
 ## Routes
 

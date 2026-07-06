@@ -33,6 +33,7 @@ export default defineConfig({
       '/api': 'http://localhost:3001',
       '/img': 'http://localhost:3001',
       '/config.js': 'http://localhost:3001',
+      '/ingest': 'http://localhost:3001',
     },
   },
 })
