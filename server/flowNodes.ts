@@ -453,6 +453,55 @@ const diff: NodeImpl = {
   },
 }
 
+// Left-join two streams on a key: for each primary item, copy a field from the
+// first matching donor item. The generic pairing primitive behind the dual-audio
+// mux (attach the donor file path onto the h264 primary per episode), but it's
+// not mux-specific — any "enrich A with a value looked up from B by key" join.
+const join: NodeImpl = {
+  spec: {
+    type: 'combine.join',
+    label: 'Join by key',
+    category: 'combine',
+    description:
+      'For each primary item, looks up the first donor item with the same key and copies a field from it (e.g. donor file_path -> donor_path). Primary items with no donor match exit "unmatched"; none are dropped.',
+    inputs: [
+      { id: 'primary', label: 'primary' },
+      { id: 'donor', label: 'donor' },
+    ],
+    outputs: [
+      { id: 'joined', label: 'joined' },
+      { id: 'unmatched', label: 'unmatched' },
+    ],
+    config: [
+      { key: 'keyField', label: 'Key field (primary)', kind: 'text', default: 'group_key' },
+      { key: 'donorKeyField', label: 'Key field (donor)', kind: 'text', default: '', help: 'Empty = same as the primary key field.' },
+      { key: 'copyFrom', label: 'Copy from (donor field)', kind: 'text', default: 'file_path' },
+      { key: 'copyTo', label: 'Copy to (primary field)', kind: 'text', default: 'donor_path' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const keyField = str(config, 'keyField', 'group_key')
+    const donorKeyField = str(config, 'donorKeyField', '') || keyField
+    const copyFrom = str(config, 'copyFrom', 'file_path')
+    const copyTo = str(config, 'copyTo', 'donor_path')
+    const donorByKey = new Map<string, FlowItem>()
+    for (const d of inputs.donor ?? []) {
+      const k = String(d[donorKeyField] ?? '')
+      if (k && !donorByKey.has(k)) donorByKey.set(k, d) // first donor per key wins
+    }
+    const joined: FlowItem[] = []
+    const unmatched: FlowItem[] = []
+    for (const p of inputs.primary ?? []) {
+      const k = String(p[keyField] ?? '')
+      const d = k ? donorByKey.get(k) : undefined
+      if (d && d[copyFrom] != null && d[copyFrom] !== '') joined.push({ ...p, [copyTo]: d[copyFrom] })
+      else unmatched.push(p)
+    }
+    ctx.notes.push(`joined ${joined.length}, ${unmatched.length} without a donor`)
+    return { joined, unmatched }
+  },
+}
+
 const dedupe: NodeImpl = {
   spec: {
     type: 'filter.dedupe',
@@ -2027,7 +2076,15 @@ const muxTracks: NodeImpl = {
 
         if (!ctx.dryRun) {
           fs.mkdirSync(outDir, { recursive: true })
-          await execFileP('ffmpeg', args, { timeout: 600_000, maxBuffer: 8 * 1024 * 1024 })
+          // Idempotent on a schedule: skip re-encoding if the output already
+          // exists and is at least as new as both sources.
+          let fresh = false
+          try {
+            const outM = fs.statSync(outPath).mtimeMs
+            fresh = outM >= fs.statSync(primary).mtimeMs && outM >= fs.statSync(donor).mtimeMs
+          } catch { /* no output yet */ }
+          if (fresh) ctx.notes.push(`mux up-to-date, reusing ${path.basename(outPath)}`)
+          else await execFileP('ffmpeg', args, { timeout: 600_000, maxBuffer: 8 * 1024 * 1024 })
         }
         muxed.push({
           ...item,
@@ -2722,6 +2779,7 @@ const IMPLS: NodeImpl[] = [
   sortNode,
   compute,
   groupPick,
+  join,
   expandFiles,
   mediaProbe,
   extractSubs,
