@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { Ban, ChevronLeft, ExternalLink, Play, Trash2 } from 'lucide-react'
+import { Ban, Check, ChevronLeft, ExternalLink, Play, Trash2, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
@@ -112,6 +112,15 @@ interface EpisodeRow {
   episode: number | null
 }
 
+interface Banner {
+  id: number
+  source: string
+  selected: boolean
+  width: number | null
+  height: number | null
+  preview: string
+}
+
 function heroImage(mal: MalDetail | null, series: SeriesEntry): string | null {
   if (mal?.images) {
     const w = mal.images.webp?.large_image_url || mal.images.webp?.image_url
@@ -152,6 +161,80 @@ export default function SeriesDetail() {
   const [dl, setDl] = useState<DownloadStatus | null>(null)
   const [busyHash, setBusyHash] = useState<string | null>(null)
   const [researchMsg, setResearchMsg] = useState('')
+
+  const [banners, setBanners] = useState<Banner[]>([])
+  const [bannersLoading, setBannersLoading] = useState(true)
+  const [bannerBusy, setBannerBusy] = useState(false)
+  const [bannerError, setBannerError] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const loadBanners = useCallback(async () => {
+    if (!Number.isFinite(id)) return
+    setBannersLoading(true)
+    try {
+      const r = await fetchAuth(`/api/series/${id}/banners`)
+      if (r.ok) setBanners(((await r.json()) as { banners: Banner[] }).banners)
+    } catch {
+      /* leave prior state */
+    } finally {
+      setBannersLoading(false)
+    }
+  }, [id])
+
+  // Apply a banners response (select/upload/delete all return the fresh list).
+  const applyBanners = async (r: Response) => {
+    const d = await parseAuthJson<{ banners?: Banner[]; error?: string }>(r)
+    if (!r.ok) throw new Error(d.error ?? 'Request failed')
+    setBanners(d.banners ?? [])
+  }
+
+  const chooseBanner = async (bannerId: number) => {
+    setBannerBusy(true)
+    setBannerError('')
+    try {
+      await applyBanners(
+        await fetchAuth(`/api/series/${id}/banners/select`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bannerId }),
+        }),
+      )
+    } catch (e) {
+      setBannerError(e instanceof Error ? e.message : 'Failed to select')
+    } finally {
+      setBannerBusy(false)
+    }
+  }
+
+  const uploadBanner = async (file: File) => {
+    setBannerBusy(true)
+    setBannerError('')
+    try {
+      await applyBanners(
+        await fetchAuth(`/api/series/${id}/banners/upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': file.type },
+          body: file,
+        }),
+      )
+    } catch (e) {
+      setBannerError(e instanceof Error ? e.message : 'Upload failed')
+    } finally {
+      setBannerBusy(false)
+    }
+  }
+
+  const removeBanner = async (bannerId: number) => {
+    setBannerBusy(true)
+    setBannerError('')
+    try {
+      await applyBanners(await fetchAuth(`/api/series/${id}/banners/${bannerId}`, { method: 'DELETE' }))
+    } catch (e) {
+      setBannerError(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setBannerBusy(false)
+    }
+  }
 
   const loadDownloads = useCallback(async () => {
     if (!Number.isFinite(id)) return
@@ -296,6 +379,11 @@ export default function SeriesDetail() {
   }, [series, loadDownloads])
 
   useEffect(() => {
+    if (!series) return
+    void loadBanners()
+  }, [series, loadBanners])
+
+  useEffect(() => {
     const active = dl?.torrents.some((t) => t.progress < 1 && !t.state.includes('paused'))
     if (!active) return
     const h = setInterval(() => void loadDownloads(), 5000)
@@ -426,6 +514,97 @@ export default function SeriesDetail() {
               </div>
             ) : null}
           </div>
+        </section>
+
+        <section>
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <h2 className="text-lg font-semibold">Season banner</h2>
+            <span className="text-xs text-muted-foreground">Shown behind the title on the public page</span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/avif,image/gif"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) void uploadBanner(f)
+                e.target.value = ''
+              }}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto gap-1"
+              disabled={bannerBusy}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Upload className="size-4" />
+              Upload
+            </Button>
+          </div>
+
+          {bannerError ? <p className="mb-3 text-sm text-destructive">{bannerError}</p> : null}
+
+          {bannersLoading && banners.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Gathering banner options…</p>
+          ) : banners.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No banners found from AniList or Kitsu for this title — upload one to set it.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {banners.map((b) => (
+                <button
+                  key={b.id}
+                  type="button"
+                  disabled={bannerBusy}
+                  onClick={() => void chooseBanner(b.id)}
+                  title={b.selected ? 'Selected banner' : `Use this ${b.source} banner`}
+                  className={`group relative block overflow-hidden rounded-lg border text-left transition disabled:opacity-60 ${
+                    b.selected
+                      ? 'border-ring ring-2 ring-ring/40'
+                      : 'border-border hover:border-ring/60'
+                  }`}
+                >
+                  <img
+                    src={b.preview}
+                    alt={`${b.source} banner`}
+                    loading="lazy"
+                    className="aspect-[16/5] w-full bg-muted object-cover"
+                  />
+                  <span className="absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
+                    {b.source}
+                  </span>
+                  {b.selected ? (
+                    <span className="absolute right-2 top-2 flex items-center gap-1 rounded bg-emerald-500 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                      <Check className="size-3" />
+                      Selected
+                    </span>
+                  ) : null}
+                  {b.source === 'upload' ? (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label="Delete this banner"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void removeBanner(b.id)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.stopPropagation()
+                          void removeBanner(b.id)
+                        }
+                      }}
+                      className="absolute bottom-2 right-2 rounded bg-black/60 p-1 text-white opacity-0 transition group-hover:opacity-100"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          )}
         </section>
 
         <section>

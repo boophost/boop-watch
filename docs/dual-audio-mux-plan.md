@@ -165,12 +165,33 @@ pairs. Build the node.** The `-c copy` + `-itsoffset` design below is confirmed.
 
 ## Deliverables checklist
 
-- [ ] Sync-test result recorded (offset constant? value?) — **gates the rest**
-- [ ] `enrich.mux-tracks` node in `server/flowNodes.ts` + registered
-- [ ] `torrent_codec` / donor fields threaded so the flow can pair primary+donor
-- [ ] Library-import seed graph: insert mux on the upgrade path (donor = existing
-      library dual file when present)
-- [ ] `npm run build:all`, unit-test the node on the two real Frieren files
-- [ ] Version bump, commit to `dev`, verify on staging (Activity log shows the
-      mux), then dev→main PR
-- [ ] Clean up: remove the `synctest` qBit torrent + files
+- [x] Sync-test result recorded (offset constant? value?) — **gates the rest**
+      (2026-07-06: same edit/framerate, ±80 ms non-monotonic, zero offset fine)
+- [x] `enrich.mux-tracks` node in `server/flowNodes.ts` + registered
+      (v2.24.1; idempotent re-run guard added in v2.24.2)
+- [x] Donor field threaded via a generic `combine.join` (left-join by
+      `group_key`, copies donor `file_path` → `donor_path`) — no domain node
+- [x] Library-import seed graph: **Option 2** wired. Scoring is now
+      playability-first (`import_score = playable*2 + dual`, playable = non-AV1);
+      a playable-sub winner + a dubbed loser for the same episode → `combine.join`
+      → `enrich.mux-tracks` → import. Dubbed losers are kept as donors; the donor
+      hunt allows AV1 and only fires for shows with no dub on hand (fed by the
+      "no donor" join output, so a muxed show doesn't re-hunt).
+- [x] `npm run build:all`; both nodes unit-tested; `validateGraph` passes; full
+      executor **dry-run** over representative episodes routes correctly
+      (playable-sub+av1 → muxed; playable-dual → as-is; lone sub → import + hunt)
+- [x] Version bump (2.24.1 → 2.24.2), committed to `dev`, verified on staging
+      (rollout green, both nodes served by `boop-watch-dev`'s node-types).
+      **dev→main PR still to open** once live multi-run settling is observed.
+- [x] Clean up: no `synctest` qBit torrent exists (only the legit BlackRabbit
+      AV1 dual, which is the Frieren donor — kept)
+
+## Still to validate on real data (not doable in one session)
+
+The node + mux are proven (real Frieren mux ran in 13 s; routing dry-run is
+green). What a single session **can't** prove is the multi-*scheduled-run*
+settling on live torrents: run N hunts + queues an AV1 donor, run N+1 (after it
+downloads) pairs it with the kept playable-sub and muxes. Watch a real pass on
+staging (donor category = `anime`, same as primary) before the `dev → main` PR,
+and confirm: the AV1 donor is **not** imported as a winner, the muxed h264 file
+replaces in place, and the donor torrent isn't deleted out from under the mux.

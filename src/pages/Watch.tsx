@@ -89,6 +89,7 @@ export default function Watch() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const { user, loading: authLoading } = useAuth()
+  const isAdmin = user?.isAdmin ?? false
 
   const [data, setData] = useState<WatchData | null>(null)
   // Watch progress for this series' episodes (account rows when logged in,
@@ -491,6 +492,12 @@ export default function Watch() {
         <Link className="back" to={data.back.href}><Icon name="back" size={15} /><span className="bl">{data.back.label}</span></Link>
         {data.epNum && <span className="ep">{data.epNum}</span>}
         <span className="t">{data.title}</span>
+        {isAdmin && data.manageId != null && (
+          <Link className="manage-link" to={`/manage/series/${data.manageId}`} title="Library settings">
+            <Icon name="gear" size={15} />
+            <span className="bl">Library</span>
+          </Link>
+        )}
       </div>
 
       <div className={`wrap${data.episodes.length ? '' : ' no-eps'}`}>

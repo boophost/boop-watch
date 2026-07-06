@@ -67,6 +67,9 @@ export interface SeriesDetail {
   genres: string[]
   year: number | null
   episodes: SeriesEpisode[]
+  // Catalog series id for the admin-only "Library settings" shortcut; null when
+  // the title isn't in the catalog.
+  manageId?: number | null
 }
 export interface MovieDetail {
   type: 'movie'
@@ -96,6 +99,8 @@ export interface WatchData {
   episodes: WatchEpisode[]
   nextId: string | null
   segments: Segment[]
+  // Catalog series id for the admin-only "Library settings" shortcut.
+  manageId?: number | null
 }
 
 export interface ScheduleEvent {

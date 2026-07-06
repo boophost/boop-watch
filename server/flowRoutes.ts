@@ -5,7 +5,7 @@
 import { Router } from 'express'
 import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
-import type { RunReport } from './flowExecutor.js'
+import type { RunReport, RunHooks } from './flowExecutor.js'
 import * as flowsDb from './flowsDb.js'
 import type { RunActivity } from './flowsDb.js'
 
@@ -39,8 +39,9 @@ function activityFromReport(graph: FlowGraph, report: RunReport): RunActivity[] 
 export async function runFlowAndRecord(
   graph: FlowGraph,
   opts: { dryRun: boolean; flowId: number | null; flowName: string },
+  hooks?: RunHooks,
 ): Promise<RunReport> {
-  const report = await runFlow(graph, opts.dryRun)
+  const report = await runFlow(graph, opts.dryRun, hooks)
   try {
     flowsDb.recordRun({
       flow_id: opts.flowId,
@@ -183,5 +184,48 @@ flowRouter.post('/api/flows/:id/run', async (req, res) => {
     res.status(500).json({ error: e instanceof Error ? e.message : 'Run failed' })
   } finally {
     releaseFlowLock()
+  }
+})
+
+// Same as /run, but streams live per-node progress as newline-delimited JSON so
+// the editor can paint each node the moment it finishes (a full library-import
+// run is minutes of rate-limited work). Events: {type:'start',id} before a node
+// runs, {type:'node',id,report} when it finishes, {type:'done',report} at the
+// end (or {type:'error',error} if the run couldn't start). The MCP CLI keeps
+// using the plain /run above.
+flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
+  const id = Number(req.params.id)
+  const row = Number.isFinite(id) ? flowsDb.getFlow(id) : undefined
+  if (!row) {
+    res.status(404).json({ error: 'Flow not found' })
+    return
+  }
+  if (!acquireFlowLock()) {
+    res.status(409).json({ error: 'A flow is already running' })
+    return
+  }
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('X-Accel-Buffering', 'no') // ask proxies (nginx) not to buffer
+  res.flushHeaders?.()
+  const send = (obj: unknown) => res.write(JSON.stringify(obj) + '\n')
+  const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  try {
+    const graph = JSON.parse(row.graph) as FlowGraph
+    const report = await runFlowAndRecord(
+      graph,
+      { dryRun, flowId: row.id, flowName: row.name },
+      {
+        onNodeStart: (nodeId) => send({ type: 'start', id: nodeId }),
+        onNodeDone: (nodeId, nodeReport) => send({ type: 'node', id: nodeId, report: nodeReport }),
+      },
+    )
+    send({ type: 'done', report })
+  } catch (e) {
+    console.error(e)
+    send({ type: 'error', error: e instanceof Error ? e.message : 'Run failed' })
+  } finally {
+    releaseFlowLock()
+    res.end()
   }
 })

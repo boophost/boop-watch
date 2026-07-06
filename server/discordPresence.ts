@@ -25,6 +25,11 @@ const OAUTH_SCOPE = process.env.DISCORD_PRESENCE_SCOPE ?? 'identify sdk.social_l
 const SESSION_REFRESH_MS = 8 * 60_000
 // Timestamp drift (seek/rate mismatch) beyond which we re-post early.
 const DRIFT_MS = 15_000
+// Clear the "Browsing the library" activity once the user has been browsing
+// (no active player) continuously for this long — an opted-in user who leaves
+// the tab open shouldn't show a stale watch status forever. Watching/paused
+// reset it; only idle browsing counts down.
+const BROWSING_IDLE_MS = Number(process.env.DISCORD_BROWSING_IDLE_MS) || 10 * 60_000
 
 interface LinkRow {
   username: string
@@ -60,6 +65,7 @@ function deleteLink(username: string) {
   ensureTable()
   getDb().prepare('DELETE FROM discord_presence WHERE username = ?').run(username)
   sessions.delete(username)
+  browsingSince.delete(username)
 }
 
 // One live headless session per user, tracked in memory only: after a restart
@@ -73,6 +79,11 @@ interface LiveSession {
   postedAt: number
 }
 const sessions = new Map<string, LiveSession>()
+
+// When the current continuous "browsing" spell began, per user. Set on the first
+// browsing beat after any active (watching/paused) state; kept across the idle
+// stop so we don't repost; cleared when the user becomes active again or stops.
+const browsingSince = new Map<string, number>()
 
 interface TokenResponse {
   access_token: string
@@ -173,7 +184,9 @@ async function syncSession(
   return { linked: true, active: true }
 }
 
-async function endSession(username: string, row: LinkRow) {
+// Tear down the live Discord headless session (clearing the on-profile activity)
+// without touching the browsing-idle tracker.
+async function killSession(username: string, row: LinkRow) {
   const live = sessions.get(username)
   sessions.delete(username)
   if (!live) return
@@ -184,6 +197,11 @@ async function endSession(username: string, row: LinkRow) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
     body: JSON.stringify({ token: live.token }),
   }).catch(() => {})
+}
+
+async function endSession(username: string, row: LinkRow) {
+  browsingSince.delete(username)
+  await killSession(username, row)
 }
 
 /** Public origin of the request, for OAuth redirect URIs and absolute poster
@@ -336,8 +354,19 @@ export function discordPresenceRouter(requireAuth: AuthedHandler): Router {
       browsing?: unknown
     }
 
-    // Browsing the library (no active player).
+    // Browsing the library (no active player). Idle out after a while so an
+    // opted-in user who just left the tab open doesn't show a stale status.
     if (browsing) {
+      const now = Date.now()
+      const since = browsingSince.get(username) ?? now
+      if (!browsingSince.has(username)) browsingSince.set(username, now)
+      if (now - since >= BROWSING_IDLE_MS) {
+        // Been browsing too long — clear the activity and stay quiet (the tracker
+        // stays set, so further browsing beats keep it off) until they watch again.
+        await killSession(username, row)
+        res.json({ linked: true, active: false })
+        return
+      }
       const activity: Activity = {
         type: 3,
         name: 'boopurnoes · watch',
@@ -348,6 +377,8 @@ export function discordPresenceRouter(requireAuth: AuthedHandler): Router {
       res.json(await syncSession(username, row, 'browsing', null, 0, activity))
       return
     }
+    // Any active player state below (watching/paused) ends the browsing spell.
+    browsingSince.delete(username)
 
     if (typeof itemId !== 'string' || typeof position !== 'number' || typeof duration !== 'number') {
       res.status(400).json({ error: 'itemId, position, duration required' })

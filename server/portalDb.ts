@@ -24,6 +24,7 @@ export interface PortalItem {
   image_url: string | null
   backdrop_url: string | null
   has_backdrop: number | null
+  mal_id: number | null
 }
 
 let db: Database.Database | null = null
@@ -57,6 +58,13 @@ export function getPortalDb(): Database.Database {
   `)
   try {
     instance.exec('ALTER TABLE portal_items ADD COLUMN has_backdrop INTEGER DEFAULT 1');
+  } catch (e) {
+    // ignore if already exists
+  }
+  try {
+    // Link a portal series/movie back to its catalog series, so the portal can
+    // resolve the admin-selected banner (series_banners) at request time.
+    instance.exec('ALTER TABLE portal_items ADD COLUMN mal_id INTEGER');
   } catch (e) {
     // ignore if already exists
   }
@@ -94,11 +102,11 @@ export function upsertPortalItem(item: PortalItem) {
     INSERT INTO portal_items (
       id, type, name, original_title, overview, date_created, premiere_date,
       production_year, genres, runtime_ticks, index_number, parent_index_number,
-      series_id, series_name, image_url, backdrop_url, has_backdrop
+      series_id, series_name, image_url, backdrop_url, has_backdrop, mal_id
     ) VALUES (
       @id, @type, @name, @original_title, @overview, @date_created, @premiere_date,
       @production_year, @genres, @runtime_ticks, @index_number, @parent_index_number,
-      @series_id, @series_name, @image_url, @backdrop_url, @has_backdrop
+      @series_id, @series_name, @image_url, @backdrop_url, @has_backdrop, @mal_id
     )
     ON CONFLICT(id) DO UPDATE SET
       type = excluded.type,
@@ -116,7 +124,8 @@ export function upsertPortalItem(item: PortalItem) {
       series_name = excluded.series_name,
       image_url = COALESCE(portal_items.image_url, excluded.image_url),
       backdrop_url = COALESCE(portal_items.backdrop_url, excluded.backdrop_url),
-      has_backdrop = excluded.has_backdrop
+      has_backdrop = excluded.has_backdrop,
+      mal_id = COALESCE(excluded.mal_id, portal_items.mal_id)
   `)
   stmt.run(item)
 }
