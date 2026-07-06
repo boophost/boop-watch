@@ -23,6 +23,16 @@ export async function fetchAuth(url: string, options: RequestInit = {}) {
   return fetch(url, { ...options, headers })
 }
 
+/** Parse a fetchAuth response; surfaces plain-text/HTML proxy errors cleanly. */
+export async function parseAuthJson<T>(r: Response): Promise<T> {
+  const ct = r.headers.get('content-type') ?? ''
+  if (!ct.includes('application/json')) {
+    const text = (await r.text()).trim()
+    throw new Error(text || `Request failed (${r.status})`)
+  }
+  return (await r.json()) as T
+}
+
 // A "recently added" home-page entry. `id` is always directly playable
 // (episode or movie), so cards link straight to /watch/:id.
 export interface RecentItem {
