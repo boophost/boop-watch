@@ -1074,6 +1074,7 @@ interface Candidate {
   seeders: number | null
   resolution: string // '2160p' | '1080p' | '720p' | '480p' | ''
   dualAudio: boolean
+  videoCodec: string // 'av1' | 'hevc' | 'h264' | '' (parsed from the release name)
   isBatch: boolean
   episode: number | null
   aid: number | null // AniDB series id (AnimeTosho) — canonical show identity
@@ -1101,6 +1102,16 @@ function titleDualAudio(title: string): boolean {
 
 function titleIsBatch(title: string): boolean {
   return /\bbatch\b|\bcomplete(?:d)?\b|\bseason\b|\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/i.test(title)
+}
+
+// Video codec from the release name. Matters for playability: our Jellyfin
+// transcodes on a Tesla T4 (Turing), which HW-decodes h264/HEVC but NOT AV1 —
+// so an AV1 source forces a slow software decode that stalls the stream.
+function titleCodec(title: string): string {
+  if (/\bav1\b/i.test(title)) return 'av1'
+  if (/\b(hevc|x[\s._-]?265|h[\s._-]?265)\b/i.test(title)) return 'hevc'
+  if (/\b(avc|x[\s._-]?264|h[\s._-]?264)\b/i.test(title)) return 'h264'
+  return ''
 }
 
 // Best-effort single-episode number from a fansub title. Ranges ("(01-28)")
@@ -1141,6 +1152,7 @@ async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
         seeders: r.seeders != null ? Number(r.seeders) : null,
         resolution: normResolution(String(r.resolution ?? ''), title),
         dualAudio: titleDualAudio(title),
+        videoCodec: titleCodec(title),
         isBatch: Boolean(r.is_batch) || titleIsBatch(title),
         episode: parseEpisode(title),
         aid: series?.anidb_aid != null ? Number(series.anidb_aid) : null,
@@ -1174,6 +1186,7 @@ async function tsukiCandidates(q: string, base: string): Promise<Candidate[]> {
         seeders: null,
         resolution: normResolution('', title),
         dualAudio: (audio.includes('ja') && audio.includes('en')) || titleDualAudio(title),
+        videoCodec: titleCodec(title),
         isBatch: r.episode_no == null && (titleIsBatch(title) || Number(r.filecount ?? 0) > 2),
         episode: ep,
         aid: null,
@@ -1223,6 +1236,7 @@ interface SearchOpts {
   preferDualAudio: boolean
   requireDualAudio: boolean
   minSeeders: number
+  excludeCodecs: string[] // video codecs to drop outright, e.g. ['av1']
 }
 
 function passesFilters(c: Candidate, o: SearchOpts): boolean {
@@ -1230,6 +1244,8 @@ function passesFilters(c: Candidate, o: SearchOpts): boolean {
   if (o.minSeeders > 0 && c.seeders != null && c.seeders < o.minSeeders) return false
   if (o.requireResolution && o.resolution && c.resolution !== o.resolution) return false
   if (o.requireDualAudio && !c.dualAudio) return false
+  // Drop unplayable codecs (only when detected — an untagged release is kept).
+  if (c.videoCodec && o.excludeCodecs.includes(c.videoCodec)) return false
   return true
 }
 
@@ -1238,6 +1254,13 @@ function scoreCandidate(c: Candidate, o: SearchOpts): number {
   if (o.resolution && c.resolution === o.resolution) s += 1000
   else s += (RES_RANK[c.resolution] ?? 0) * 100 // closeness when off-target
   if (c.dualAudio) s += o.preferDualAudio ? 400 : 100
+  // Prefer codecs the server can hardware-decode. Our Tesla T4 (Turing) can't
+  // HW-decode AV1, so a forced h264 transcode of AV1 stalls; h264 direct-plays
+  // and HEVC HW-transcodes. Penalty (600) outweighs the seeder cap (500) so a
+  // playable release always beats a higher-seeded AV1 one.
+  if (c.videoCodec === 'h264') s += 300
+  else if (c.videoCodec === 'hevc') s += 250
+  else if (c.videoCodec === 'av1') s -= 600
   s += Math.min(c.seeders ?? 0, 500) // seeders, capped so they don't dominate quality
   return s
 }
@@ -1251,6 +1274,7 @@ function candidateFields(c: Candidate): FlowItem {
     torrent_seeders: c.seeders,
     torrent_resolution: c.resolution || null,
     torrent_dual_audio: c.dualAudio,
+    torrent_codec: c.videoCodec || null,
     torrent_is_batch: c.isBatch,
     torrent_episode: c.episode,
   }
@@ -1302,6 +1326,7 @@ const torrentSearch: NodeImpl = {
       { key: 'requireResolution', label: 'Require exact resolution', kind: 'boolean', default: false, help: 'Off = prefer it but accept the best available.' },
       { key: 'preferDualAudio', label: 'Prefer dual audio (EN+JP)', kind: 'boolean', default: true },
       { key: 'requireDualAudio', label: 'Require dual audio', kind: 'boolean', default: false, help: 'Drops releases without English+Japanese audio. Many fansubs are sub-only.' },
+      { key: 'excludeCodecs', label: 'Exclude codecs', kind: 'text', default: '', help: 'Comma list of video codecs to drop, e.g. "av1". Our Jellyfin GPU (Tesla T4) can’t hardware-decode AV1, so those stall on playback. h264/HEVC are preferred automatically.' },
       { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho only — TsukiHime reports no seeders).' },
       { key: 'minTitleMatch', label: 'Title match (0-1)', kind: 'number', default: 0.5, help: 'Min fraction of the show’s title words a result must contain. Guards against the index returning a different show.' },
       { key: 'maxEpisodes', label: 'Max episodes', kind: 'number', default: 26, help: 'Episode mode: cap on how many recent episodes to queue per show.' },
@@ -1321,6 +1346,10 @@ const torrentSearch: NodeImpl = {
       preferDualAudio: bool(config, 'preferDualAudio', true),
       requireDualAudio: bool(config, 'requireDualAudio', false),
       minSeeders: num(config, 'minSeeders', 1),
+      excludeCodecs: str(config, 'excludeCodecs', '')
+        .split(',')
+        .map((c) => c.trim().toLowerCase())
+        .filter(Boolean),
     }
     const maxEpisodes = Math.max(1, num(config, 'maxEpisodes', 26))
     const minTitleMatch = num(config, 'minTitleMatch', 0.5)
@@ -1432,7 +1461,7 @@ const torrentSearch: NodeImpl = {
           const best = pool.sort((a, b) => scoreCandidate(b, opts) - scoreCandidate(a, opts))[0]
           found.push({ ...item, ...candidateFields(best) })
           ctx.notes.push(
-            `${q}: ${best.resolution || '?'} ${best.dualAudio ? 'dual' : 'sub'} ${best.isBatch ? 'batch' : 'single'} · ${best.seeders ?? '?'} seeders`,
+            `${q}: ${best.resolution || '?'} ${best.videoCodec || '?'} ${best.dualAudio ? 'dual' : 'sub'} ${best.isBatch ? 'batch' : 'single'} · ${best.seeders ?? '?'} seeders`,
           )
         }
       } catch (e) {
