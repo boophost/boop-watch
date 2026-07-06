@@ -13,6 +13,7 @@ import {
   componentToNodeSpec,
   buildSpecResolver,
   detectReferenceCycle,
+  findReferrers,
   type FlowComponentMeta,
 } from './flowComponents.js'
 import * as flowsDb from './flowsDb.js'
@@ -238,6 +239,12 @@ flowRouter.get('/api/flows/components', (_req, res) => {
   res.json({ components: specs })
 })
 
+flowRouter.get('/api/flows/:id/references', (req, res) => {
+  const id = Number(req.params.id)
+  const referrers = findReferrers(id, () => flowsDb.listFlowGraphs())
+  res.json({ references: referrers })
+})
+
 flowRouter.get('/api/flows/:id/interface', (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' })
@@ -301,16 +308,23 @@ flowRouter.put('/api/flows/:id', (req, res) => {
   }
   if (body.component !== undefined) {
     const component = body.component as FlowComponentMeta | null
+    const existing = flowsDb.getFlow(id)
+    if (!existing) {
+      res.status(404).json({ error: 'Flow not found' })
+      return
+    }
+    const prevMeta = parseComponent(existing.component)
     if (component?.published === true) {
-      const existing = flowsDb.getFlow(id)
-      if (!existing) {
-        res.status(404).json({ error: 'Flow not found' })
-        return
-      }
       const graph = patch.graph ?? (JSON.parse(existing.graph) as FlowGraph)
       const publishErr = validatePublish(graph)
       if (publishErr) {
         res.status(400).json({ error: publishErr })
+        return
+      }
+    } else if (prevMeta?.published) {
+      const refs = findReferrers(id, () => flowsDb.listFlowGraphs())
+      if (refs.length > 0) {
+        res.status(409).json({ error: 'flow is referenced by other flows', references: refs })
         return
       }
     }
@@ -325,7 +339,16 @@ flowRouter.put('/api/flows/:id', (req, res) => {
 
 flowRouter.delete('/api/flows/:id', (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isFinite(id) || !flowsDb.deleteFlow(id)) {
+  if (!Number.isFinite(id)) {
+    res.status(404).json({ error: 'Flow not found' })
+    return
+  }
+  const refs = findReferrers(id, () => flowsDb.listFlowGraphs())
+  if (refs.length > 0) {
+    res.status(409).json({ error: 'flow is referenced by other flows', references: refs })
+    return
+  }
+  if (!flowsDb.deleteFlow(id)) {
     res.status(404).json({ error: 'Flow not found' })
     return
   }

@@ -21,6 +21,7 @@ export interface FlowSummary {
   name: string
   description: string | null
   node_count: number
+  published: boolean
   updated_at: string
 }
 
@@ -320,14 +321,24 @@ export function listFlows(): FlowSummary[] {
     } catch {
       /* corrupt graph JSON — surfaced as 0 nodes */
     }
+    const meta = parseComponent(r.component)
     return {
       id: r.id,
       name: r.name,
       description: r.description,
       node_count: nodeCount,
+      published: !!meta?.published,
       updated_at: r.updated_at,
     }
   })
+}
+
+export function listFlowGraphs(): { id: number; name: string; graph: string }[] {
+  return db().prepare('SELECT id, name, graph FROM flows').all() as {
+    id: number
+    name: string
+    graph: string
+  }[]
 }
 
 export function getFlow(id: number): FlowRow | undefined {

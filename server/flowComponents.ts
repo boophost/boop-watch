@@ -96,6 +96,29 @@ export function findSubflowReferences(graph: FlowGraph): number[] {
     .filter((id) => Number.isFinite(id))
 }
 
+export function findReferrers(
+  targetFlowId: number,
+  listAllFlows: () => { id: number; name: string; graph: string }[],
+): { flowId: number; flowName: string }[] {
+  const referrers: { flowId: number; flowName: string }[] = []
+  for (const flow of listAllFlows()) {
+    if (flow.id === targetFlowId) continue
+    let graph: FlowGraph
+    try {
+      graph = JSON.parse(flow.graph) as FlowGraph
+    } catch {
+      continue
+    }
+    for (const node of graph.nodes) {
+      if (node.type === 'flow.subflow' && Number(node.config.flowId) === targetFlowId) {
+        referrers.push({ flowId: flow.id, flowName: flow.name })
+        break
+      }
+    }
+  }
+  return referrers
+}
+
 /**
  * Walks flow.subflow references starting at rootFlowId looking for a cycle
  * (a flow that, transitively, embeds itself). loadGraph should return null
