@@ -5,9 +5,58 @@
 import { Router } from 'express'
 import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
+import type { RunReport } from './flowExecutor.js'
 import * as flowsDb from './flowsDb.js'
+import type { RunActivity } from './flowsDb.js'
 
 export const flowRouter = Router()
+
+const NODE_LABELS = new Map(NODE_SPECS.map((s) => [s.type, s.label]))
+
+// Distil a run report into the activity feed: keep only nodes that actually
+// said something (a note or an error), labelled for humans. Silent pass-through
+// nodes are dropped so the log reads as events, not a graph dump.
+function activityFromReport(graph: FlowGraph, report: RunReport): RunActivity[] {
+  const typeById = new Map(graph.nodes.map((n) => [n.id, n.type]))
+  const activity: RunActivity[] = []
+  for (const [nodeId, node] of Object.entries(report.nodes)) {
+    if (node.notes.length === 0 && !node.error) continue
+    const type = typeById.get(nodeId) ?? nodeId
+    activity.push({
+      node: NODE_LABELS.get(type) ?? type,
+      type,
+      status: node.status,
+      notes: node.notes,
+      ...(node.error ? { error: node.error } : {}),
+    })
+  }
+  return activity
+}
+
+// Run a graph and log it to the rolling activity feed. Shared by the flow-run
+// route and the per-series re-search action so both show up in the Activity tab.
+// Logging never fails the run.
+export async function runFlowAndRecord(
+  graph: FlowGraph,
+  opts: { dryRun: boolean; flowId: number | null; flowName: string },
+): Promise<RunReport> {
+  const report = await runFlow(graph, opts.dryRun)
+  try {
+    flowsDb.recordRun({
+      flow_id: opts.flowId,
+      flow_name: opts.flowName,
+      dry_run: report.dryRun,
+      ok: report.ok,
+      error: report.error ?? null,
+      started_at: report.startedAt,
+      duration_ms: report.durationMs,
+      activity: activityFromReport(graph, report),
+    })
+  } catch (logErr) {
+    console.error('failed to record flow run', logErr)
+  }
+  return report
+}
 
 function parseGraph(raw: unknown): FlowGraph | { error: string } {
   if (typeof raw !== 'object' || raw === null) return { error: 'graph must be an object' }
@@ -22,6 +71,13 @@ function parseGraph(raw: unknown): FlowGraph | { error: string } {
 
 flowRouter.get('/api/flows/node-types', (_req, res) => {
   res.json({ nodeTypes: NODE_SPECS })
+})
+
+// Rolling activity log. Declared before the `/:id` route so "runs" isn't
+// captured as an id.
+flowRouter.get('/api/flows/runs', (req, res) => {
+  const limit = Number(req.query.limit)
+  res.json({ runs: flowsDb.listRuns(Number.isFinite(limit) ? limit : 100) })
 })
 
 flowRouter.get('/api/flows', (_req, res) => {
@@ -94,8 +150,17 @@ flowRouter.delete('/api/flows/:id', (req, res) => {
 })
 
 // One run at a time — flows hit rate-limited upstreams (Jikan) and there is a
-// single admin; a second concurrent run is always a mistake.
+// single admin; a second concurrent run is always a mistake. Exported so the
+// per-series re-search shares the same lock.
 let running = false
+export function acquireFlowLock(): boolean {
+  if (running) return false
+  running = true
+  return true
+}
+export function releaseFlowLock(): void {
+  running = false
+}
 
 flowRouter.post('/api/flows/:id/run', async (req, res) => {
   const id = Number(req.params.id)
@@ -104,19 +169,19 @@ flowRouter.post('/api/flows/:id/run', async (req, res) => {
     res.status(404).json({ error: 'Flow not found' })
     return
   }
-  if (running) {
+  if (!acquireFlowLock()) {
     res.status(409).json({ error: 'A flow is already running' })
     return
   }
   const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
-  running = true
   try {
-    const report = await runFlow(JSON.parse(row.graph) as FlowGraph, dryRun)
+    const graph = JSON.parse(row.graph) as FlowGraph
+    const report = await runFlowAndRecord(graph, { dryRun, flowId: row.id, flowName: row.name })
     res.json({ report })
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: e instanceof Error ? e.message : 'Run failed' })
   } finally {
-    running = false
+    releaseFlowLock()
   }
 })

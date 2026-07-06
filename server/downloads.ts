@@ -30,6 +30,19 @@ function overlap(candidate: string, seriesTokens: string[]): number {
   return seriesTokens.filter((t) => c.includes(t)).length / seriesTokens.length
 }
 
+/**
+ * Best token overlap of a candidate against any of the series' title variants
+ * (romaji / English / Japanese). Release names use whichever title the group
+ * preferred — e.g. a dual-audio "Frieren - Beyond Journey's End" release matches
+ * on the English variant even though our catalog title is romaji "Sousou no
+ * Frieren", which alone would score too low to show up.
+ */
+function bestOverlap(candidate: string, variantTokens: string[][]): number {
+  let best = 0
+  for (const toks of variantTokens) best = Math.max(best, overlap(candidate, toks))
+  return best
+}
+
 function isBatch(name: string): boolean {
   return /\bbatch\b|\bcomplete(?:d)?\b|\bseason\b|\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/i.test(name)
 }
@@ -68,13 +81,20 @@ export interface SeriesDownloadStatus {
 
 export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesDownloadStatus> {
   const series = getSeriesById(seriesId)
-  const seriesTokens = series ? tokens(series.title) : []
+  // Token sets for every title variant we know, so releases named in English or
+  // romaji both match (kanji variants normalize to empty and drop out).
+  const variantTokens = series
+    ? [series.title, series.title_english, series.title_japanese]
+        .filter((t): t is string => !!t)
+        .map(tokens)
+        .filter((t) => t.length > 0)
+    : []
 
   // Episodes already on the public portal, matched to this series by name.
   const siteEpisodes: Record<string, string> = {}
   for (const it of getAllPortalItems()) {
     if (it.type !== 'Episode' || it.index_number == null) continue
-    if (overlap(it.series_name ?? it.name, seriesTokens) >= 0.5) {
+    if (bestOverlap(it.series_name ?? it.name, variantTokens) >= 0.5) {
       siteEpisodes[String(it.index_number)] = it.id
     }
   }
@@ -92,7 +112,7 @@ export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesD
   }
 
   const torrents: SeriesDownload[] = raw
-    .filter((t) => overlap(t.name, seriesTokens) >= 0.6)
+    .filter((t) => bestOverlap(t.name, variantTokens) >= 0.6)
     .map((t) => ({
       hash: t.hash,
       name: t.name,
