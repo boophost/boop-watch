@@ -11,6 +11,8 @@ import {
   deriveInterface,
   validatePublish,
   componentToNodeSpec,
+  buildSpecResolver,
+  detectReferenceCycle,
   type FlowComponentMeta,
 } from './flowComponents.js'
 import * as flowsDb from './flowsDb.js'
@@ -131,14 +133,45 @@ export async function runFlowAndRecord(
   }
 }
 
-function parseGraph(raw: unknown): FlowGraph | { error: string } {
+// flowId is the id of the flow being saved, when known (undefined when
+// creating a graph with no id yet). It's threaded through to reject a
+// flow.subflow node that embeds its own parent flow (directly or, via
+// detectReferenceCycle, transitively) and to resolve flow.subflow ports
+// against other flows' published interfaces during validation.
+function parseGraph(raw: unknown, flowId?: number): FlowGraph | { error: string } {
   if (typeof raw !== 'object' || raw === null) return { error: 'graph must be an object' }
   const g = raw as Partial<FlowGraph>
   if (!Array.isArray(g.nodes) || !Array.isArray(g.edges))
     return { error: 'graph needs nodes[] and edges[]' }
   const graph: FlowGraph = { nodes: g.nodes, edges: g.edges }
-  const invalid = validateGraph(graph)
+
+  if (flowId !== undefined) {
+    const selfRef = graph.nodes.find(
+      (n) => n.type === 'flow.subflow' && Number(n.config.flowId) === flowId,
+    )
+    if (selfRef) return { error: `Node ${selfRef.id}: a flow cannot embed itself as a sub-flow` }
+  }
+
+  const resolver = buildSpecResolver(flowId ?? null, (id) => flowsDb.getFlow(id))
+  const invalid = validateGraph(graph, resolver)
   if (invalid) return { error: invalid }
+
+  if (flowId !== undefined) {
+    // The graph being saved isn't in the DB yet, so serve it directly for the
+    // root id — every other id (already-published flows) loads from the DB.
+    const cycle = detectReferenceCycle(flowId, (id) => {
+      if (id === flowId) return graph
+      const row = flowsDb.getFlow(id)
+      if (!row) return null
+      try {
+        return JSON.parse(row.graph) as FlowGraph
+      } catch {
+        return null
+      }
+    })
+    if (cycle) return { error: cycle }
+  }
+
   return graph
 }
 
@@ -256,7 +289,7 @@ flowRouter.put('/api/flows/:id', (req, res) => {
     patch.description = typeof body.description === 'string' ? body.description : null
   }
   if (body.graph !== undefined) {
-    const parsed = parseGraph(body.graph)
+    const parsed = parseGraph(body.graph, id)
     if ('error' in parsed) {
       res.status(400).json({ error: parsed.error })
       return

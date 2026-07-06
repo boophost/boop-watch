@@ -47,22 +47,37 @@ export interface RunReport {
 
 const SAMPLE_SIZE = 3
 
-export function validateGraph(graph: FlowGraph): string | null {
+export type NodePortSpec = { id: string }
+export type ResolvedNodeSpec = { inputs: NodePortSpec[]; outputs: NodePortSpec[] }
+
+/**
+ * Resolves a node's port spec for node types that aren't in the static
+ * NODE_REGISTRY (currently just `flow.subflow`, whose ports come from the
+ * referenced flow's published interface). Return null to defer to the
+ * registry / report the type as unknown.
+ */
+export type SpecResolver = (node: FlowNode) => ResolvedNodeSpec | null
+
+export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): string | null {
   const ids = new Set<string>()
   for (const node of graph.nodes) {
     if (!node.id || typeof node.id !== 'string') return 'Node missing id'
     if (ids.has(node.id)) return `Duplicate node id: ${node.id}`
     ids.add(node.id)
     const impl = NODE_REGISTRY.get(node.type)
-    if (!impl) return `Unknown node type: ${node.type}`
+    if (!impl) {
+      const resolved = resolveSpec?.(node)
+      if (!resolved) return `Unknown node type: ${node.type}`
+    }
   }
   for (const edge of graph.edges) {
     const source = graph.nodes.find((n) => n.id === edge.source)
     const target = graph.nodes.find((n) => n.id === edge.target)
     if (!source) return `Edge ${edge.id}: unknown source node`
     if (!target) return `Edge ${edge.id}: unknown target node`
-    const sourceSpec = NODE_REGISTRY.get(source.type)!.spec
-    const targetSpec = NODE_REGISTRY.get(target.type)!.spec
+    const sourceSpec = resolveSpec?.(source) ?? NODE_REGISTRY.get(source.type)?.spec
+    const targetSpec = resolveSpec?.(target) ?? NODE_REGISTRY.get(target.type)?.spec
+    if (!sourceSpec || !targetSpec) return `Unknown node type on edge ${edge.id}`
     if (!sourceSpec.outputs.some((o) => o.id === edge.sourceHandle))
       return `Edge ${edge.id}: ${source.type} has no output "${edge.sourceHandle}"`
     if (!targetSpec.inputs.some((i) => i.id === edge.targetHandle))
