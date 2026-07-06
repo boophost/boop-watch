@@ -24,6 +24,7 @@ import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
 import { posthogUiHost } from './posthogConfig.js'
+import { listAllUsers } from './users.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -108,6 +109,17 @@ function requireAdmin(
 app.use('/api/flows', requireAuth, requireAdmin)
 app.use('/api/schedules', requireAuth, requireAdmin)
 app.use(flowRouter)
+
+app.get('/api/users', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const users = await listAllUsers()
+    res.json({ users })
+  } catch (e) {
+    console.error(e)
+    const msg = e instanceof Error ? e.message : 'Failed to list users'
+    res.status(502).json({ error: msg })
+  }
+})
 
 // Discord watch-status presence (opt-in OAuth link + playback heartbeats).
 app.use(discordPresenceRouter(requireAuth))
