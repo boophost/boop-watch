@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Activity as ActivityIcon,
   AlertTriangle,
@@ -7,15 +7,23 @@ import {
   Download,
   FlaskConical,
   FolderInput,
+  Loader2,
   RefreshCw,
   Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { listRuns, type FlowRun, type RunActivity } from '@/lib/flows'
+import { streamActivity, type ActivityStreamEvent, type FlowRun, type RunActivity } from '@/lib/flows'
 
-// How often the feed refetches while the tab is open.
-const POLL_MS = 5000
+// A run being watched live: lifecycle events accumulate here until it resolves
+// into a completed FlowRun (or is aborted).
+interface InProgress {
+  runToken: string
+  flowName: string
+  dryRun: boolean
+  startedAt: string
+  nodes: RunActivity[]
+}
 
 // Relative timestamp like "3m ago" from an ISO string.
 function relTime(iso: string): string {
@@ -41,6 +49,19 @@ function activityIcon(type: string) {
   return ActivityIcon
 }
 
+function DryLiveBadge({ dryRun }: { dryRun: boolean }) {
+  return dryRun ? (
+    <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+      <FlaskConical className="size-3" />
+      dry run
+    </span>
+  ) : (
+    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
+      live
+    </span>
+  )
+}
+
 function ActivityLine({ item }: { item: RunActivity }) {
   const Icon = activityIcon(item.type)
   const failed = item.status === 'error'
@@ -51,15 +72,38 @@ function ActivityLine({ item }: { item: RunActivity }) {
       />
       <div className="min-w-0">
         <span className="text-xs font-medium text-foreground">{item.node}</span>
-        {item.error ? (
-          <p className="text-xs text-red-400">{item.error}</p>
-        ) : null}
+        {item.error ? <p className="text-xs text-red-400">{item.error}</p> : null}
         {item.notes.map((note, i) => (
           <p key={i} className="text-xs text-muted-foreground">
             {note}
           </p>
         ))}
       </div>
+    </li>
+  )
+}
+
+// The card for a run that's currently executing — fills in node-by-node.
+function InProgressCard({ ip }: { ip: InProgress }) {
+  return (
+    <li className="rounded-lg border border-violet-500/40 bg-card p-4 shadow-sm">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Loader2 className="size-4 shrink-0 animate-spin text-violet-400" />
+        <span className="font-medium">{ip.flowName}</span>
+        <DryLiveBadge dryRun={ip.dryRun} />
+        <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+          running · {ip.nodes.length} {ip.nodes.length === 1 ? 'step' : 'steps'}
+        </span>
+      </div>
+      {ip.nodes.length > 0 ? (
+        <ul className="mt-3 flex flex-col gap-2 border-t pt-3">
+          {ip.nodes.map((item, i) => (
+            <ActivityLine key={i} item={item} />
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">Starting…</p>
+      )}
     </li>
   )
 }
@@ -78,16 +122,7 @@ function RunCard({ run }: { run: FlowRun }) {
           className={cn('size-4 shrink-0', run.ok ? 'text-emerald-400' : 'text-red-400')}
         />
         <span className="font-medium">{run.flow_name}</span>
-        {run.dry_run ? (
-          <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-            <FlaskConical className="size-3" />
-            dry run
-          </span>
-        ) : (
-          <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
-            live
-          </span>
-        )}
+        <DryLiveBadge dryRun={run.dry_run} />
         <span
           className="ml-auto shrink-0 text-xs text-muted-foreground"
           title={new Date(run.started_at).toLocaleString()}
@@ -111,55 +146,102 @@ function RunCard({ run }: { run: FlowRun }) {
 
 export default function Activity() {
   const [runs, setRuns] = useState<FlowRun[]>([])
+  const [inProgress, setInProgress] = useState<InProgress | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  // Keep the ref so the poll can refetch without re-subscribing.
-  const load = useCallback(async () => {
-    try {
-      const d = await listRuns(100)
-      setRuns(d.runs)
-      setError('')
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load activity')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  const loadRef = useRef(load)
-  loadRef.current = load
+  const [connected, setConnected] = useState(false)
+  // Bump to force a reconnect (drops the current stream and refetches snapshot).
+  const [gen, setGen] = useState(0)
 
   useEffect(() => {
-    void loadRef.current()
-    // Pause polling while the tab is hidden; resume (and refetch) on focus.
-    const tick = () => {
-      if (!document.hidden) void loadRef.current()
+    let cancelled = false
+    const ac = new AbortController()
+
+    const handle = (ev: ActivityStreamEvent) => {
+      setConnected(true)
+      switch (ev.type) {
+        case 'snapshot':
+          setRuns(ev.runs)
+          setLoading(false)
+          break
+        case 'start':
+          setInProgress({
+            runToken: ev.runToken,
+            flowName: ev.flowName,
+            dryRun: ev.dryRun,
+            startedAt: ev.startedAt,
+            nodes: [],
+          })
+          break
+        case 'node':
+          setInProgress((p) =>
+            p && p.runToken === ev.runToken
+              ? {
+                  ...p,
+                  nodes: [
+                    ...p.nodes,
+                    { node: ev.node, type: ev.nodeType, status: ev.status, notes: ev.notes, error: ev.error },
+                  ],
+                }
+              : p,
+          )
+          break
+        case 'done':
+          setInProgress((p) => (p && p.runToken !== ev.runToken ? p : null))
+          setRuns((prev) => [ev.run, ...prev.filter((r) => r.id !== ev.run.id)].slice(0, 100))
+          break
+        case 'aborted':
+          setInProgress((p) => (p && p.runToken === ev.runToken ? null : p))
+          break
+        default:
+          break // node-start, ping
+      }
     }
-    const timer = window.setInterval(tick, POLL_MS)
-    document.addEventListener('visibilitychange', tick)
+
+    // Reconnect loop: the stream is long-lived, but survive drops (proxy idle,
+    // pod roll) by reconnecting with a short backoff.
+    const loop = async () => {
+      while (!cancelled) {
+        try {
+          await streamActivity((ev) => {
+            if (!cancelled) handle(ev)
+          }, ac.signal)
+        } catch {
+          if (cancelled) return
+          setConnected(false)
+        }
+        if (cancelled) return
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+    }
+    void loop()
     return () => {
-      window.clearInterval(timer)
-      document.removeEventListener('visibilitychange', tick)
+      cancelled = true
+      ac.abort()
     }
-  }, [])
+  }, [gen])
 
   return (
     <div className="min-h-screen">
       <header className="flex items-center gap-4 border-b px-4 py-3 md:px-6">
         <h1 className="min-w-0 flex-1 truncate text-lg font-semibold md:text-xl">Activity</h1>
-        <span className="hidden text-xs text-muted-foreground sm:inline">
-          auto-refreshing · last {runs.length}
+        <span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:inline-flex">
+          <span
+            className={cn(
+              'size-1.5 rounded-full',
+              connected ? 'bg-emerald-400' : 'animate-pulse bg-amber-400',
+            )}
+          />
+          {connected ? 'live' : 'reconnecting…'}
         </span>
-        <Button size="sm" variant="ghost" className="gap-1" onClick={() => void load()}>
+        <Button size="sm" variant="ghost" className="gap-1" onClick={() => setGen((g) => g + 1)}>
           <RefreshCw className="size-4" />
           Refresh
         </Button>
       </header>
       <main className="p-4 md:p-6">
-        {error ? <p className="mb-4 text-sm text-destructive">{error}</p> : null}
-        {loading && runs.length === 0 ? (
+        {loading ? (
           <p className="text-sm text-muted-foreground">Loading activity…</p>
-        ) : runs.length === 0 ? (
+        ) : runs.length === 0 && !inProgress ? (
           <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border py-24 text-center">
             <ActivityIcon className="size-8 text-muted-foreground" />
             <div>
@@ -172,6 +254,7 @@ export default function Activity() {
           </div>
         ) : (
           <ul className="mx-auto flex max-w-2xl flex-col gap-3">
+            {inProgress ? <InProgressCard ip={inProgress} /> : null}
             {runs.map((run) => (
               <RunCard key={run.id} run={run} />
             ))}

@@ -15,6 +15,7 @@ import * as seriesDb from './db.js'
 import { publicRouter, BANNERS_DIR } from './publicRoutes.js'
 import { ensureSeriesBanners } from './banners.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
+import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
 import { warmScope } from './jellyfin.js'
@@ -98,8 +99,10 @@ function requireAdmin(
   next()
 }
 
-// Flow editor APIs (admin-only: flows run external fetches + portal writes).
+// Flow editor + scheduler APIs (admin-only: flows run external fetches + portal
+// writes). Both are served by flowRouter; the gates cover their path prefixes.
 app.use('/api/flows', requireAuth, requireAdmin)
+app.use('/api/schedules', requireAuth, requireAdmin)
 app.use(flowRouter)
 
 // Discord watch-status presence (opt-in OAuth link + playback heartbeats).
@@ -517,7 +520,9 @@ app.get('/config.js', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   res.send(`window.ENV = {
     SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
-    SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)}
+    SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)},
+    POSTHOG_KEY: ${JSON.stringify(process.env.POSTHOG_KEY || '')},
+    POSTHOG_HOST: ${JSON.stringify(process.env.POSTHOG_HOST || 'https://us.i.posthog.com')}
   };`)
 })
 
@@ -539,5 +544,6 @@ if (IS_PROD) {
 app.listen(PORT, () => {
   seriesDb.getDb()
   warmScope()
+  startScheduler()
   console.log(`Server running on http://localhost:${PORT}`)
 })

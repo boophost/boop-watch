@@ -1,5 +1,5 @@
 import { Link, NavLink, Outlet } from 'react-router-dom'
-import { Activity, ExternalLink, Library, LogOut, Workflow } from 'lucide-react'
+import { Activity, CalendarClock, ExternalLink, Library, LogOut, Workflow } from 'lucide-react'
 import { useAuth } from '@/lib/AuthContext'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils'
 const NAV_ITEMS = [
   { to: '/manage', label: 'Library', icon: Library, end: true },
   { to: '/manage/flows', label: 'Flows', icon: Workflow, end: false },
+  { to: '/manage/schedules', label: 'Schedules', icon: CalendarClock, end: false },
   { to: '/manage/activity', label: 'Activity', icon: Activity, end: false },
 ]
 

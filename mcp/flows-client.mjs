@@ -85,6 +85,20 @@ export const flows = {
   save: (id, patch) => api('PUT', `/api/flows/${Number(id)}`, patch),
   remove: (id) => api('DELETE', `/api/flows/${Number(id)}`),
   run: (id, dryRun = true) => api('POST', `/api/flows/${Number(id)}/run`, { dryRun }),
+  // Rolling activity log (one entry per flow run, editor or scheduler or MCP).
+  runs: (limit = 100) => api('GET', `/api/flows/runs?limit=${Number(limit)}`),
+}
+
+// Scheduled flow runs. A schedule = { flowId, kind, spec, dryRun?, enabled? }.
+// kind/spec: 'interval' {every,unit:'minutes'|'hours'} | 'daily' {at:'HH:MM'} |
+// 'weekly' {day:'sun'..'sat',at} | 'once' {runAt:ISO}.
+export const schedules = {
+  list: () => api('GET', '/api/schedules'),
+  get: (id) => api('GET', `/api/schedules/${Number(id)}`),
+  create: (input) => api('POST', '/api/schedules', input),
+  update: (id, patch) => api('PUT', `/api/schedules/${Number(id)}`, patch),
+  remove: (id) => api('DELETE', `/api/schedules/${Number(id)}`),
+  run: (id) => api('POST', `/api/schedules/${Number(id)}/run`),
 }
 
 export { cfg }

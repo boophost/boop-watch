@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '@/lib/AuthContext'
+import { resetAnalytics, track } from '@/lib/analytics'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -21,6 +22,8 @@ export default function Signup() {
     setLoading(true)
     try {
       await signup(email, password)
+      resetAnalytics()
+      track('user_signed_up', { method: 'email', auth_state: 'authenticated' })
       navigate('/profile', { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Signup failed')
