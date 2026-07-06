@@ -157,9 +157,9 @@ drives flows against a port-forwarded staging backend for iteration.
 - `PORT` — default `3000` (the Dockerfile sets it; the dev backend defaults to `3001`)
 - `POSTHOG_KEY` — PostHog project token for portal analytics (public, exposed via `/config.js`;
   unset ⇒ analytics no-op). Events route through `/ingest` reverse proxy on this server.
-  Optional `POSTHOG_HOST` (default US API host, used by the proxy) and `POSTHOG_UI_HOST`
-  (default `https://us.posthog.com`, passed to the SDK for toolbar links). In PostHog project
-  settings, add **Authorized URLs**: `https://watch.boopurno.es` (and `http://localhost:5173` for dev).
+  Optional `POSTHOG_HOST` (`https://us.i.posthog.com` or EU equivalent — selects proxy region)
+  and `POSTHOG_UI_HOST` (defaults from region). In PostHog project settings, set **Authorized URLs**
+  to `https://watch.boopurno.es` and `http://localhost:5173`.
 
 ## Routes
 
