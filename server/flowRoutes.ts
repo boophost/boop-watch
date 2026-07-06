@@ -6,9 +6,11 @@ import { Router } from 'express'
 import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
 import type { RunReport, RunHooks } from './flowExecutor.js'
+import { randomUUID } from 'node:crypto'
 import * as flowsDb from './flowsDb.js'
-import type { RunActivity, ScheduleKind, ScheduleSpec, WeekDay } from './flowsDb.js'
+import type { FlowRunRow, RunActivity, ScheduleKind, ScheduleSpec, WeekDay } from './flowsDb.js'
 import { computeNextRun, runScheduleNow } from './scheduler.js'
+import { emitActivity, subscribeActivity } from './runEvents.js'
 
 export const flowRouter = Router()
 
@@ -43,30 +45,82 @@ export function getLastRecordedRunId(): number | null {
 }
 
 // Run a graph and log it to the rolling activity feed. Shared by the flow-run
-// route and the per-series re-search action so both show up in the Activity tab.
-// Logging never fails the run.
+// route, the scheduler, and the per-series re-search action so all show up in the
+// Activity tab. Also broadcasts lifecycle events on the run bus (runEvents.ts) so
+// the Activity page can watch the run live. Logging never fails the run.
 export async function runFlowAndRecord(
   graph: FlowGraph,
   opts: { dryRun: boolean; flowId: number | null; flowName: string },
   hooks?: RunHooks,
 ): Promise<RunReport> {
-  const report = await runFlow(graph, opts.dryRun, hooks)
-  lastRecordedRunId = null
+  const runToken = randomUUID()
+  const typeById = new Map(graph.nodes.map((n) => [n.id, n.type]))
+  emitActivity({
+    type: 'start',
+    runToken,
+    flowId: opts.flowId,
+    flowName: opts.flowName,
+    dryRun: opts.dryRun,
+    startedAt: new Date().toISOString(),
+  })
+  // Broadcast each node globally in addition to invoking any caller hooks (the
+  // editor's own live stream).
+  const wrapped: RunHooks = {
+    onNodeStart: (nodeId) => {
+      emitActivity({ type: 'node-start', runToken, nodeId })
+      hooks?.onNodeStart?.(nodeId)
+    },
+    onNodeDone: (nodeId, nodeReport) => {
+      const type = typeById.get(nodeId) ?? nodeId
+      emitActivity({
+        type: 'node',
+        runToken,
+        nodeId,
+        node: NODE_LABELS.get(type) ?? type,
+        nodeType: type,
+        status: nodeReport.status,
+        notes: nodeReport.notes,
+        ...(nodeReport.error ? { error: nodeReport.error } : {}),
+      })
+      hooks?.onNodeDone?.(nodeId, nodeReport)
+    },
+  }
+
   try {
-    lastRecordedRunId = flowsDb.recordRun({
+    const report = await runFlow(graph, opts.dryRun, wrapped)
+    lastRecordedRunId = null
+    const activity = activityFromReport(graph, report)
+    try {
+      lastRecordedRunId = flowsDb.recordRun({
+        flow_id: opts.flowId,
+        flow_name: opts.flowName,
+        dry_run: report.dryRun,
+        ok: report.ok,
+        error: report.error ?? null,
+        started_at: report.startedAt,
+        duration_ms: report.durationMs,
+        activity,
+      })
+    } catch (logErr) {
+      console.error('failed to record flow run', logErr)
+    }
+    const runRow: FlowRunRow = {
+      id: lastRecordedRunId ?? -1,
       flow_id: opts.flowId,
       flow_name: opts.flowName,
       dry_run: report.dryRun,
       ok: report.ok,
       error: report.error ?? null,
       started_at: report.startedAt,
-      duration_ms: report.durationMs,
-      activity: activityFromReport(graph, report),
-    })
-  } catch (logErr) {
-    console.error('failed to record flow run', logErr)
+      duration_ms: Math.round(report.durationMs),
+      activity,
+    }
+    emitActivity({ type: 'done', runToken, run: runRow })
+    return report
+  } catch (e) {
+    emitActivity({ type: 'aborted', runToken, error: e instanceof Error ? e.message : String(e) })
+    throw e
   }
-  return report
 }
 
 function parseGraph(raw: unknown): FlowGraph | { error: string } {
@@ -89,6 +143,27 @@ flowRouter.get('/api/flows/node-types', (_req, res) => {
 flowRouter.get('/api/flows/runs', (req, res) => {
   const limit = Number(req.query.limit)
   res.json({ runs: flowsDb.listRuns(Number.isFinite(limit) ? limit : 100) })
+})
+
+// Live activity feed: an initial snapshot of recent runs, then a newline-delimited
+// JSON stream of run lifecycle events (start / node / done / aborted) as they
+// happen — from any source (editor, scheduler, MCP). A periodic ping keeps the
+// connection alive through proxies. Consumed by the Activity page via fetch (not
+// EventSource, so the admin Bearer token rides along).
+flowRouter.get('/api/flows/runs/stream', (req, res) => {
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('X-Accel-Buffering', 'no') // ask proxies (nginx) not to buffer
+  res.flushHeaders?.()
+  const send = (obj: unknown) => res.write(JSON.stringify(obj) + '\n')
+  send({ type: 'snapshot', runs: flowsDb.listRuns(100) })
+  const unsubscribe = subscribeActivity(send)
+  const ping = setInterval(() => send({ type: 'ping' }), 25_000)
+  req.on('close', () => {
+    clearInterval(ping)
+    unsubscribe()
+    res.end()
+  })
 })
 
 flowRouter.get('/api/flows', (_req, res) => {
