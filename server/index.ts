@@ -23,6 +23,7 @@ import { getSeriesDownloadStatus, getSeriesLibraryMedia } from './downloads.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
+import { posthogUiHost } from './posthogConfig.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -525,7 +526,7 @@ app.get('/config.js', (req, res) => {
     SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
     SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)},
     POSTHOG_KEY: ${JSON.stringify(process.env.POSTHOG_KEY || '')},
-    POSTHOG_UI_HOST: ${JSON.stringify(process.env.POSTHOG_UI_HOST || 'https://us.posthog.com')}
+    POSTHOG_UI_HOST: ${JSON.stringify(process.env.POSTHOG_UI_HOST || posthogUiHost())}
   };`)
 })
 
@@ -534,7 +535,11 @@ if (IS_PROD) {
   
   app.use(express.static(distPath))
   app.use((req, res) => {
-    if (req.method === 'GET' && !req.path.startsWith('/api')) {
+    if (
+      req.method === 'GET' &&
+      !req.path.startsWith('/api') &&
+      !req.path.startsWith('/ingest')
+    ) {
       // root-relative so send()'s dotfile check doesn't 404 when the checkout
       // itself lives under a dot-directory (e.g. a .claude worktree)
       res.sendFile('index.html', { root: distPath })

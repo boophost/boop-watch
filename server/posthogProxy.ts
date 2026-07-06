@@ -1,27 +1,23 @@
 import type { Request, Response, NextFunction } from 'express'
-
-const PREFIX = '/ingest'
-
-function posthogHosts(): { api: string; assets: string } {
-  const host = process.env.POSTHOG_HOST || 'https://us.i.posthog.com'
-  if (host.includes('eu')) {
-    return { api: 'eu.i.posthog.com', assets: 'eu-assets.i.posthog.com' }
-  }
-  return { api: 'us.i.posthog.com', assets: 'us-assets.i.posthog.com' }
-}
+import {
+  POSTHOG_INGEST_PREFIX,
+  posthogApiHost,
+  posthogAssetHost,
+  posthogRegion,
+} from './posthogConfig.js'
 
 /** Reverse-proxy PostHog ingest + static assets through our domain (ad-blocker evasion). */
 export function posthogProxy(req: Request, res: Response, next: NextFunction): void {
   const url = req.url ?? ''
-  if (!url.startsWith(PREFIX)) {
+  if (!url.startsWith(POSTHOG_INGEST_PREFIX)) {
     next()
     return
   }
 
-  const pathname = url.slice(PREFIX.length) || '/'
-  const { api, assets } = posthogHosts()
+  const pathname = url.slice(POSTHOG_INGEST_PREFIX.length) || '/'
+  const region = posthogRegion()
   const useAssets = pathname.startsWith('/static/') || pathname.startsWith('/array/')
-  const targetHost = useAssets ? assets : api
+  const targetHost = useAssets ? posthogAssetHost(region) : posthogApiHost(region)
 
   const headers = new Headers()
   for (const [key, values] of Object.entries(req.headers)) {
