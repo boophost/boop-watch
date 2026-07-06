@@ -13,7 +13,7 @@ import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from '
 import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
-import type { FlowGraph } from './flowExecutor.js'
+import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
 import { deriveInterface } from './flowComponents.js'
 
@@ -50,6 +50,12 @@ export interface NodeSpec {
 export interface RunContext {
   dryRun: boolean
   notes: string[]
+  /** Id of the node currently executing in the parent graph (for sub-flow prefixing). */
+  nodeId?: string
+  /** Live progress hooks from the outer runFlow — forwarded into nested runs. */
+  hooks?: RunHooks
+  /** Merge nested graph node reports into the parent run (keys already qualified). */
+  mergeNestedReports?: (nested: Record<string, NodeReport>) => void
 }
 
 export interface NodeImpl {
@@ -2819,8 +2825,11 @@ const subflow: NodeImpl = {
         const portId = String(node.config.portId ?? '')
         return inputs[portId] ?? null
       },
-      qualifyId: (id) => id, // Task 11 will prefix nested hook ids with this node's id
+      qualifyId: (id) => (ctx.nodeId ? `${ctx.nodeId}/${id}` : id),
+      hooks: ctx.hooks,
     })
+
+    ctx.mergeNestedReports?.(inner.nodes)
 
     if (!inner.ok) {
       const failedEntry = Object.entries(inner.nodes).find(([, r]) => r.status === 'error')

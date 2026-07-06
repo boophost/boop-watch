@@ -516,6 +516,12 @@ function FlowEditorInner() {
     selected?.data.specType === 'flow.subflow' ? Number(selected.data.config.flowId) : undefined
   const selectedComponentIface = useComponentInterface(selectedFlowId)
 
+  const innerReports = useMemo(() => {
+    if (!report || !selected || selected.data.specType !== 'flow.subflow') return []
+    const prefix = `${selected.id}/`
+    return Object.entries(report.nodes).filter(([k]) => k.startsWith(prefix))
+  }, [report, selected])
+
   // Every non-boundary node on the canvas that has configurable fields, for
   // the "expose parameters" checklist in the Component panel.
   const exposableFields = useMemo(() => {
@@ -1209,6 +1215,38 @@ function FlowEditorInner() {
                       {note}
                     </p>
                   ))}
+                  {innerReports.length > 0 ? (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-muted-foreground">
+                        Inner steps ({innerReports.length})
+                      </summary>
+                      {innerReports.map(([k, r]) => (
+                        <div key={k} className="mt-2 border-t border-border pt-2">
+                          <p>
+                            {k.split('/').pop()} —{' '}
+                            <span
+                              className={
+                                r.status === 'ok'
+                                  ? 'text-emerald-400'
+                                  : r.status === 'error'
+                                    ? 'text-destructive'
+                                    : 'text-muted-foreground'
+                              }
+                            >
+                              {r.status}
+                            </span>{' '}
+                            · {r.durationMs}ms
+                          </p>
+                          {r.error ? <p className="text-destructive">{r.error}</p> : null}
+                          {r.notes.map((note) => (
+                            <p key={note} className="text-[11px] text-muted-foreground">
+                              {note}
+                            </p>
+                          ))}
+                        </div>
+                      ))}
+                    </details>
+                  ) : null}
                   {Object.entries(selected.data.report.samples).map(([port, items]) =>
                     items.length > 0 ? (
                       <details key={port} className="text-[11px]">
