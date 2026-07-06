@@ -208,6 +208,21 @@ export async function runFlowStream(
 export const listRuns = (limit = 100) =>
   fetchAuth(`/api/flows/runs?limit=${limit}`).then((r) => json<{ runs: FlowRun[] }>(r))
 
+// Outbound-request limiter snapshot (server/httpQueue.ts) for the Activity queue strip.
+export interface QueueStat {
+  inFlight: number
+  queued: number
+  minGapMs: number
+  concurrency: number
+  total: number
+  retried: number
+  lastStartAt: number | null
+  lastError: { at: number; message: string } | null
+}
+
+export const getQueueStats = () =>
+  fetchAuth('/api/flows/queue').then((r) => json<{ queues: Record<string, QueueStat> }>(r))
+
 // Live activity stream events (GET /api/flows/runs/stream). `snapshot` arrives
 // first, then run lifecycle events as they happen; `ping` is a keepalive.
 export type ActivityStreamEvent =

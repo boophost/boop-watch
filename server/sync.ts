@@ -41,7 +41,7 @@ async function ensureEpisodeTitles(mal_id: number): Promise<Map<number, string>>
         if (number != null) rows.push({ number, title: e.title, title_japanese: e.title_japanese ?? null, aired: e.aired ?? null })
       }
       if (!pagination?.has_next_page) break
-      await new Promise((r) => setTimeout(r, 400)) // be polite to Jikan between pages
+      // Jikan spacing handled by the shared 'jikan' queue in jikan.ts.
     }
     if (rows.length) upsertEpisodes(mal_id, rows)
   } catch (e) {
@@ -88,7 +88,7 @@ export async function syncJellyfinToPortal() {
           if (jikanRes.length > 0) {
              imageUrl = pickPosterUrl(jikanRes[0])
           }
-          await new Promise(r => setTimeout(r, 1000)) // 1 second delay to avoid Jikan rate limit
+          // Jikan spacing handled by the shared 'jikan' queue in jikan.ts.
         } catch (e) {
           console.error("Jikan search error:", e)
         }

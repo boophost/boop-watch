@@ -9,6 +9,7 @@
 // title parsing; and counting files on disk shifts everything after a gap in
 // the library (a missing cour made season-3 episodes resolve to season-2 ids).
 import type { Segment } from './watch.js'
+import { limitedFetch } from './httpQueue.js'
 
 const JIKAN = 'https://api.jikan.moe/v4'
 const ANISKIP = 'https://api.aniskip.com/v2'
@@ -19,7 +20,6 @@ const EPS_TTL_AIRING = 6 * 60 * 60 * 1000  // airing entries grow a row per week
 const EPS_TTL_DONE = 7 * 24 * 60 * 60 * 1000
 const MAX_CHAIN = 12          // sequel-chain hops, total (guards a runaway walk)
 const MAX_EP_PAGES = 4        // Jikan pages of 100 eps — plenty for one MAL entry
-const JIKAN_GAP_MS = 350      // Jikan allows ~3 req/s; space chain-walk requests
 const DAY = 24 * 60 * 60 * 1000
 const DATE_SLACK = 3 * DAY    // TVDB vs MAL air dates disagree by up to a day or two
 
@@ -37,14 +37,16 @@ const skipCache = new Map<string, { at: number; segs: Segment[] }>()
 const walkLocks = new Map<string, Promise<void>>()
 
 const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '')
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const parseMs = (s?: string | null): number | null => {
   const t = Date.parse(s || '')
   return Number.isFinite(t) ? t : null
 }
 
+// Through the shared 'jikan' queue so the chain-walk coordinates with every other
+// Jikan caller (the /manage page, flows) instead of racing its own gate. Keep the
+// short 5s timeout — a cold walk shouldn't stall the player route.
 async function jikanJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${JIKAN}${path}`, {
+  const res = await limitedFetch('jikan', `${JIKAN}${path}`, {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(5000),
   })
@@ -112,7 +114,6 @@ const entryFor = (chain: Chain, dateMs: number): ChainEntry | null =>
 async function extendChain(chain: Chain, dateMs: number): Promise<void> {
   while (!entryFor(chain, dateMs) && chain.frontier.length && chain.hops < MAX_CHAIN) {
     const id = chain.frontier[0]
-    await sleep(JIKAN_GAP_MS)
     let data: JikanFull | undefined
     try {
       data = (await jikanJson<{ data?: JikanFull }>(`/anime/${id}/full`)).data
@@ -175,7 +176,6 @@ async function episodeRows(entry: ChainEntry): Promise<EpRow[]> {
   if (cached && Date.now() - cached.at < cached.ttl) return cached.rows
   const rows: EpRow[] = []
   for (let page = 1; page <= MAX_EP_PAGES; page++) {
-    if (page > 1) await sleep(JIKAN_GAP_MS)
     const json = await jikanJson<{
       data?: Array<{ mal_id: number; aired?: string | null }>
       pagination?: { has_next_page?: boolean }
@@ -223,7 +223,8 @@ async function fetchSkipTimes(malId: number, ep: number, epLenSec: number): Prom
   // Empty answers retry sooner: submissions for a fresh episode arrive over
   // hours-to-days, and a transient 404 must not stick.
   if (cached && Date.now() - cached.at < (cached.segs.length ? SKIP_TTL : NEG_TTL)) return cached.segs
-  const res = await fetch(
+  const res = await limitedFetch(
+    'aniskip',
     `${ANISKIP}/skip-times/${malId}/${ep}?types[]=op&types[]=ed&episodeLength=${epLenSec}`,
     { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(5000) },
   )

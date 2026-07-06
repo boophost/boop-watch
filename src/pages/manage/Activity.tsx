@@ -8,12 +8,16 @@ import {
   FlaskConical,
   FolderInput,
   Loader2,
+  Network,
   RefreshCw,
   Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { streamActivity, type ActivityStreamEvent, type FlowRun, type RunActivity } from '@/lib/flows'
+import {
+  getQueueStats, streamActivity,
+  type ActivityStreamEvent, type FlowRun, type QueueStat, type RunActivity,
+} from '@/lib/flows'
 
 // A run being watched live: lifecycle events accumulate here until it resolves
 // into a completed FlowRun (or is aborted).
@@ -144,13 +148,96 @@ function RunCard({ run }: { run: FlowRun }) {
   )
 }
 
+// Live snapshot of the outbound-request limiter (server/httpQueue.ts): one chip
+// per service that's been used, showing in-flight/queued and lifetime totals so
+// the admin can see rate-limited traffic (Jikan, TsukiHime, AniList, …) as it
+// flows. Hidden entirely until at least one request has gone out.
+const QUEUE_LABELS: Record<string, string> = {
+  jikan: 'Jikan', tsukihime: 'TsukiHime', tosho: 'AnimeTosho', anilist: 'AniList',
+  kitsu: 'Kitsu', jimaku: 'Jimaku', aniskip: 'AniSkip', other: 'Other',
+}
+
+function QueueStrip({ queues }: { queues: Record<string, QueueStat> }) {
+  const entries = Object.entries(queues)
+    .filter(([, q]) => q.total > 0 || q.inFlight > 0 || q.queued > 0)
+    .sort((a, b) => b[1].total - a[1].total)
+  if (entries.length === 0) return null
+  return (
+    <div className="mb-4 rounded-lg border border-border bg-card p-3">
+      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+        <Network className="size-3.5" />
+        Outbound request queues
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {entries.map(([key, q]) => {
+          const busy = q.inFlight > 0 || q.queued > 0
+          return (
+            <div
+              key={key}
+              className={cn(
+                'flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs',
+                busy ? 'border-violet-500/50 bg-violet-500/10' : 'border-border',
+              )}
+              title={
+                q.lastError
+                  ? `last error: ${q.lastError.message}`
+                  : `${q.concurrency}× concurrent, ${q.minGapMs}ms gap`
+              }
+            >
+              {busy ? (
+                <Loader2 className="size-3.5 shrink-0 animate-spin text-violet-400" />
+              ) : q.lastError ? (
+                <AlertTriangle className="size-3.5 shrink-0 text-amber-400" />
+              ) : (
+                <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" />
+              )}
+              <span className="font-medium text-foreground">{QUEUE_LABELS[key] ?? key}</span>
+              {busy ? (
+                <span className="tabular-nums text-violet-300">
+                  {q.inFlight}▶ {q.queued > 0 ? `${q.queued}⏳` : ''}
+                </span>
+              ) : null}
+              <span className="tabular-nums text-muted-foreground">
+                {q.total}
+                {q.retried > 0 ? ` · ${q.retried} retried` : ''}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export default function Activity() {
   const [runs, setRuns] = useState<FlowRun[]>([])
   const [inProgress, setInProgress] = useState<InProgress | null>(null)
   const [loading, setLoading] = useState(true)
   const [connected, setConnected] = useState(false)
+  const [queues, setQueues] = useState<Record<string, QueueStat>>({})
   // Bump to force a reconnect (drops the current stream and refetches snapshot).
   const [gen, setGen] = useState(0)
+
+  // Poll the outbound-request queue snapshot (not part of the activity stream).
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const { queues } = await getQueueStats()
+        if (!cancelled) setQueues(queues)
+      } catch {
+        /* transient — keep the last snapshot */
+      }
+    }
+    void tick()
+    const iv = setInterval(() => {
+      if (!document.hidden) void tick()
+    }, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(iv)
+    }
+  }, [gen])
 
   useEffect(() => {
     let cancelled = false
@@ -239,6 +326,9 @@ export default function Activity() {
         </Button>
       </header>
       <main className="p-4 md:p-6">
+        <div className="mx-auto max-w-2xl">
+          <QueueStrip queues={queues} />
+        </div>
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading activity…</p>
         ) : runs.length === 0 && !inProgress ? (
