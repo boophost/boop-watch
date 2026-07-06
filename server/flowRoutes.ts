@@ -11,6 +11,7 @@ import * as flowsDb from './flowsDb.js'
 import type { FlowRunRow, RunActivity, ScheduleKind, ScheduleSpec, WeekDay } from './flowsDb.js'
 import { computeNextRun, runScheduleNow } from './scheduler.js'
 import { emitActivity, subscribeActivity } from './runEvents.js'
+import { queueStats } from './httpQueue.js'
 
 export const flowRouter = Router()
 
@@ -143,6 +144,12 @@ flowRouter.get('/api/flows/node-types', (_req, res) => {
 flowRouter.get('/api/flows/runs', (req, res) => {
   const limit = Number(req.query.limit)
   res.json({ runs: flowsDb.listRuns(Number.isFinite(limit) ? limit : 100) })
+})
+
+// Live snapshot of the outbound-request limiter (server/httpQueue.ts) — per-service
+// in-flight/queued counts + lifetime totals for the Activity-tab queue strip.
+flowRouter.get('/api/flows/queue', (_req, res) => {
+  res.json({ queues: queueStats() })
 })
 
 // Live activity feed: an initial snapshot of recent runs, then a newline-delimited

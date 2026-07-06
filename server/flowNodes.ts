@@ -12,6 +12,7 @@ import { listSeries, upsertSeriesMetadata } from './db.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
+import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 
 const execFileP = promisify(execFile)
 
@@ -84,25 +85,12 @@ const allInputs = (inputs: Record<string, FlowItem[]>): FlowItem[] =>
 
 const USER_AGENT = 'boop-watch-flows/1.0'
 
-async function fetchJson(url: string): Promise<unknown> {
-  // Retry on 429, honouring Retry-After. TsukiHime documents per-IP windows
-  // (120 req/min default, 50 req/min for /v1/search/torrents) and returns 429 +
-  // Retry-After when exceeded; our per-request spacing keeps us under, this is
-  // the safety net for a burst that still trips a fixed window.
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-      signal: AbortSignal.timeout(20_000),
-    })
-    if (res.status === 429 && attempt < 3) {
-      const retryAfter = Number(res.headers.get('retry-after'))
-      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000 * (attempt + 1)
-      await new Promise((r) => setTimeout(r, Math.min(waitMs, 30_000)))
-      continue
-    }
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${new URL(url).host}`)
-    return res.json()
-  }
+// Through the shared limiter, keyed by host — TsukiHime and AnimeTosho each get
+// their own min-gap + Retry-After-honouring retry (TsukiHime documents per-IP
+// windows: 120 req/min default, 50 req/min for /v1/search/torrents), and the
+// generic source.http node gets limiting for free (hostKey falls back to 'other').
+function fetchJson(url: string): Promise<unknown> {
+  return limitedJson(hostKey(url), url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } })
 }
 
 /** Resolves a dot path ("data.results") into a fetched JSON document. */
@@ -1085,7 +1073,7 @@ const jikanEnrich: NodeImpl = {
         ctx.notes.push(`Jikan error for "${q}": ${e instanceof Error ? e.message : String(e)}`)
         missed.push(item)
       }
-      await new Promise((r) => setTimeout(r, 1000)) // Jikan rate limit
+      // Jikan spacing handled by the shared 'jikan' queue.
     }
     if (maxItems > 0 && items.length > maxItems) {
       ctx.notes.push(`capped at ${maxItems} of ${items.length} items`)
@@ -1517,10 +1505,7 @@ const torrentSearch: NodeImpl = {
         ctx.notes.push(`search error for "${q}": ${e instanceof Error ? e.message : String(e)}`)
         missed.push(item)
       }
-      // Space searches under the index's rate limit. TsukiHime documents 50
-      // req/min for /v1/search/torrents (→ 1.3s spacing keeps headroom under the
-      // fixed window); AnimeTosho is undocumented, keep the polite 500ms.
-      await new Promise((r) => setTimeout(r, provider === 'tsukihime' ? 1300 : 500))
+      // Rate-limit spacing is handled by the shared queue (tsukihime/tosho keys).
     }
     if (maxItems > 0 && items.length > maxItems) {
       ctx.notes.push(`capped at ${maxItems} of ${items.length} shows`)
@@ -1898,9 +1883,8 @@ const fetchSubs: NodeImpl = {
     }
 
     const jimaku = async (path: string): Promise<unknown> => {
-      const res = await fetch(base + path, {
+      const res = await limitedFetch('jimaku', base + path, {
         headers: { Authorization: apiKey, Accept: 'application/json', 'User-Agent': USER_AGENT },
-        signal: AbortSignal.timeout(20_000),
       })
       if (!res.ok) throw new Error(`Jimaku ${res.status} ${res.statusText}`)
       return res.json()
@@ -1956,7 +1940,7 @@ const fetchSubs: NodeImpl = {
         ctx.notes.push(`Jimaku error for "${query || anilist}": ${e instanceof Error ? e.message : String(e)}`)
         missed.push(item)
       }
-      await new Promise((r) => setTimeout(r, 500)) // be polite to Jimaku
+      // Jimaku API spacing handled by the shared 'jimaku' queue.
     }
     ctx.notes.push(ctx.dryRun ? `dry run — resolved ${found.length} Jimaku sub(s)` : `fetched ${found.length} sub(s), ${missed.length} missed`)
     return { found, missed }
@@ -2186,7 +2170,7 @@ const metadataEnrich: NodeImpl = {
         ctx.notes.push(`metadata lookup failed for mal ${mal}: ${e instanceof Error ? e.message : String(e)}`)
         skipped.push(item)
       }
-      await new Promise((r) => setTimeout(r, 1000)) // Jikan rate limit
+      // Jikan spacing handled by the shared 'jikan' queue.
     }
     ctx.notes.push(
       ctx.dryRun

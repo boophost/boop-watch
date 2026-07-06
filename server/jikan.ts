@@ -1,4 +1,13 @@
+import { limitedFetch } from './httpQueue.js'
+
 const JIKAN_BASE = 'https://api.jikan.moe/v4'
+
+// Jikan allows ~3 req/s; the shared 'jikan' queue serializes every caller
+// (search + detail + episodes on one page load, plus aniskip's chain-walk) so
+// they don't burst and trip 429s — Cloudflare fronts us and turns a 429 into a
+// plain-text 502 the SPA can't JSON.parse. See server/httpQueue.ts.
+const jikanGet = (url: string | URL): Promise<Response> =>
+  limitedFetch('jikan', url, { headers: { Accept: 'application/json' } })
 
 export interface JikanAnimeBrief {
   mal_id: number
@@ -44,9 +53,7 @@ export async function searchAnime(
   u.searchParams.set('limit', String(limit))
   u.searchParams.set('order_by', 'popularity')
 
-  const res = await fetch(u, {
-    headers: { Accept: 'application/json' },
-  })
+  const res = await jikanGet(u)
 
   if (res.status === 429) {
     throw new Error('Rate limited — try again in a moment')
@@ -107,9 +114,7 @@ function jikanFetchError(res: Response): Error {
 }
 
 export async function fetchAnimeFull(malId: number): Promise<JikanAnimeFull> {
-  const res = await fetch(`${JIKAN_BASE}/anime/${malId}/full`, {
-    headers: { Accept: 'application/json' },
-  })
+  const res = await jikanGet(`${JIKAN_BASE}/anime/${malId}/full`)
   if (!res.ok) throw jikanFetchError(res)
   const json = (await res.json()) as { data?: JikanAnimeFull }
   if (!json.data) throw new Error('No anime data from Jikan')
@@ -122,7 +127,7 @@ export async function fetchAnimeEpisodesPage(
 ): Promise<{ episodes: JikanEpisodeRow[]; pagination: JikanEpisodesPagination }> {
   const u = new URL(`${JIKAN_BASE}/anime/${malId}/episodes`)
   u.searchParams.set('page', String(page))
-  const res = await fetch(u, { headers: { Accept: 'application/json' } })
+  const res = await jikanGet(u)
   if (!res.ok) throw jikanFetchError(res)
   const json = (await res.json()) as {
     data?: JikanEpisodeRow[]
