@@ -22,6 +22,8 @@ import { warmScope } from './jellyfin.js'
 import { getSeriesDownloadStatus, getSeriesLibraryMedia } from './downloads.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
+import { posthogProxy } from './posthogProxy.js'
+import { posthogUiHost } from './posthogConfig.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -34,6 +36,8 @@ const AUTH_PASSWORD = process.env.AUTH_PASSWORD ?? 'changeme'
 const COOKIE_NAME = 'ai_session'
 const IS_PROD = process.env.NODE_ENV === 'production'
 
+// Before body parsers — PostHog proxy forwards the raw request stream.
+app.use(posthogProxy)
 app.use(express.json())
 app.use(cookieParser())
 
@@ -522,7 +526,7 @@ app.get('/config.js', (req, res) => {
     SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
     SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)},
     POSTHOG_KEY: ${JSON.stringify(process.env.POSTHOG_KEY || '')},
-    POSTHOG_HOST: ${JSON.stringify(process.env.POSTHOG_HOST || 'https://us.i.posthog.com')}
+    POSTHOG_UI_HOST: ${JSON.stringify(process.env.POSTHOG_UI_HOST || posthogUiHost())}
   };`)
 })
 
@@ -531,7 +535,11 @@ if (IS_PROD) {
   
   app.use(express.static(distPath))
   app.use((req, res) => {
-    if (req.method === 'GET' && !req.path.startsWith('/api')) {
+    if (
+      req.method === 'GET' &&
+      !req.path.startsWith('/api') &&
+      !req.path.startsWith('/ingest')
+    ) {
       // root-relative so send()'s dotfile check doesn't 404 when the checkout
       // itself lives under a dot-directory (e.g. a .claude worktree)
       res.sendFile('index.html', { root: distPath })
