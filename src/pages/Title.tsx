@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
-import { getTitle, imgUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
+import { getTitle, imgUrl, backdropUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
 import { useAuth } from '@/lib/AuthContext'
 
 const initials = (n: string) =>
@@ -44,7 +44,7 @@ function DetailShell({
   return (
     <main>
       <div className="hero">
-        <div className="backdrop" style={{ backgroundImage: `url('${imgUrl(id)}')` }} />
+        <div className="backdrop" style={{ backgroundImage: `url('${backdropUrl(id)}')` }} />
         <div className="scrim" />
       </div>
       <div className="series-head">

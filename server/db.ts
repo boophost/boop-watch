@@ -30,6 +30,9 @@ export interface SeriesRow {
   studios: string | null // JSON array of names
   genres: string | null // JSON array of names
   metadata_updated_at: string | null
+  // Wide banner (AniList bannerImage) for the portal season hero. null = not yet
+  // fetched, '' = fetched but AniList had none, otherwise the URL.
+  banner_url: string | null
 }
 
 // Columns added after the original 5-field schema. Applied as additive ALTERs so
@@ -48,6 +51,7 @@ const SERIES_EXTRA_COLUMNS: [string, string][] = [
   ['studios', 'TEXT'],
   ['genres', 'TEXT'],
   ['metadata_updated_at', 'TEXT'],
+  ['banner_url', 'TEXT'],
 ]
 
 export interface SeriesMetadata {
@@ -225,6 +229,11 @@ export function getEpisodeTitles(mal_id: number): Map<number, string> {
     .prepare('SELECT number, title FROM series_episodes WHERE mal_id = ?')
     .all(mal_id) as { number: number; title: string | null }[]
   return new Map(rows.filter((r) => r.title).map((r) => [r.number, r.title as string]))
+}
+
+/** Persist the AniList banner for a series (store '' to mark "fetched, none"). */
+export function setSeriesBanner(mal_id: number, banner_url: string): void {
+  getDb().prepare('UPDATE series SET banner_url = ? WHERE mal_id = ?').run(banner_url, mal_id)
 }
 
 export function upsertEpisodes(mal_id: number, episodes: EpisodeRow[]): void {
