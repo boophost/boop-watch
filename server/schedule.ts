@@ -271,4 +271,29 @@ export async function getSchedule(weekParam: string): Promise<SchedulePayload> {
   }
 }
 
+// A single library airing flattened for the release trigger: a stable dedupe
+// key (title|ep|date), a flow-item payload, and whether its air time has passed.
+// Shared by the scheduler's release watcher and the trigger.release node's
+// manual sample. Library-filtered like the schedule itself.
+export interface LibraryAiring {
+  key: string
+  aired: boolean
+  item: { title: string; ep: string; air_date: string; air_time: string; type: string; img: string | null }
+}
+
+export async function libraryAirings(): Promise<LibraryAiring[]> {
+  const payload = await getSchedule('')
+  const out: LibraryAiring[] = []
+  for (const day of payload.days) {
+    for (const e of day.events) {
+      out.push({
+        key: `${e.title}|${e.ep}|${day.iso}`,
+        aired: e.aired,
+        item: { title: e.title, ep: e.ep, air_date: day.iso, air_time: e.time, type: e.type, img: e.img },
+      })
+    }
+  }
+  return out
+}
+
 export { SCHEDULE_TZ }

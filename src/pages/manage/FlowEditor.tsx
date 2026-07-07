@@ -53,6 +53,7 @@ import {
   portCompatible,
   resolveNodePorts,
   propagateRecordTypes,
+  type RunTrigger,
   type NodeSpec,
   type NodeCategory,
   type NodePort,
@@ -78,6 +79,10 @@ interface FlowNodeData extends Record<string, unknown> {
   report?: NodeReport
   running?: boolean
   onEditorChange?: (patch: Record<string, unknown>) => void
+  /** Fire the flow from this trigger node (per-node ▶). Set on trigger nodes. */
+  onRunTrigger?: () => void
+  /** True while any run is in progress (disables the per-node ▶). */
+  runDisabled?: boolean
 }
 
 type RFNode = Node<FlowNodeData, 'flow' | 'sticky' | 'arrow' | 'group'>
@@ -137,6 +142,17 @@ const portTitle = (p: NodePort, eff?: PortDataType) =>
 /** Effective (propagated) port types keyed `${nodeId}:in|out:${portId}`, so a
  * generic node's sockets/wires show the record subtype flowing through it. */
 const PropagatedTypesContext = createContext<Map<string, PortDataType>>(new Map())
+
+/** The RunTrigger a trigger node fires from its ▶ button, or null for non-entry
+ * nodes (e.g. trigger.fire, which publishes rather than starts). manual:true so
+ * event triggers emit a sample. */
+function runTriggerFor(specType: string, config: Record<string, unknown>): RunTrigger | null {
+  if (specType === 'trigger.start')
+    return { kind: 'start', name: String(config.name ?? 'start'), manual: true }
+  if (specType === 'trigger.new-item') return { kind: 'new-item', manual: true }
+  if (specType === 'trigger.release') return { kind: 'release', manual: true }
+  return null
+}
 
 /** Categories a flow can publish itself as when exposed as a reusable component. */
 const COMPONENT_CATEGORIES: Exclude<NodeCategory, 'boundary'>[] = [
@@ -433,13 +449,29 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
         <span className="truncate text-xs font-medium">
           {componentLabel(componentInfo) ?? spec.label}
         </span>
-        {running ? (
-          <Loader2 className="ml-auto size-3.5 shrink-0 animate-spin text-ring" />
-        ) : report?.status === 'ok' ? (
-          <Check className="ml-auto size-3.5 shrink-0 text-emerald-400" />
-        ) : report?.status === 'error' ? (
-          <AlertTriangle className="ml-auto size-3.5 shrink-0 text-destructive" />
-        ) : null}
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          {data.onRunTrigger ? (
+            <button
+              type="button"
+              title="Run the flow from this trigger"
+              className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-lime-400 disabled:opacity-40"
+              disabled={data.runDisabled}
+              onClick={(e) => {
+                e.stopPropagation()
+                data.onRunTrigger?.()
+              }}
+            >
+              <Play className="size-3.5" />
+            </button>
+          ) : null}
+          {running ? (
+            <Loader2 className="size-3.5 animate-spin text-ring" />
+          ) : report?.status === 'ok' ? (
+            <Check className="size-3.5 text-emerald-400" />
+          ) : report?.status === 'error' ? (
+            <AlertTriangle className="size-3.5 text-destructive" />
+          ) : null}
+        </div>
       </div>
       {inputs.length > 0 ? (
         <div className="border-b border-border py-1">
@@ -661,6 +693,11 @@ function FlowEditorInner() {
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [runningKind, setRunningKind] = useState<'dry' | 'real' | null>(null)
+  // Dry vs Live is a persistent toggle (replaces the old Dry run / Apply buttons);
+  // the run functions read it. A ref lets per-node ▶ handlers call the latest run.
+  const [live, setLive] = useState(false)
+  const runRef = useRef<(dryRun: boolean, trigger?: RunTrigger) => void>(() => {})
+  const liveRef = useRef(live)
   const [report, setReport] = useState<RunReport | null>(null)
   const [error, setError] = useState('')
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -762,16 +799,21 @@ function FlowEditorInner() {
 
   const displayNodes = useMemo(
     () =>
-      nodes.map((n) => ({
-        ...n,
-        data: {
-          ...n.data,
-          onEditorChange: isEditorNode(n.data.specType)
-            ? (patch: Record<string, unknown>) => patchEditorConfig(n.id, patch)
-            : undefined,
-        },
-      })),
-    [nodes, patchEditorConfig],
+      nodes.map((n) => {
+        const trigger = runTriggerFor(n.data.specType, n.data.config)
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            onEditorChange: isEditorNode(n.data.specType)
+              ? (patch: Record<string, unknown>) => patchEditorConfig(n.id, patch)
+              : undefined,
+            onRunTrigger: trigger ? () => runRef.current(!liveRef.current, trigger) : undefined,
+            runDisabled: runningKind !== null,
+          },
+        }
+      }),
+    [nodes, patchEditorConfig, runningKind],
   )
 
   const togglePublish = (published: boolean) => {
@@ -1198,8 +1240,8 @@ function FlowEditorInner() {
     }
   }
 
-  const run = async (dryRun: boolean) => {
-    if (!dryRun && !window.confirm('Really run this flow? It will write to the portal database.')) {
+  const run = async (dryRun: boolean, trigger?: RunTrigger) => {
+    if (!dryRun && !window.confirm('Really run this flow live? It will write to the portal database.')) {
       return
     }
     setRunningKind(dryRun ? 'dry' : 'real')
@@ -1212,19 +1254,24 @@ function FlowEditorInner() {
     try {
       if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
       setDirty(false)
-      const report = await runFlowStream(id, dryRun, (ev) => {
-        if (ev.type === 'start') {
-          setNodes((ns) =>
-            ns.map((n) => (n.id === ev.id ? { ...n, data: { ...n.data, running: true } } : n)),
-          )
-        } else if (ev.type === 'node') {
-          setNodes((ns) =>
-            ns.map((n) =>
-              n.id === ev.id ? { ...n, data: { ...n.data, report: ev.report, running: false } } : n,
-            ),
-          )
-        }
-      })
+      const report = await runFlowStream(
+        id,
+        dryRun,
+        (ev) => {
+          if (ev.type === 'start') {
+            setNodes((ns) =>
+              ns.map((n) => (n.id === ev.id ? { ...n, data: { ...n.data, running: true } } : n)),
+            )
+          } else if (ev.type === 'node') {
+            setNodes((ns) =>
+              ns.map((n) =>
+                n.id === ev.id ? { ...n, data: { ...n.data, report: ev.report, running: false } } : n,
+              ),
+            )
+          }
+        },
+        trigger,
+      )
       setReport(report)
       if (report.error) setError(report.error)
       // Reconcile against the final report (covers validation errors that emit
@@ -1239,6 +1286,11 @@ function FlowEditorInner() {
       setRunningKind(null)
     }
   }
+
+  // Keep the latest run + live flag reachable from the memoised per-node ▶
+  // handlers (which are built before `run` is defined in render order).
+  runRef.current = run
+  liveRef.current = live
 
   if (loading) {
     return (
@@ -1339,29 +1391,41 @@ function FlowEditorInner() {
               </>
             ) : null}
           </div>
+          {/* Dry vs Live applies to every run — the per-trigger ▶ buttons and the
+              whole-flow Run below. */}
+          <div
+            className="flex overflow-hidden rounded-md border border-input text-xs"
+            title="Dry run leaves sinks untouched; Live writes for real"
+          >
+            <button
+              type="button"
+              className={`px-2 py-1 ${!live ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground'}`}
+              onClick={() => setLive(false)}
+            >
+              Dry
+            </button>
+            <button
+              type="button"
+              className={`px-2 py-1 ${live ? 'bg-amber-500/20 font-medium text-amber-500' : 'text-muted-foreground'}`}
+              onClick={() => setLive(true)}
+            >
+              Live
+            </button>
+          </div>
           <Button
             variant="outline"
             size="sm"
             className="gap-1"
             disabled={runningKind !== null}
-            onClick={() => void run(true)}
+            title="Run the whole flow (every trigger). Use a trigger node’s ▶ to fire just that entry point."
+            onClick={() => void run(!live)}
           >
-            {runningKind === 'dry' ? (
+            {runningKind !== null ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
               <Play className="size-4" />
             )}
-            <span className="hidden sm:inline">Dry run</span>
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1"
-            disabled={runningKind !== null}
-            onClick={() => void run(false)}
-          >
-            {runningKind === 'real' ? <Loader2 className="size-4 animate-spin" /> : null}
-            <span>Apply</span>
+            <span className="hidden sm:inline">Run</span>
           </Button>
           <Button size="sm" className="gap-1" disabled={saving || !dirty} onClick={() => void save()}>
             <Save className="size-4" />

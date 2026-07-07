@@ -11,18 +11,26 @@ import {
   runFlowAndRecord,
   getLastRecordedRunId,
   fireTrigger,
+  fireEvent,
 } from './flowRoutes.js'
 import { buildSpecResolver } from './flowComponents.js'
 import {
   dueSchedules,
   getFlow,
   markScheduleFired,
+  flowsWithTriggerType,
+  triggerStateHas,
+  triggerStateAdd,
+  triggerStateSeeded,
+  markTriggerSeeded,
   type FlowSchedule,
   type ScheduleKind,
   type ScheduleSpec,
   type WeekDay,
 } from './flowsDb.js'
-import { SCHEDULE_TZ } from './schedule.js'
+import { getAllPortalItems } from './portalDb.js'
+import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
+import type { FlowItem } from './flowNodes.js'
 
 const DAY_INDEX: Record<WeekDay, number> = {
   sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
@@ -183,10 +191,10 @@ function rollSchedule(sched: FlowSchedule, now: Date): void {
   })
 }
 
-async function tick(): Promise<void> {
+// The soonest-due schedule, if any (the rest wait for the next tick).
+async function fireDueSchedule(): Promise<void> {
   const due = dueSchedules(new Date().toISOString())
   if (due.length === 0) return
-  // Take the soonest-due; the rest wait for the next tick.
   const sched = due[0]
   if (sched.trigger_name) {
     // Name-based: roll the cadence now, then publish — fireTrigger takes the
@@ -204,6 +212,57 @@ async function tick(): Promise<void> {
   } finally {
     releaseFlowLock()
   }
+}
+
+// --- Event-trigger watchers ------------------------------------------------
+// Poll each event source; fire flows whose entry point is the matching event
+// trigger for genuinely-new events. Guarded by subscriber existence so nothing
+// is polled when no flow listens. The first pass per kind seeds current state
+// without firing (so a deploy doesn't fire for the whole existing library).
+
+// New public-library titles (Series/Movie) since last seen.
+async function watchNewItems(): Promise<void> {
+  if (flowsWithTriggerType('trigger.new-item').length === 0) return
+  const titles = getAllPortalItems().filter((p) => p.type === 'Series' || p.type === 'Movie')
+  if (!triggerStateSeeded('new-item')) {
+    triggerStateAdd('new-item', titles.map((t) => t.id))
+    markTriggerSeeded('new-item')
+    return
+  }
+  const fresh = titles.filter((t) => !triggerStateHas('new-item', t.id))
+  if (fresh.length === 0) return
+  triggerStateAdd('new-item', fresh.map((t) => t.id))
+  await fireEvent('new-item', fresh as unknown as FlowItem[]).catch((e) =>
+    console.error('scheduler: fireEvent(new-item) threw', e),
+  )
+}
+
+// Library airings whose air time has passed since last seen.
+async function watchReleases(): Promise<void> {
+  if (flowsWithTriggerType('trigger.release').length === 0) return
+  const airings = await libraryAirings()
+  const aired = airings.filter((a) => a.aired)
+  if (!triggerStateSeeded('release')) {
+    triggerStateAdd('release', aired.map((a) => a.key))
+    markTriggerSeeded('release')
+    return
+  }
+  const fresh = aired.filter((a) => !triggerStateHas('release', a.key))
+  if (fresh.length === 0) return
+  triggerStateAdd('release', fresh.map((a) => a.key))
+  // One fire per newly-aired episode so downstream sees a single airing.
+  for (const a of fresh) {
+    await fireEvent('release', [a.item as unknown as FlowItem]).catch((e) =>
+      console.error('scheduler: fireEvent(release) threw', e),
+    )
+  }
+}
+
+async function tick(): Promise<void> {
+  await fireDueSchedule()
+  // Watchers run after the schedule pass (they take the flow lock per run).
+  await watchNewItems().catch((e) => console.error('scheduler: watchNewItems threw', e))
+  await watchReleases().catch((e) => console.error('scheduler: watchReleases threw', e))
 }
 
 let timer: ReturnType<typeof setInterval> | null = null

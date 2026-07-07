@@ -6,7 +6,7 @@ import { Router } from 'express'
 import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
 import type { RunReport, RunFlowResult, RunHooks, SpecResolver } from './flowExecutor.js'
-import type { FlowItem, TriggerEvent, FireRequest } from './flowNodes.js'
+import type { FlowItem, TriggerEvent, TriggerKind, FireRequest } from './flowNodes.js'
 import { randomUUID } from 'node:crypto'
 import {
   deriveInterface,
@@ -397,26 +397,25 @@ export function releaseFlowLock(): void {
 const FIRE_DEPTH_CAP = 5
 
 /**
- * Publish a trigger event: run every flow that has a `trigger.start` of `name`,
- * seeding it as the firing event so only the matching trigger emits `items`.
- * Runs are serialized through the flow lock (one at a time), and each run's own
- * `trigger.fire` outputs are drained recursively (depth-capped). Callers must
- * NOT already hold the flow lock. Never throws — a bad flow is logged and
- * skipped so a schedule/chain can't wedge.
+ * Run a set of flows for one trigger event, seeding each as the firing event so
+ * only the matching trigger node emits its payload. Runs are serialized through
+ * the flow lock (one at a time), and each run's own `trigger.fire` outputs are
+ * drained recursively (depth-capped). Callers must NOT already hold the flow
+ * lock. Never throws — a bad flow is logged and skipped so a chain can't wedge.
  */
-export async function fireTrigger(name: string, items: FlowItem[], depth = 0): Promise<void> {
+async function runMatchingFlows(
+  flows: { id: number; name: string; graph: string }[],
+  event: TriggerEvent,
+  depth: number,
+): Promise<void> {
+  const label = event.kind === 'start' ? `"${event.name}"` : event.kind
   if (depth > FIRE_DEPTH_CAP) {
-    console.warn(`fireTrigger: depth cap (${FIRE_DEPTH_CAP}) reached at "${name}" — stopping chain`)
-    return
-  }
-  const flows = flowsDb.flowsWithTrigger(name)
-  if (flows.length === 0) {
-    console.warn(`fireTrigger: no flow has a trigger named "${name}"`)
+    console.warn(`fireTrigger: depth cap (${FIRE_DEPTH_CAP}) reached at ${label} — stopping chain`)
     return
   }
   for (const flow of flows) {
     if (!acquireFlowLock()) {
-      console.warn(`fireTrigger: "${name}" → flow #${flow.id} skipped (a flow is already running)`)
+      console.warn(`fireTrigger: ${label} → flow #${flow.id} skipped (a flow is already running)`)
       continue
     }
     let fires: FireRequest[] = []
@@ -433,7 +432,7 @@ export async function fireTrigger(name: string, items: FlowItem[], depth = 0): P
         flowId: flow.id,
         flowName: flow.name,
         resolveSpec: resolver,
-        trigger: { name, items },
+        trigger: event,
       })
       fires = report.fires ?? []
     } catch (e) {
@@ -443,6 +442,41 @@ export async function fireTrigger(name: string, items: FlowItem[], depth = 0): P
     }
     // Drain this flow's own fires (lock released) before moving on.
     for (const f of fires) await fireTrigger(f.name, f.items, depth + 1)
+  }
+}
+
+/** Publish to a named trigger bus: run every flow with a `trigger.start` of `name`. */
+export async function fireTrigger(name: string, items: FlowItem[], depth = 0): Promise<void> {
+  const flows = flowsDb.flowsWithTrigger(name)
+  if (flows.length === 0) {
+    console.warn(`fireTrigger: no flow has a trigger named "${name}"`)
+    return
+  }
+  await runMatchingFlows(flows, { kind: 'start', name, items }, depth)
+}
+
+/** Fire an event trigger: run every flow with a `trigger.<kind>` node, seeding
+ * it with the event items. Used by the scheduler's watchers. */
+export async function fireEvent(kind: TriggerKind, items: FlowItem[], depth = 0): Promise<void> {
+  const flows = flowsDb.flowsWithTriggerType(`trigger.${kind}`)
+  if (flows.length === 0) return
+  await runMatchingFlows(flows, { kind, items }, depth)
+}
+
+const TRIGGER_KINDS: TriggerKind[] = ['start', 'new-item', 'release']
+
+// Validate an editor "run from here" trigger from a run request body. Returns
+// null for a whole-flow run (every trigger fires). Items are always empty here —
+// the trigger node produces a sample for a manual editor fire.
+function parseRunTrigger(raw: unknown): TriggerEvent | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const t = raw as { kind?: unknown; name?: unknown }
+  if (!TRIGGER_KINDS.includes(t.kind as TriggerKind)) return null
+  return {
+    kind: t.kind as TriggerKind,
+    name: typeof t.name === 'string' ? t.name : undefined,
+    items: [],
+    manual: true,
   }
 }
 
@@ -516,7 +550,9 @@ flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no') // ask proxies (nginx) not to buffer
   res.flushHeaders?.()
   const send = (obj: unknown) => res.write(JSON.stringify(obj) + '\n')
-  const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  const body = req.body as { dryRun?: unknown; trigger?: unknown } | undefined
+  const dryRun = body?.dryRun !== false
+  const trigger = parseRunTrigger(body?.trigger)
   let fires: FireRequest[] | undefined
   try {
     const graph = JSON.parse(row.graph) as FlowGraph
@@ -528,7 +564,7 @@ flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
     }
     const report = await runFlowAndRecord(
       graph,
-      { dryRun, flowId: row.id, flowName: row.name, resolveSpec: resolver },
+      { dryRun, flowId: row.id, flowName: row.name, resolveSpec: resolver, trigger },
       {
         onNodeStart: (nodeId) => send({ type: 'start', id: nodeId }),
         onNodeDone: (nodeId, nodeReport) => send({ type: 'node', id: nodeId, report: nodeReport }),

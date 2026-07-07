@@ -367,20 +367,26 @@ export type RunStreamEvent =
   | { type: 'done'; report: RunReport }
   | { type: 'error'; error: string }
 
+/** Which entry point a run fires. Omitted = whole flow (every trigger emits).
+ * `manual: true` (editor "run from here") makes event triggers emit a sample. */
+export type RunTrigger = { kind: 'start' | 'new-item' | 'release'; name?: string; manual?: boolean }
+
 /**
  * Run a flow and receive live per-node progress. Calls `onEvent` for each
  * node as it starts/finishes; resolves with the final RunReport. Falls back to
- * throwing on transport/HTTP errors like the other helpers.
+ * throwing on transport/HTTP errors like the other helpers. Pass `trigger` to
+ * fire a single entry point instead of the whole flow.
  */
 export async function runFlowStream(
   id: number,
   dryRun: boolean,
   onEvent: (ev: RunStreamEvent) => void,
+  trigger?: RunTrigger,
 ): Promise<RunReport> {
   const res = await fetchAuth(`/api/flows/${id}/run/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dryRun }),
+    body: JSON.stringify({ dryRun, trigger }),
   })
   if (!res.ok || !res.body) {
     // Non-stream error (e.g. 409 already running, 404) — parse it like the rest.
