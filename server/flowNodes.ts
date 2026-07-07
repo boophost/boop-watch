@@ -522,6 +522,76 @@ const httpEnrich: NodeImpl = {
   },
 }
 
+// A node's ctx.notes are what the activity feed keeps (activityFromReport in
+// flowRoutes.ts drops silent nodes), so logging = pushing rendered notes.
+const logSink: NodeImpl = {
+  spec: {
+    type: 'sink.log',
+    label: 'Log to activity',
+    category: 'sink',
+    description:
+      'Writes a templated message to the run’s activity log (the Activity tab) — one line per item, or a single summary line. Items pass through unchanged, so it can sit anywhere in a flow.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      {
+        key: 'message',
+        label: 'Message',
+        kind: 'text',
+        default: '{title}',
+        help: '{field} placeholders fill from each item (dot paths reach nested values); {count} is the item count.',
+      },
+      {
+        key: 'perItem',
+        label: 'One line per item',
+        kind: 'boolean',
+        default: true,
+        help: 'Off = a single line, filled from the first item (useful with {count}).',
+      },
+      {
+        key: 'limit',
+        label: 'Max lines',
+        kind: 'number',
+        default: 20,
+        help: 'Per-item lines beyond this collapse into "…and N more".',
+      },
+      {
+        key: 'skipEmpty',
+        label: 'Skip when no items',
+        kind: 'boolean',
+        default: true,
+        help: 'Off = log the message (with {count} = 0) even when nothing arrives.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const message = str(config, 'message', '{title}')
+    const perItem = bool(config, 'perItem', true)
+    const limit = Math.max(1, Math.floor(num(config, 'limit', 20)))
+    const skipEmpty = bool(config, 'skipEmpty', true)
+
+    const items = allInputs(inputs)
+    const fill = (item: FlowItem) =>
+      fillTemplate(message, { ...item, count: items.length }, 'none').trim()
+
+    if (items.length === 0) {
+      if (!skipEmpty) ctx.notes.push(fill({}))
+      return { items }
+    }
+    if (perItem) {
+      for (const item of items.slice(0, limit)) {
+        const line = fill(item)
+        if (line) ctx.notes.push(line)
+      }
+      if (items.length > limit) ctx.notes.push(`…and ${items.length - limit} more`)
+    } else {
+      const line = fill(items[0])
+      if (line) ctx.notes.push(line)
+    }
+    return { items }
+  },
+}
+
 const httpSink: NodeImpl = {
   spec: {
     type: 'sink.http',
@@ -3719,6 +3789,7 @@ const IMPLS: NodeImpl[] = [
   merge,
   portalSink,
   httpSink,
+  logSink,
   qbittorrentSink,
   qbittorrentDelete,
   libraryImport,
