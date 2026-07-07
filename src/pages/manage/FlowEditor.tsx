@@ -11,6 +11,8 @@ import {
   useEdgesState,
   useReactFlow,
   addEdge,
+  reconnectEdge,
+  getNodesBounds,
   type Node,
   type Edge,
   type NodeProps,
@@ -19,6 +21,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import {
   AlertTriangle,
+  ArrowRight,
   Box,
   Check,
   ChevronDown,
@@ -26,11 +29,13 @@ import {
   ChevronRight,
   Copy,
   ExternalLink,
+  Layers,
   Loader2,
   Play,
   Plus,
   Save,
   Search,
+  StickyNote,
   Trash2,
   Unlink,
   X,
@@ -57,6 +62,11 @@ import {
   type NodeReport,
   type ComponentInterface,
 } from '@/lib/flows'
+import { isEditorNode } from '@/lib/flowEditorMeta'
+import {
+  editorNodeTypes,
+  editorRfType,
+} from './flowEditorAnnotations'
 
 // ---- graph <-> React Flow conversion ---------------------------------------
 
@@ -65,9 +75,10 @@ interface FlowNodeData extends Record<string, unknown> {
   config: Record<string, unknown>
   report?: NodeReport
   running?: boolean
+  onEditorChange?: (patch: Record<string, unknown>) => void
 }
 
-type RFNode = Node<FlowNodeData, 'flow'>
+type RFNode = Node<FlowNodeData, 'flow' | 'sticky' | 'arrow' | 'group'>
 type RFEdge = Edge
 
 const CATEGORY_DOT: Record<NodeCategory, string> = {
@@ -472,16 +483,43 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
   )
 }
 
-const nodeTypes = { flow: FlowNodeView }
+const nodeTypes = { flow: FlowNodeView, ...editorNodeTypes }
 
 function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
+  const lockedGroups = new Map(
+    graph.nodes
+      .filter((n) => n.type === 'editor.group')
+      .map((n) => [n.id, Boolean(n.config.locked)]),
+  )
   return {
-    nodes: graph.nodes.map((n) => ({
-      id: n.id,
-      type: 'flow' as const,
-      position: n.position,
-      data: { specType: n.type, config: n.config },
-    })),
+    nodes: graph.nodes.map((n) => {
+      const rfType = editorRfType(n.type)
+      const groupId = typeof n.config.groupId === 'string' ? n.config.groupId : undefined
+      const parentLocked = groupId ? lockedGroups.get(groupId) : false
+      const width = typeof n.config.width === 'number' ? n.config.width : undefined
+      const height = typeof n.config.height === 'number' ? n.config.height : undefined
+      const config = { ...n.config }
+      delete config.groupId
+      const style =
+        width && height
+          ? { width, height }
+          : rfType === 'group'
+            ? { width: width ?? 280, height: height ?? 180 }
+            : undefined
+      return {
+        id: n.id,
+        type: rfType,
+        position: n.position,
+        parentId: groupId,
+        extent: groupId ? ('parent' as const) : undefined,
+        style,
+        zIndex: rfType === 'group' ? -1 : undefined,
+        connectable: rfType === 'flow',
+        draggable: !parentLocked,
+        selectable: rfType === 'group' || !parentLocked,
+        data: { specType: n.type, config },
+      }
+    }),
     edges: graph.edges.map((e) => ({
       id: e.id,
       source: e.source,
@@ -494,12 +532,20 @@ function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
 
 function fromRF(nodes: RFNode[], edges: RFEdge[]): FlowGraph {
   return {
-    nodes: nodes.map((n) => ({
-      id: n.id,
-      type: n.data.specType,
-      position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
-      config: n.data.config,
-    })),
+    nodes: nodes.map((n) => {
+      const config = { ...n.data.config }
+      const w = n.style?.width
+      const h = n.style?.height
+      if (typeof w === 'number') config.width = w
+      if (typeof h === 'number') config.height = h
+      if (n.parentId) config.groupId = n.parentId
+      return {
+        id: n.id,
+        type: n.data.specType,
+        position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
+        config,
+      }
+    }),
     edges: edges.map((e) => ({
       id: e.id,
       source: e.source,
@@ -514,10 +560,16 @@ function fromRF(nodes: RFNode[], edges: RFEdge[]): FlowGraph {
 
 /** Right-click menu state: where it opened and what it targets. */
 interface MenuState {
-  kind: 'pane' | 'node' | 'edge'
+  kind: 'pane' | 'node' | 'edge' | 'selection'
   x: number
   y: number
   targetId?: string
+}
+
+const EDITOR_DEFAULTS: Record<string, Record<string, unknown>> = {
+  'editor.sticky': { text: '', color: '#fef08a', width: 180, height: 120 },
+  'editor.arrow': { direction: 'right', width: 160, height: 48 },
+  'editor.group': { title: 'Group', color: 'rgba(124, 92, 255, 0.12)', width: 280, height: 180, locked: false },
 }
 
 function FlowEditorInner() {
@@ -542,6 +594,7 @@ function FlowEditorInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState<RFNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<RFEdge>([])
   const addAt = useRef(0)
+  const clipboardRef = useRef<{ nodes: RFNode[]; edges: RFEdge[] } | null>(null)
   const { screenToFlowPosition } = useReactFlow()
 
   useEffect(() => {
@@ -578,7 +631,10 @@ function FlowEditorInner() {
   }, [id, navigate, setNodes, setEdges])
 
   const selected = nodes.find((n) => n.selected)
-  const selectedSpec = selected ? specLookup.get(selected.data.specType) : undefined
+  const selectedSpec = selected && !isEditorNode(selected.data.specType)
+    ? specLookup.get(selected.data.specType)
+    : undefined
+  const selectedCount = nodes.filter((n) => n.selected).length
   const selectedFlowId =
     selected?.data.specType === 'flow.subflow' ? Number(selected.data.config.flowId) : undefined
   const selectedComponentInfo = useComponentInterface(selectedFlowId)
@@ -603,6 +659,45 @@ function FlowEditorInner() {
   }, [nodes])
 
   const markDirty = () => setDirty(true)
+
+  const patchEditorConfig = useCallback((nodeId: string, patch: Record<string, unknown>) => {
+    setNodes((ns) => {
+      let next = ns.map((n) => {
+        if (n.id !== nodeId) return n
+        const config = { ...n.data.config, ...patch }
+        const style =
+          typeof patch.width === 'number' && typeof patch.height === 'number'
+            ? { ...n.style, width: patch.width, height: patch.height }
+            : n.style
+        return { ...n, data: { ...n.data, config }, style }
+      })
+      if ('locked' in patch) {
+        const group = next.find((n) => n.id === nodeId)
+        if (group?.data.specType === 'editor.group') {
+          const locked = Boolean(patch.locked)
+          next = next.map((n) =>
+            n.parentId === nodeId ? { ...n, draggable: !locked, selectable: !locked } : n,
+          )
+        }
+      }
+      return next
+    })
+    markDirty()
+  }, [setNodes])
+
+  const displayNodes = useMemo(
+    () =>
+      nodes.map((n) => ({
+        ...n,
+        data: {
+          ...n.data,
+          onEditorChange: isEditorNode(n.data.specType)
+            ? (patch: Record<string, unknown>) => patchEditorConfig(n.id, patch)
+            : undefined,
+        },
+      })),
+    [nodes, patchEditorConfig],
+  )
 
   const togglePublish = (published: boolean) => {
     setComponent((prev) => {
@@ -640,6 +735,14 @@ function FlowEditorInner() {
     [setEdges],
   )
 
+  const onReconnect = useCallback(
+    (oldEdge: RFEdge, newConnection: Connection) => {
+      setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds))
+      setDirty(true)
+    },
+    [setEdges],
+  )
+
   /** Resolves the NodePort behind one end of a connection: subflow nodes via
    * the fetched component interface (typed boundary ports), everything else
    * via its spec + config-driven ports. Unresolvable ports come back
@@ -668,12 +771,17 @@ function FlowEditorInner() {
   // Blender-style typed sockets: dragging onto an incompatible input is
   // rejected live (the server re-validates on save as the backstop).
   const isValidConnection = useCallback(
-    (conn: Connection | RFEdge) =>
-      portCompatible(
+    (conn: Connection | RFEdge) => {
+      const sourceNode = nodes.find((n) => n.id === conn.source)
+      const targetNode = nodes.find((n) => n.id === conn.target)
+      if (!sourceNode || !targetNode) return false
+      if (sourceNode.type !== 'flow' || targetNode.type !== 'flow') return false
+      return portCompatible(
         findPort(conn.source, conn.sourceHandle, 'out')?.dataType,
         findPort(conn.target, conn.targetHandle, 'in')?.dataType,
-      ),
-    [findPort],
+      )
+    },
+    [findPort, nodes],
   )
 
   // Wires take the color of the value type they carry; items edges keep the
@@ -687,6 +795,33 @@ function FlowEditorInner() {
       }),
     [edges, findPort],
   )
+
+  const addEditorNode = (
+    specType: 'editor.sticky' | 'editor.arrow' | 'editor.group',
+    position?: { x: number; y: number },
+  ) => {
+    const n = addAt.current++
+    const config = { ...EDITOR_DEFAULTS[specType] }
+    const rfType = editorRfType(specType)
+    const width = config.width as number
+    const height = config.height as number
+    setNodes((ns) => [
+      ...ns.map((node) => ({ ...node, selected: false })),
+      {
+        id: `n${Date.now().toString(36)}${n}`,
+        type: rfType,
+        position: position ?? { x: 80 + n * 24, y: 80 + n * 24 },
+        style: { width, height },
+        zIndex: rfType === 'group' ? -1 : undefined,
+        connectable: false,
+        data: { specType, config },
+        selected: true,
+      },
+    ])
+    setPaletteOpen(false)
+    setMenu(null)
+    setDirty(true)
+  }
 
   const addNode = (spec: NodeSpec, position?: { x: number; y: number }) => {
     const n = addAt.current++
@@ -715,11 +850,177 @@ function FlowEditorInner() {
   }
 
   const removeNode = (nodeId: string) => {
-    setNodes((ns) => ns.filter((n) => n.id !== nodeId))
+    const target = nodes.find((n) => n.id === nodeId)
+    if (target?.data.specType === 'editor.group') {
+      setNodes((ns) =>
+        ns
+          .filter((n) => n.id !== nodeId)
+          .map((n) => {
+            if (n.parentId !== nodeId) return n
+            return {
+              ...n,
+              parentId: undefined,
+              extent: undefined,
+              position: {
+                x: n.position.x + target.position.x,
+                y: n.position.y + target.position.y,
+              },
+            }
+          }),
+      )
+    } else {
+      setNodes((ns) => ns.filter((n) => n.id !== nodeId))
+    }
     setEdges((es) => es.filter((e) => e.source !== nodeId && e.target !== nodeId))
     setMenu(null)
     setDirty(true)
   }
+
+  const removeSelected = useCallback(() => {
+    const ids = new Set(nodes.filter((n) => n.selected).map((n) => n.id))
+    if (ids.size === 0) return
+    setNodes((ns) => {
+      let next = ns.filter((n) => !ids.has(n.id))
+      for (const target of nodes) {
+        if (!ids.has(target.id) || target.data.specType !== 'editor.group') continue
+        next = next.map((n) => {
+          if (n.parentId !== target.id || ids.has(n.id)) return n
+          return {
+            ...n,
+            parentId: undefined,
+            extent: undefined,
+            position: {
+              x: n.position.x + target.position.x,
+              y: n.position.y + target.position.y,
+            },
+          }
+        })
+      }
+      return next
+    })
+    setEdges((es) => es.filter((e) => !ids.has(e.source) && !ids.has(e.target)))
+    setMenu(null)
+    setDirty(true)
+  }, [nodes, setNodes, setEdges])
+
+  const groupSelection = useCallback(() => {
+    const picked = nodes.filter((n) => n.selected && n.data.specType !== 'editor.group')
+    if (picked.length < 2) return
+    const bounds = getNodesBounds(picked)
+    const padding = 24
+    const titleH = 28
+    const n = addAt.current++
+    const groupId = `n${Date.now().toString(36)}${n}`
+    const groupPos = { x: bounds.x - padding, y: bounds.y - padding - titleH }
+    const gw = bounds.width + padding * 2
+    const gh = bounds.height + padding * 2 + titleH
+    const childIds = new Set(picked.map((node) => node.id))
+    const groupNode: RFNode = {
+      id: groupId,
+      type: 'group',
+      position: groupPos,
+      style: { width: gw, height: gh },
+      zIndex: -1,
+      connectable: false,
+      data: {
+        specType: 'editor.group',
+        config: { ...EDITOR_DEFAULTS['editor.group'], width: gw, height: gh },
+      },
+      selected: true,
+    }
+    setNodes((ns) => [
+      ...ns
+        .filter((node) => !childIds.has(node.id))
+        .map((node) => ({ ...node, selected: false })),
+      ...picked.map((node) => ({
+        ...node,
+        parentId: groupId,
+        extent: 'parent' as const,
+        position: {
+          x: node.position.x - groupPos.x,
+          y: node.position.y - groupPos.y,
+        },
+        selected: false,
+      })),
+      groupNode,
+    ])
+    setMenu(null)
+    setDirty(true)
+  }, [nodes, setNodes])
+
+  const copyNodes = useCallback(
+    (nodeIds: string[]) => {
+      const ids = new Set(nodeIds)
+      const sel = nodes.filter((n) => ids.has(n.id))
+      if (sel.length === 0) return
+      clipboardRef.current = {
+        nodes: sel.map((n) => ({
+          ...n,
+          selected: false,
+          data: { specType: n.data.specType, config: { ...n.data.config } },
+        })),
+        edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
+      }
+    },
+    [nodes, edges],
+  )
+
+  const copySelection = useCallback(() => {
+    copyNodes(nodes.filter((n) => n.selected).map((n) => n.id))
+  }, [nodes, copyNodes])
+
+  const pasteClipboard = useCallback(() => {
+    const clip = clipboardRef.current
+    if (!clip) return
+    const idMap = new Map<string, string>()
+    for (const node of clip.nodes) {
+      idMap.set(node.id, `n${Date.now().toString(36)}${addAt.current++}`)
+    }
+    const offset = 40
+    const newNodes: RFNode[] = clip.nodes.map((node) => ({
+      ...node,
+      id: idMap.get(node.id)!,
+      parentId: node.parentId && idMap.has(node.parentId) ? idMap.get(node.parentId) : undefined,
+      extent: node.parentId && idMap.has(node.parentId) ? ('parent' as const) : undefined,
+      position: { x: node.position.x + offset, y: node.position.y + offset },
+      selected: true,
+    }))
+    const newEdges = clip.edges.map((e, i) => ({
+      ...e,
+      id: `e${Date.now().toString(36)}${i}`,
+      source: idMap.get(e.source)!,
+      target: idMap.get(e.target)!,
+    }))
+    setNodes((ns) => [...ns.map((n) => ({ ...n, selected: false })), ...newNodes])
+    setEdges((es) => [...es, ...newEdges])
+    setMenu(null)
+    setDirty(true)
+  }, [setNodes, setEdges])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable)
+      ) {
+        return
+      }
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && e.key === 'c') {
+        e.preventDefault()
+        copySelection()
+      } else if (mod && e.key === 'v') {
+        e.preventDefault()
+        pasteClipboard()
+      } else if (mod && e.key === 'g') {
+        e.preventDefault()
+        groupSelection()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [copySelection, pasteClipboard, groupSelection])
 
   const duplicateNode = (nodeId: string) => {
     const src = nodes.find((n) => n.id === nodeId)
@@ -730,6 +1031,8 @@ function FlowEditorInner() {
       {
         ...src,
         id: `n${Date.now().toString(36)}${n}`,
+        parentId: undefined,
+        extent: undefined,
         position: { x: src.position.x + 32, y: src.position.y + 32 },
         data: { specType: src.data.specType, config: { ...src.data.config } },
         selected: true,
@@ -876,6 +1179,34 @@ function FlowEditorInner() {
             {component?.published ? (
               <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden />
             ) : null}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
+            title="Sticky note"
+            onClick={() => addEditorNode('editor.sticky')}
+          >
+            <StickyNote className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
+            title="Arrow"
+            onClick={() => addEditorNode('editor.arrow')}
+          >
+            <ArrowRight className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
+            title="Group"
+            disabled={selectedCount < 2}
+            onClick={() => groupSelection()}
+          >
+            <Layers className="size-4" />
           </Button>
           <div className="relative">
             <Button
@@ -1043,22 +1374,36 @@ function FlowEditorInner() {
 
       <div className="relative min-h-0 flex-1">
         <ReactFlow<RFNode, RFEdge>
-          nodes={nodes}
+          nodes={displayNodes}
           edges={styledEdges}
           nodeTypes={nodeTypes}
           isValidConnection={isValidConnection}
           onNodesChange={(changes) => {
             onNodesChange(changes)
-            if (changes.some((c) => c.type === 'position' || c.type === 'remove')) markDirty()
+            if (
+              changes.some(
+                (c) =>
+                  c.type === 'position' ||
+                  c.type === 'remove' ||
+                  c.type === 'dimensions' ||
+                  c.type === 'replace',
+              )
+            ) {
+              markDirty()
+            }
           }}
           onEdgesChange={(changes) => {
             onEdgesChange(changes)
             if (changes.some((c) => c.type === 'remove')) markDirty()
           }}
           onConnect={onConnect}
+          onReconnect={onReconnect}
+          reconnectRadius={16}
+          selectionOnDrag
           onPaneContextMenu={(e) => openMenu(e, 'pane')}
           onNodeContextMenu={(e, node) => openMenu(e, 'node', node.id)}
           onEdgeContextMenu={(e, edge) => openMenu(e, 'edge', edge.id)}
+          onSelectionContextMenu={(e) => openMenu(e, 'selection')}
           onPaneClick={() => setMenu(null)}
           onMoveStart={() => setMenu(null)}
           colorMode="dark"
@@ -1093,6 +1438,53 @@ function FlowEditorInner() {
             >
               {menu.kind === 'pane' ? (
                 <>
+                  <div className="space-y-0.5 border-b border-border p-1">
+                    <p className="px-2 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      Annotations
+                    </p>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                      onClick={() =>
+                        addEditorNode(
+                          'editor.sticky',
+                          screenToFlowPosition({ x: menu.x, y: menu.y }),
+                        )
+                      }
+                    >
+                      <StickyNote className="size-3.5 text-muted-foreground" />
+                      Sticky note
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                      onClick={() =>
+                        addEditorNode(
+                          'editor.arrow',
+                          screenToFlowPosition({ x: menu.x, y: menu.y }),
+                        )
+                      }
+                    >
+                      <ArrowRight className="size-3.5 text-muted-foreground" />
+                      Arrow
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                      onClick={() =>
+                        addEditorNode(
+                          'editor.group',
+                          screenToFlowPosition({ x: menu.x, y: menu.y }),
+                        )
+                      }
+                    >
+                      <Layers className="size-3.5 text-muted-foreground" />
+                      Empty group
+                    </button>
+                  </div>
                   <p className="px-3 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                     Add node here
                   </p>
@@ -1109,10 +1501,22 @@ function FlowEditorInner() {
                     type="button"
                     role="menuitem"
                     className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                    onClick={() => {
+                      copyNodes([menu.targetId!])
+                      setMenu(null)
+                    }}
+                  >
+                    <Copy className="size-3.5 text-muted-foreground" />
+                    Copy
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
                     onClick={() => duplicateNode(menu.targetId!)}
                   >
                     <Copy className="size-3.5 text-muted-foreground" />
-                    Duplicate node
+                    Duplicate
                   </button>
                   <button
                     type="button"
@@ -1121,7 +1525,52 @@ function FlowEditorInner() {
                     onClick={() => removeNode(menu.targetId!)}
                   >
                     <Trash2 className="size-3.5" />
-                    Delete node
+                    Delete
+                  </button>
+                </>
+              ) : menu.kind === 'selection' ? (
+                <>
+                  {selectedCount >= 2 ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                      onClick={() => groupSelection()}
+                    >
+                      <Layers className="size-3.5 text-muted-foreground" />
+                      Group selection
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                    onClick={() => {
+                      copySelection()
+                      setMenu(null)
+                    }}
+                  >
+                    <Copy className="size-3.5 text-muted-foreground" />
+                    Copy
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                    disabled={!clipboardRef.current}
+                    onClick={() => pasteClipboard()}
+                  >
+                    <Copy className="size-3.5 text-muted-foreground" />
+                    Paste
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-destructive hover:bg-muted"
+                    onClick={() => removeSelected()}
+                  >
+                    <Trash2 className="size-3.5" />
+                    Delete
                   </button>
                 </>
               ) : (
@@ -1139,14 +1588,24 @@ function FlowEditorInner() {
           </>
         ) : null}
 
-        {selected && selectedSpec ? (
+        {selected && (selectedSpec || isEditorNode(selected.data.specType)) ? (
           <aside className="absolute inset-x-0 bottom-0 z-20 max-h-[45%] overflow-auto border-t border-border bg-card/95 backdrop-blur md:inset-x-auto md:inset-y-0 md:right-0 md:max-h-none md:w-80 md:border-l md:border-t-0">
             <div className="flex items-center gap-2 border-b border-border px-4 py-3">
-              <span
-                className={`size-2 rounded-full ${CATEGORY_DOT[selectedComponentInfo?.component?.category ?? selectedSpec.category]}`}
-              />
+              {selectedSpec ? (
+                <span
+                  className={`size-2 rounded-full ${CATEGORY_DOT[selectedComponentInfo?.component?.category ?? selectedSpec.category]}`}
+                />
+              ) : (
+                <StickyNote className="size-3.5 shrink-0 text-muted-foreground" />
+              )}
               <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                {componentLabel(selectedComponentInfo) ?? selectedSpec.label}
+                {selectedSpec
+                  ? (componentLabel(selectedComponentInfo) ?? selectedSpec.label)
+                  : selected.data.specType === 'editor.sticky'
+                    ? 'Sticky note'
+                    : selected.data.specType === 'editor.arrow'
+                      ? 'Arrow'
+                      : 'Group'}
               </span>
               <Button
                 variant="ghost"
@@ -1170,9 +1629,135 @@ function FlowEditorInner() {
               </Button>
             </div>
             <div className="space-y-4 p-4">
-              <p className="text-xs text-muted-foreground">{selectedSpec.description}</p>
+              {selectedSpec ? (
+                <p className="text-xs text-muted-foreground">{selectedSpec.description}</p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Canvas annotation — not executed when the flow runs.
+                </p>
+              )}
 
-              {selected.data.specType === 'flow.subflow' ? (
+              {isEditorNode(selected.data.specType) ? (
+                <div className="space-y-3">
+                  {selected.data.specType === 'editor.sticky' ? (
+                    <>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium" htmlFor="ed-sticky-text">
+                          Text
+                        </label>
+                        <textarea
+                          id="ed-sticky-text"
+                          rows={4}
+                          className="w-full rounded-md border border-input bg-transparent px-2 py-1.5 text-sm"
+                          value={String(selected.data.config.text ?? '')}
+                          onChange={(e) => setConfigValue('text', e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium" htmlFor="ed-sticky-color">
+                          Color
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            id="ed-sticky-color"
+                            type="color"
+                            className="h-8 w-10 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
+                            value={
+                              /^#[0-9a-f]{6}$/i.test(String(selected.data.config.color ?? ''))
+                                ? String(selected.data.config.color)
+                                : '#fef08a'
+                            }
+                            onChange={(e) => setConfigValue('color', e.target.value)}
+                          />
+                          <Input
+                            className="h-8 font-mono"
+                            value={String(selected.data.config.color ?? '#fef08a')}
+                            onChange={(e) => setConfigValue('color', e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    </>
+                  ) : selected.data.specType === 'editor.arrow' ? (
+                    <>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium" htmlFor="ed-arrow-label">
+                          Label
+                        </label>
+                        <Input
+                          id="ed-arrow-label"
+                          className="h-8"
+                          value={String(selected.data.config.text ?? '')}
+                          placeholder="Optional label"
+                          onChange={(e) => setConfigValue('text', e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium" htmlFor="ed-arrow-dir">
+                          Direction
+                        </label>
+                        <select
+                          id="ed-arrow-dir"
+                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                          value={String(selected.data.config.direction ?? 'right')}
+                          onChange={(e) => setConfigValue('direction', e.target.value)}
+                        >
+                          <option value="right">Right</option>
+                          <option value="left">Left</option>
+                          <option value="up">Up</option>
+                          <option value="down">Down</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium" htmlFor="ed-arrow-color">
+                          Color
+                        </label>
+                        <Input
+                          id="ed-arrow-color"
+                          className="h-8 font-mono"
+                          value={String(selected.data.config.color ?? '')}
+                          placeholder="CSS color"
+                          onChange={(e) => setConfigValue('color', e.target.value)}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium" htmlFor="ed-group-title">
+                          Title
+                        </label>
+                        <Input
+                          id="ed-group-title"
+                          className="h-8"
+                          value={String(selected.data.config.title ?? 'Group')}
+                          onChange={(e) => setConfigValue('title', e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium" htmlFor="ed-group-color">
+                          Background
+                        </label>
+                        <Input
+                          id="ed-group-color"
+                          className="h-8 font-mono"
+                          value={String(selected.data.config.color ?? '')}
+                          placeholder="CSS color"
+                          onChange={(e) => setConfigValue('color', e.target.value)}
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          className="size-3.5 rounded border-input"
+                          checked={Boolean(selected.data.config.locked)}
+                          onChange={(e) => patchEditorConfig(selected.id, { locked: e.target.checked })}
+                        />
+                        Lock contents (prevent moving nodes inside)
+                      </label>
+                    </>
+                  )}
+                </div>
+              ) : selected.data.specType === 'flow.subflow' ? (
                 <div className="space-y-4">
                   <Link
                     to={`/manage/flows/${selected.data.config.flowId}`}
@@ -1269,7 +1854,7 @@ function FlowEditorInner() {
                     </div>
                   ) : null}
                 </div>
-              ) : selectedSpec.config.length > 0 ? (
+              ) : selectedSpec && selectedSpec.config.length > 0 ? (
                 <div className="space-y-3">
                   {selectedSpec.config.map((f) => {
                     const value = selected.data.config[f.key] ?? f.default ?? ''
