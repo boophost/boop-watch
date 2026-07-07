@@ -19,6 +19,7 @@ import {
   type Connection,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import './flowEditor.css'
 import {
   AlertTriangle,
   ArrowRight,
@@ -567,7 +568,7 @@ interface MenuState {
 }
 
 const EDITOR_DEFAULTS: Record<string, Record<string, unknown>> = {
-  'editor.sticky': { text: '', color: '#fef08a', width: 180, height: 120 },
+  'editor.sticky': { text: '', color: '#fef08a', width: 180, height: 120, fontSize: 12, textAlign: 'left' },
   'editor.arrow': { direction: 'right', width: 160, height: 48 },
   'editor.group': { title: 'Group', color: 'rgba(124, 92, 255, 0.12)', width: 280, height: 180, locked: false },
 }
@@ -1372,7 +1373,7 @@ function FlowEditorInner() {
         </div>
       ) : null}
 
-      <div className="relative min-h-0 flex-1">
+      <div className="flow-editor-canvas relative min-h-0 flex-1">
         <ReactFlow<RFNode, RFEdge>
           nodes={displayNodes}
           edges={styledEdges}
@@ -1652,6 +1653,39 @@ function FlowEditorInner() {
                           value={String(selected.data.config.text ?? '')}
                           onChange={(e) => setConfigValue('text', e.target.value)}
                         />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium" htmlFor="ed-sticky-font">
+                          Font size
+                        </label>
+                        <Input
+                          id="ed-sticky-font"
+                          className="h-8"
+                          type="number"
+                          min={8}
+                          max={32}
+                          value={Number(selected.data.config.fontSize ?? 12)}
+                          onChange={(e) =>
+                            setConfigValue('fontSize', Math.min(32, Math.max(8, Number(e.target.value) || 12)))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-xs font-medium">Alignment</span>
+                        <div className="flex gap-1">
+                          {(['left', 'center', 'right'] as const).map((align) => (
+                            <Button
+                              key={align}
+                              type="button"
+                              variant={(selected.data.config.textAlign ?? 'left') === align ? 'secondary' : 'outline'}
+                              size="sm"
+                              className="h-8 flex-1 px-2 text-xs capitalize"
+                              onClick={() => setConfigValue('textAlign', align)}
+                            >
+                              {align}
+                            </Button>
+                          ))}
+                        </div>
                       </div>
                       <div className="space-y-1">
                         <label className="text-xs font-medium" htmlFor="ed-sticky-color">

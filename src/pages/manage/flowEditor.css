@@ -1,0 +1,5 @@
+/* xyflow diagonal resize cursors are swapped for our layout — flip TL/BR 90°. */
+.flow-editor-canvas .react-flow__resize-control.top.left,
+.flow-editor-canvas .react-flow__resize-control.bottom.right {
+  cursor: nesw-resize;
+}
