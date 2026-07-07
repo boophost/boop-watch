@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 import type { AuthChangeEvent, Session, UserIdentity } from '@supabase/supabase-js'
 import { supabase } from './supabase'
-import { resetAnalytics, track } from './analytics'
+import { identifyUser, resetAnalytics, track } from './analytics'
 
 interface User {
   username: string
@@ -30,10 +30,36 @@ function isNewUser(session: Session): boolean {
   return Number.isFinite(created) && Date.now() - created < NEW_USER_MS
 }
 
+function computeIsAdmin(session: Session): boolean {
+  const meta = session.user.user_metadata || {}
+  const email = session.user.email ?? ''
+  return (
+    meta.admin === true ||
+    session.user.app_metadata?.role === 'admin' ||
+    ADMIN_EMAILS.includes(email.toLowerCase())
+  )
+}
+
+// Tie the PostHog person profile to the Supabase account. Keyed by the stable
+// user id (survives email changes); safe to call repeatedly — re-identifying
+// the same id just refreshes the properties.
+function identifyFromSession(session: Session): void {
+  const meta = session.user.user_metadata || {}
+  // OAuth display name lands under full_name/name (Google) or user_name (Discord);
+  // fall back to email so every profile has a readable label.
+  const name = meta.full_name || meta.name || meta.user_name || session.user.email
+  identifyUser(session.user.id, {
+    email: session.user.email ?? undefined,
+    name: name || undefined,
+    provider: oauthProvider(session) ?? 'email',
+    is_admin: computeIsAdmin(session),
+    created_at: session.user.created_at,
+  })
+}
+
 function onSignedIn(session: Session): void {
   const provider = oauthProvider(session)
   if (!provider) return
-  resetAnalytics()
   if (isNewUser(session)) {
     track('user_signed_up', { method: provider, auth_state: 'authenticated' })
   } else {
@@ -42,7 +68,10 @@ function onSignedIn(session: Session): void {
 }
 
 function handleAuthChange(event: AuthChangeEvent, session: Session | null): void {
-  if (event === 'SIGNED_IN' && session) onSignedIn(session)
+  if (event === 'SIGNED_IN' && session) {
+    identifyFromSession(session)
+    onSignedIn(session)
+  }
   if (event === 'SIGNED_OUT') resetAnalytics()
 }
 
@@ -55,10 +84,7 @@ function toUser(session: Session | null): User | null {
   return {
     username: email,
     id: session.user.id,
-    isAdmin:
-      meta.admin === true ||
-      session.user.app_metadata?.role === 'admin' ||
-      ADMIN_EMAILS.includes(email.toLowerCase()),
+    isAdmin: computeIsAdmin(session),
     avatarUrl: meta.avatar_url || meta.picture || null,
     identities: session.user.identities ?? [],
   }
@@ -92,6 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) identifyFromSession(session)
       setUser(toUser(session))
       setLoading(false)
     })
@@ -113,7 +140,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password,
     })
     if (error) throw error
-    resetAnalytics()
     track('user_logged_in', { method: 'email', auth_state: 'authenticated' })
   }
 
