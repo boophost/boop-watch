@@ -57,10 +57,13 @@ branch-scoped deploy job rolls the matching k3s Deployment, which is pinned to t
 | `main` | `:latest` (+ sha) | `deploy` | `boop-watch` | production (`watch.boopurno.es`) |
 | `dev` | `:dev` (+ sha) | `deploy-dev` | `boop-watch-dev` | dev/staging (`kubectl` only, no public URL yet) |
 
-**`dev` is the integration/staging trunk — commit feature work straight to `dev` and push.** That
-builds `:dev` and rolls `boop-watch-dev`, where you then **verify it works** (see below) before
-promoting to production with a reviewed **`dev` → `main` PR**. You don't run a manual build to
-deploy. Every push to `dev`/`main` deploys; PRs (e.g. the `dev` → `main` promotion) build as a CI
+**`dev` is the integration/staging trunk — feature work reaches it through a PR.** Work on a
+short-lived feature branch, open a **feature → `dev` PR** with a test-plan checklist, and wait for
+the CI `build` check to go green. **Merging that PR *is* the deploy-to-staging step, not the end of
+the change**: the merge push builds `:dev` and rolls `boop-watch-dev`, where you then **verify it
+works** (see below) and check off the PR's test plan on the merged PR page. Only when the staging
+checklist is green is the change done; production comes later via a reviewed **`dev` → `main` PR**.
+You don't run a manual build to deploy. Every push to `dev`/`main` deploys; PR builds are a CI
 check with no push. **Both moving tags must exist for the pods to pull** — `:latest` comes from a
 `main` push, `:dev` from a `dev` push (a Deployment pinned to a tag that was never published
 `ImagePullBackOff`s).
@@ -91,7 +94,7 @@ kubectl -n link-apps exec deploy/boop-watch     -- wget -qO- http://localhost:30
 kubectl -n link-apps exec deploy/boop-watch-dev -- wget -qO- http://localhost:3000/health   # staging
 ```
 
-**Verify a change on staging after pushing to `dev`** (the host has `kubectl` access to the LAN
+**Verify a change on staging after merging to `dev`** (the host has `kubectl` access to the LAN
 cluster — you don't need the self-hosted runner to *check*):
 
 ```bash
@@ -231,14 +234,20 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
    is how a deploy becomes visibly identifiable. One bump per shipped change (if making multiple
    commits for the same continuous feature session/PR, use a patch version for subsequent commits
    rather than repeatedly bumping the minor version).
-4. **Commit and push feature work straight to `dev`, then verify it on staging.** `dev` is the
-   integration/staging trunk: commit your change (bump included), push to `dev`, and the CI builds
-   `:dev` + rolls `boop-watch-dev`. Then **confirm it actually works on staging** — wait for the
-   rollout, check the pod is `1/1 Running`, and smoke-test `/health` + the relevant APIs against the
-   `boop-watch-dev` pod (see "Verify a change on staging" above). Don't consider the change done until
-   staging is green. A short-lived feature branch is fine for larger work, but it lands on `dev`, not
-   `main`.
-5. **Promote to production with a `dev` → `main` PR.** Once staging looks good, open
+4. **Open a feature → `dev` PR and wait for the `build` check.** Commit your change (bump included)
+   on a short-lived feature branch, push it, and open a PR against `dev` with a **test-plan
+   checklist** in the body (`gh pr create --base dev`). Wait for the CI `build` check to pass before
+   merging — a red PR never merges. **Never commit directly to `main`, and don't push feature work
+   straight to `dev` either** — it reaches `dev` through the PR.
+5. **Merge the PR to deploy to staging — merging is not "done".** Merging the PR pushes `dev`, which
+   builds `:dev` and rolls `boop-watch-dev`. The merged PR stays the tracking surface for the
+   change: **work through its test plan on staging** — wait for the rollout, check the pod is
+   `1/1 Running`, smoke-test `/health` + the relevant APIs against the `boop-watch-dev` pod (see
+   "Verify a change on staging" above) — and check off each item on the merged PR page (comment the
+   results if anything needs noting). Don't consider the change done until every checklist item is
+   verified green on staging. If staging surfaces a problem, fix it with a follow-up feature → `dev`
+   PR (patch version bump).
+6. **Promote to production with a `dev` → `main` PR.** Once the staging checklist is green, open
    `gh pr create --base main --head dev` to ship to prod (`watch.boopurno.es`). **Never commit
    directly to `main`.** Don't leave the tree dirty. If it already had unrelated pending changes,
    call that out rather than bundling them. Remote: `github.com/n0es/boop-watch` (private).

@@ -17,7 +17,12 @@ Quick rules:
   (staging); pushing `main` builds `:latest` → `deploy` rolls `boop-watch` (production,
   `watch.boopurno.es`), both in the `link-apps` ns via `kubectl rollout restart`. Don't build manually
   to deploy.
-- **Workflow: commit feature work straight to `dev` and push, then verify it works on the
-  `boop-watch-dev` staging pod** (the host has `kubectl` to the LAN cluster: `kubectl -n link-apps
-  rollout status deploy/boop-watch-dev` then smoke `/health`). Promote to prod with a `dev` → `main`
-  PR. **Never commit directly to `main`.** Bump `package.json` `version` with every shipped change (use patch bumps for follow-up commits in the same feature session).
+- **Workflow: feature branch → PR to `dev` (with a test-plan checklist) → CI `build` green → merge
+  → verify on staging.** Merging the PR *is* the deploy-to-staging step, not the end of the change:
+  the merge rolls `boop-watch-dev`, and you then work through the test plan on the **merged PR
+  page** (the host has `kubectl` to the LAN cluster: `kubectl -n link-apps rollout status
+  deploy/boop-watch-dev` then smoke `/health` + the relevant APIs). The change is done only when
+  every checklist item is verified green on staging; fixes go up as follow-up feature → `dev` PRs.
+  Promote to prod with a `dev` → `main` PR. **Never commit directly to `main`, and never push
+  feature work straight to `dev`.** Bump `package.json` `version` with every shipped change (use
+  patch bumps for follow-up commits in the same feature session).
