@@ -4,6 +4,7 @@
 // fields mean.
 
 import { NODE_REGISTRY, FlowItem, RunContext, portCompatible, type PortDataType } from './flowNodes.js'
+import { executableGraph, isEditorNode } from './flowEditorMeta.js'
 
 export interface FlowNode {
   id: string
@@ -61,8 +62,10 @@ export type SpecResolver = (node: FlowNode) => ResolvedNodeSpec | null
 export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): string | null {
   // Ports for a node: an external resolver (flow.subflow interfaces) wins,
   // then the impl's config-driven ports (typed boundaries, transform.pick),
-  // then the static spec.
+  // then the static spec. Editor-only nodes (sticky notes, groups, …) are
+  // ignored for validation and execution.
   const portsFor = (node: FlowNode): ResolvedNodeSpec | undefined => {
+    if (isEditorNode(node.type)) return { inputs: [], outputs: [] }
     const resolved = resolveSpec?.(node)
     if (resolved) return resolved
     const impl = NODE_REGISTRY.get(node.type)
@@ -77,9 +80,10 @@ export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): str
     ids.add(node.id)
     if (!portsFor(node)) return `Unknown node type: ${node.type}`
   }
-  for (const edge of graph.edges) {
-    const source = graph.nodes.find((n) => n.id === edge.source)
-    const target = graph.nodes.find((n) => n.id === edge.target)
+  const runnable = executableGraph(graph)
+  for (const edge of runnable.edges) {
+    const source = runnable.nodes.find((n) => n.id === edge.source)
+    const target = runnable.nodes.find((n) => n.id === edge.target)
     if (!source) return `Edge ${edge.id}: unknown source node`
     if (!target) return `Edge ${edge.id}: unknown target node`
     const sourceSpec = portsFor(source)
@@ -92,7 +96,7 @@ export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): str
     if (!portCompatible(out.dataType, inp.dataType))
       return `Edge ${edge.id}: can't connect ${out.dataType ?? 'items'} output "${edge.sourceHandle}" to ${inp.dataType ?? 'items'} input "${edge.targetHandle}"`
   }
-  if (topoOrder(graph) === null) return 'Graph has a cycle'
+  if (topoOrder(runnable) === null) return 'Graph has a cycle'
   return null
 }
 
@@ -176,12 +180,13 @@ export async function runFlow(
     return { ok: false, dryRun, startedAt, durationMs: Date.now() - t0, nodes: {}, error: invalid }
   }
 
-  const order = topoOrder(graph)!
+  const order = topoOrder(executableGraph(graph))!
   // node id -> output handle -> items
   const buffers = new Map<string, Record<string, FlowItem[]>>()
   const failed = new Set<string>()
 
   for (const node of order) {
+    if (isEditorNode(node.type)) continue
     const impl = NODE_REGISTRY.get(node.type)!
     const reportKey = qid(node.id)
     const incoming = graph.edges.filter((e) => e.target === node.id)
