@@ -37,6 +37,7 @@ import {
   Save,
   Search,
   StickyNote,
+  Waypoints,
   Trash2,
   Unlink,
   X,
@@ -85,7 +86,7 @@ interface FlowNodeData extends Record<string, unknown> {
   runDisabled?: boolean
 }
 
-type RFNode = Node<FlowNodeData, 'flow' | 'sticky' | 'arrow' | 'group'>
+type RFNode = Node<FlowNodeData, 'flow' | 'reroute' | 'sticky' | 'arrow' | 'group'>
 type RFEdge = Edge
 
 const CATEGORY_DOT: Record<NodeCategory, string> = {
@@ -549,7 +550,44 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
   )
 }
 
-const nodeTypes = { flow: FlowNodeView, ...editorNodeTypes }
+/** A connection anchor: a bare movable dot that passes data through, coloured by
+ * the (propagated) type of the connection running through it. The visible dot is
+ * small, but it sits in a larger transparent box so it's an easy click/drag
+ * target. */
+const REROUTE_BOX = 30 // transparent drag hitbox
+function RerouteNode({ id, selected }: NodeProps<RFNode>) {
+  const propTypes = useContext(PropagatedTypesContext)
+  const type = propTypes.get(`${id}:out:out`) ?? propTypes.get(`${id}:in:in`) ?? 'items'
+  return (
+    <div
+      className="flex cursor-grab items-center justify-center"
+      style={{ width: REROUTE_BOX, height: REROUTE_BOX }}
+      title={`Reroute (${type})`}
+    >
+      <div
+        className={`rounded-full border ${selected ? 'ring-2 ring-ring/60' : ''}`}
+        style={{ width: 14, height: 14, background: portColor(type), borderColor: 'var(--border)' }}
+      >
+        <Handle
+          id="in"
+          type="target"
+          position={Position.Left}
+          className="!size-3 !border-0 !bg-transparent"
+          style={{ left: 0 }}
+        />
+        <Handle
+          id="out"
+          type="source"
+          position={Position.Right}
+          className="!size-3 !border-0 !bg-transparent"
+          style={{ right: 0 }}
+        />
+      </div>
+    </div>
+  )
+}
+
+const nodeTypes = { flow: FlowNodeView, reroute: RerouteNode, ...editorNodeTypes }
 
 function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
   const lockedGroups = new Map(
@@ -559,7 +597,7 @@ function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
   )
   return {
     nodes: graph.nodes.map((n) => {
-      const rfType = editorRfType(n.type)
+      const rfType = n.type === 'transform.reroute' ? 'reroute' : editorRfType(n.type)
       const groupId = typeof n.config.groupId === 'string' ? n.config.groupId : undefined
       const parentLocked = groupId ? lockedGroups.get(groupId) : false
       const width = typeof n.config.width === 'number' ? n.config.width : undefined
@@ -580,7 +618,7 @@ function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
         extent: groupId ? ('parent' as const) : undefined,
         style,
         zIndex: rfType === 'group' ? -1 : undefined,
-        connectable: rfType === 'flow',
+        connectable: rfType === 'flow' || rfType === 'reroute',
         draggable: !parentLocked,
         selectable: rfType === 'group' || !parentLocked,
         data: { specType: n.type, config },
@@ -746,7 +784,8 @@ function FlowEditorInner() {
         ])
         if (cancelled) return
         specLookup = new Map(types.nodeTypes.map((s) => [s.type, s]))
-        setSpecs(types.nodeTypes)
+        // Reroute is added via the toolbar / double-click, not the palette.
+        setSpecs(types.nodeTypes.filter((s) => s.type !== 'transform.reroute'))
         setComponents(comps)
         setName(flow.flow.name)
         setComponent(flow.flow.component)
@@ -1024,6 +1063,41 @@ function FlowEditorInner() {
     ])
     setPaletteOpen(false)
     setMenu(null)
+    setDirty(true)
+  }
+
+  // A connection anchor — a real transform.reroute node rendered as a movable dot.
+  const newReroute = (position: { x: number; y: number }): RFNode => {
+    const n = addAt.current++
+    return {
+      id: `n${Date.now().toString(36)}${n}`,
+      type: 'reroute' as const,
+      position,
+      connectable: true,
+      data: { specType: 'transform.reroute', config: {} },
+    }
+  }
+
+  const addReroute = (position?: { x: number; y: number }) => {
+    const n = addAt.current
+    const node = newReroute(position ?? { x: 120 + n * 24, y: 120 + n * 24 })
+    setNodes((ns) => [...ns.map((x) => ({ ...x, selected: false })), { ...node, selected: true }])
+    setPaletteOpen(false)
+    setMenu(null)
+    setDirty(true)
+  }
+
+  // Double-clicking a wire drops an anchor onto it, splitting source→target into
+  // source→reroute→target at the click point.
+  const insertReroute = (edge: RFEdge, position: { x: number; y: number }) => {
+    // Center the box (and thus the visible dot) on the click point.
+    const node = newReroute({ x: position.x - 15, y: position.y - 15 })
+    setNodes((ns) => [...ns.map((x) => ({ ...x, selected: false })), { ...node, selected: true }])
+    setEdges((eds) => [
+      ...eds.filter((e) => e.id !== edge.id),
+      { id: `e${node.id}a`, source: edge.source, sourceHandle: edge.sourceHandle, target: node.id, targetHandle: 'in' },
+      { id: `e${node.id}b`, source: node.id, sourceHandle: 'out', target: edge.target, targetHandle: edge.targetHandle },
+    ])
     setDirty(true)
   }
 
@@ -1390,6 +1464,15 @@ function FlowEditorInner() {
             variant="outline"
             size="sm"
             className="gap-1 px-2"
+            title="Reroute (or double-click a wire)"
+            onClick={() => addReroute()}
+          >
+            <Waypoints className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
             title="Group"
             disabled={selectedCount < 2}
             onClick={() => groupSelection()}
@@ -1599,6 +1682,9 @@ function FlowEditorInner() {
           }}
           onConnect={onConnect}
           onReconnect={onReconnect}
+          onEdgeDoubleClick={(ev, edge) =>
+            insertReroute(edge, screenToFlowPosition({ x: ev.clientX, y: ev.clientY }))
+          }
           reconnectRadius={16}
           selectionOnDrag
           onPaneContextMenu={(e) => openMenu(e, 'pane')}
