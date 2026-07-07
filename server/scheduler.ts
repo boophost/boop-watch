@@ -29,6 +29,7 @@ import {
   type WeekDay,
 } from './flowsDb.js'
 import { listSeries } from './db.js'
+import { getAllPortalItems } from './portalDb.js'
 import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
 import type { FlowItem } from './flowNodes.js'
 
@@ -241,6 +242,24 @@ async function watchNewItems(): Promise<void> {
   )
 }
 
+// New public-portal titles (Series/Movie in the Jellyfin collection) since last
+// seen — the "landed on the site" event, distinct from a catalog add.
+async function watchNewPortalItems(): Promise<void> {
+  if (flowsWithTriggerType('trigger.new-portal').length === 0) return
+  const titles = getAllPortalItems().filter((p) => p.type === 'Series' || p.type === 'Movie')
+  if (!triggerStateSeeded('portal-item')) {
+    triggerStateAdd('portal-item', titles.map((t) => t.id))
+    markTriggerSeeded('portal-item')
+    return
+  }
+  const fresh = titles.filter((t) => !triggerStateHas('portal-item', t.id))
+  if (fresh.length === 0) return
+  triggerStateAdd('portal-item', fresh.map((t) => t.id))
+  await fireEvent('new-portal', fresh as unknown as FlowItem[]).catch((e) =>
+    console.error('scheduler: fireEvent(new-portal) threw', e),
+  )
+}
+
 // Library airings whose air time has passed since last seen.
 async function watchReleases(): Promise<void> {
   if (flowsWithTriggerType('trigger.release').length === 0) return
@@ -266,6 +285,7 @@ async function tick(): Promise<void> {
   await fireDueSchedule()
   // Watchers run after the schedule pass (they take the flow lock per run).
   await watchNewItems().catch((e) => console.error('scheduler: watchNewItems threw', e))
+  await watchNewPortalItems().catch((e) => console.error('scheduler: watchNewPortalItems threw', e))
   await watchReleases().catch((e) => console.error('scheduler: watchReleases threw', e))
 }
 
