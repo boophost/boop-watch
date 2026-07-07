@@ -28,7 +28,7 @@ import {
   type ScheduleSpec,
   type WeekDay,
 } from './flowsDb.js'
-import { getAllPortalItems } from './portalDb.js'
+import { listSeries } from './db.js'
 import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
 import type { FlowItem } from './flowNodes.js'
 
@@ -220,18 +220,22 @@ async function fireDueSchedule(): Promise<void> {
 // is polled when no flow listens. The first pass per kind seeds current state
 // without firing (so a deploy doesn't fire for the whole existing library).
 
-// New public-library titles (Series/Movie) since last seen.
+// New catalog titles (the /manage Catalog = series table) since last seen.
+// Keyed by mal_id under state kind 'catalog-item' — a fresh kind so it seeds
+// silently on first tick rather than re-firing history (the old 'new-item'
+// watermark held portal ids).
 async function watchNewItems(): Promise<void> {
   if (flowsWithTriggerType('trigger.new-item').length === 0) return
-  const titles = getAllPortalItems().filter((p) => p.type === 'Series' || p.type === 'Movie')
-  if (!triggerStateSeeded('new-item')) {
-    triggerStateAdd('new-item', titles.map((t) => t.id))
-    markTriggerSeeded('new-item')
+  const series = listSeries()
+  const key = (s: { mal_id: number }) => String(s.mal_id)
+  if (!triggerStateSeeded('catalog-item')) {
+    triggerStateAdd('catalog-item', series.map(key))
+    markTriggerSeeded('catalog-item')
     return
   }
-  const fresh = titles.filter((t) => !triggerStateHas('new-item', t.id))
+  const fresh = series.filter((s) => !triggerStateHas('catalog-item', key(s)))
   if (fresh.length === 0) return
-  triggerStateAdd('new-item', fresh.map((t) => t.id))
+  triggerStateAdd('catalog-item', fresh.map(key))
   await fireEvent('new-item', fresh as unknown as FlowItem[]).catch((e) =>
     console.error('scheduler: fireEvent(new-item) threw', e),
   )
