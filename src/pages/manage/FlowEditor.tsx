@@ -156,6 +156,7 @@ function runTriggerFor(specType: string, config: Record<string, unknown>): RunTr
     return { kind: 'start', name: String(config.name ?? 'start'), manual: true }
   if (specType === 'trigger.new-item') return { kind: 'new-item', manual: true }
   if (specType === 'trigger.new-portal') return { kind: 'new-portal', manual: true }
+  if (specType === 'trigger.qbit-complete') return { kind: 'qbit-complete', manual: true }
   if (specType === 'trigger.release') return { kind: 'release', manual: true }
   return null
 }
