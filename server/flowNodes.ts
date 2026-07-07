@@ -261,6 +261,290 @@ const httpSource: NodeImpl = {
 }
 
 // ---------------------------------------------------------------------------
+// Outbound web-request nodes: enrich.http fires one request per item and keeps
+// the response, sink.http delivers items somewhere (webhook-style). Both fill
+// {field} placeholders from the item, escaping each value for where it lands.
+// ---------------------------------------------------------------------------
+
+const CONTENT_TYPES: Record<string, string> = {
+  json: 'application/json',
+  form: 'application/x-www-form-urlencoded',
+  text: 'text/plain',
+}
+
+const CONTENT_TYPE_OPTIONS = [
+  { value: 'json', label: 'JSON' },
+  { value: 'form', label: 'Form (urlencoded)' },
+  { value: 'text', label: 'Plain text' },
+]
+
+// Placeholders are restricted to word characters ({title}, {mal_id}) so JSON
+// braces in a body/headers template are never mistaken for one.
+function fillTemplate(tpl: string, item: FlowItem, escape: 'none' | 'url' | 'json'): string {
+  return tpl.replace(/\{([\w.]+)\}/g, (_, key: string) => {
+    const raw = item[key]
+    const v = raw == null ? '' : typeof raw === 'object' ? JSON.stringify(raw) : String(raw)
+    if (escape === 'url') return encodeURIComponent(v)
+    if (escape === 'json') return JSON.stringify(v).slice(1, -1)
+    return v
+  })
+}
+
+/** Headers config is a JSON object; values support {field} placeholders. */
+function templateHeaders(raw: string, item: FlowItem): Record<string, string> {
+  if (!raw) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(fillTemplate(raw, item, 'json'))
+  } catch {
+    throw new Error('Headers must be a JSON object, e.g. {"X-Api-Key": "secret"}')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Headers must be a JSON object, e.g. {"X-Api-Key": "secret"}')
+  }
+  return Object.fromEntries(Object.entries(parsed).map(([k, v]) => [k, String(v)]))
+}
+
+function buildBody(tpl: string, item: FlowItem, ctKey: string): string {
+  // JSON bodies get their substituted values JSON-escaped so a quote in a
+  // title can't break the payload; form values are urlencoded the same way.
+  return ctKey === 'json'
+    ? fillTemplate(tpl, item, 'json')
+    : ctKey === 'form'
+      ? fillTemplate(tpl, item, 'url')
+      : fillTemplate(tpl, item, 'none')
+}
+
+const httpEnrich: NodeImpl = {
+  spec: {
+    type: 'enrich.http',
+    label: 'Web request',
+    category: 'enrich',
+    description:
+      'Sends an HTTP request per item — URL, body, and headers are filled from its fields — and stores the response in a field.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'ok', label: 'ok' },
+      { id: 'error', label: 'error' },
+    ],
+    config: [
+      {
+        key: 'url',
+        label: 'URL',
+        kind: 'text',
+        default: '',
+        help: '{name} placeholders are replaced with the item’s field values (URL-encoded).',
+      },
+      {
+        key: 'method',
+        label: 'Method',
+        kind: 'select',
+        default: 'GET',
+        options: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((m) => ({ value: m, label: m })),
+      },
+      {
+        key: 'body',
+        label: 'Body',
+        kind: 'text',
+        default: '',
+        help: 'Request body template, e.g. {"title": "{title}"}. Empty (or GET) = no body.',
+      },
+      { key: 'contentType', label: 'Content type', kind: 'select', default: 'json', options: CONTENT_TYPE_OPTIONS },
+      {
+        key: 'headers',
+        label: 'Extra headers',
+        kind: 'text',
+        default: '',
+        help: 'JSON object, e.g. {"X-Api-Key": "secret"}; values support {field} placeholders.',
+      },
+      {
+        key: 'responsePath',
+        label: 'Response path',
+        kind: 'text',
+        default: '',
+        help: 'Dot path into the JSON response, e.g. "data.0.score". Empty = whole body.',
+      },
+      { key: 'field', label: 'Store in field', kind: 'text', default: 'response' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const urlTpl = str(config, 'url', '')
+    if (!urlTpl) throw new Error('URL is required')
+    const method = str(config, 'method', 'GET').toUpperCase()
+    const bodyTpl = str(config, 'body', '')
+    const ctKey = str(config, 'contentType', 'json')
+    const headersRaw = str(config, 'headers', '')
+    const responsePath = str(config, 'responsePath', '')
+    const field = str(config, 'field', 'response')
+
+    const items = allInputs(inputs)
+    // GETs are read-only and run even on dry runs (like Fetch JSON); anything
+    // else could mutate the remote side, so a dry run only counts them.
+    if (ctx.dryRun && method !== 'GET') {
+      ctx.notes.push(`dry run — would send ${items.length} ${method} request(s)`)
+      return { ok: items, error: [] }
+    }
+
+    const ok: FlowItem[] = []
+    const error: FlowItem[] = []
+    for (const item of items) {
+      const url = fillTemplate(urlTpl, item, 'url')
+      try {
+        new URL(url)
+      } catch {
+        error.push({ ...item, http_error: `invalid URL: ${url}` })
+        continue
+      }
+      try {
+        const headers: Record<string, string> = {
+          'User-Agent': USER_AGENT,
+          Accept: 'application/json',
+          ...templateHeaders(headersRaw, item),
+        }
+        const init: RequestInit = { method, headers }
+        if (bodyTpl && method !== 'GET') {
+          headers['Content-Type'] = CONTENT_TYPES[ctKey] ?? CONTENT_TYPES.json
+          init.body = buildBody(bodyTpl, item, ctKey)
+        }
+        const res = await limitedFetch(hostKey(url), url, init)
+        const text = await res.text()
+        if (!res.ok) {
+          error.push({ ...item, http_status: res.status, http_error: `${res.status} ${res.statusText}` })
+          continue
+        }
+        let doc: unknown = text
+        try {
+          doc = JSON.parse(text)
+        } catch {
+          /* not JSON — keep the raw text */
+        }
+        ok.push({ ...item, [field]: responsePath ? digPath(doc, responsePath) : doc, http_status: res.status })
+      } catch (e) {
+        error.push({ ...item, http_error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    ctx.notes.push(`${ok.length} ok, ${error.length} failed`)
+    const firstError = error.find((it) => it.http_error)
+    if (firstError) ctx.notes.push(`first error: ${String(firstError.http_error)}`)
+    return { ok, error }
+  },
+}
+
+const httpSink: NodeImpl = {
+  spec: {
+    type: 'sink.http',
+    label: 'Send web request',
+    category: 'sink',
+    description:
+      'Delivers each item to a URL (webhook-style) — or all items as one JSON array request.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'sent', label: 'sent' },
+      { id: 'failed', label: 'failed' },
+    ],
+    config: [
+      {
+        key: 'url',
+        label: 'URL',
+        kind: 'text',
+        default: '',
+        help: '{name} placeholders are replaced with the item’s field values (URL-encoded).',
+      },
+      {
+        key: 'method',
+        label: 'Method',
+        kind: 'select',
+        default: 'POST',
+        options: ['POST', 'PUT', 'PATCH', 'DELETE', 'GET'].map((m) => ({ value: m, label: m })),
+      },
+      {
+        key: 'body',
+        label: 'Body',
+        kind: 'text',
+        default: '',
+        help: 'Body template per item. Empty = the whole item as JSON. Ignored when batching.',
+      },
+      { key: 'contentType', label: 'Content type', kind: 'select', default: 'json', options: CONTENT_TYPE_OPTIONS },
+      {
+        key: 'headers',
+        label: 'Extra headers',
+        kind: 'text',
+        default: '',
+        help: 'JSON object, e.g. {"Authorization": "Bearer …"}; values support {field} placeholders.',
+      },
+      {
+        key: 'batch',
+        label: 'Batch into one request',
+        kind: 'boolean',
+        default: false,
+        help: 'Send a single request with every item as a JSON array (URL placeholders resolve empty).',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const urlTpl = str(config, 'url', '')
+    if (!urlTpl) throw new Error('URL is required')
+    const method = str(config, 'method', 'POST').toUpperCase()
+    const bodyTpl = str(config, 'body', '')
+    const ctKey = str(config, 'contentType', 'json')
+    const headersRaw = str(config, 'headers', '')
+    const batch = bool(config, 'batch', false)
+
+    const items = allInputs(inputs)
+    if (items.length === 0) return { sent: [], failed: [] }
+    if (ctx.dryRun) {
+      ctx.notes.push(`dry run — would send ${batch ? 1 : items.length} ${method} request(s)`)
+      return { sent: items, failed: [] }
+    }
+
+    const send = async (url: string, item: FlowItem, body: string | undefined) => {
+      new URL(url) // throws on an invalid URL
+      const headers: Record<string, string> = {
+        'User-Agent': USER_AGENT,
+        ...templateHeaders(headersRaw, item),
+      }
+      const init: RequestInit = { method, headers }
+      if (body !== undefined && method !== 'GET') {
+        headers['Content-Type'] = CONTENT_TYPES[ctKey] ?? CONTENT_TYPES.json
+        init.body = body
+      }
+      const res = await limitedFetch(hostKey(url), url, init)
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      return res.status
+    }
+
+    if (batch) {
+      try {
+        const status = await send(fillTemplate(urlTpl, {}, 'url'), {}, JSON.stringify(items))
+        ctx.notes.push(`sent ${items.length} item(s) in one request (${status})`)
+        return { sent: items.map((it) => ({ ...it, http_status: status })), failed: [] }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        ctx.notes.push(`batch request failed: ${msg}`)
+        return { sent: [], failed: items.map((it) => ({ ...it, http_error: msg })) }
+      }
+    }
+
+    const sent: FlowItem[] = []
+    const failed: FlowItem[] = []
+    for (const item of items) {
+      try {
+        const body =
+          method === 'GET' ? undefined : bodyTpl ? buildBody(bodyTpl, item, ctKey) : JSON.stringify(item)
+        const status = await send(fillTemplate(urlTpl, item, 'url'), item, body)
+        sent.push({ ...item, http_status: status })
+      } catch (e) {
+        failed.push({ ...item, http_error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    ctx.notes.push(`sent ${sent.length}, failed ${failed.length}`)
+    const firstError = failed.find((it) => it.http_error)
+    if (firstError) ctx.notes.push(`first error: ${String(firstError.http_error)}`)
+    return { sent, failed }
+  },
+}
+
+// ---------------------------------------------------------------------------
 // qBittorrent WebUI client shared by the source (list) and sink (add) nodes.
 // Credentials come from node config first, env vars second, so a stored graph
 // can stay credential-free.
@@ -2858,6 +3142,7 @@ const IMPLS: NodeImpl[] = [
   indexerSource,
   portalSource,
   httpSource,
+  httpEnrich,
   qbittorrentSource,
   fieldFilter,
   compare,
@@ -2881,6 +3166,7 @@ const IMPLS: NodeImpl[] = [
   diff,
   merge,
   portalSink,
+  httpSink,
   qbittorrentSink,
   qbittorrentDelete,
   libraryImport,
