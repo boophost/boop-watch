@@ -369,7 +369,7 @@ export type RunStreamEvent =
 
 /** Which entry point a run fires. Omitted = whole flow (every trigger emits).
  * `manual: true` (editor "run from here") makes event triggers emit a sample. */
-export type RunTrigger = { kind: 'start' | 'new-item' | 'new-portal' | 'release'; name?: string; manual?: boolean }
+export type RunTrigger = { kind: 'start' | 'new-item' | 'new-portal' | 'release' | 'qbit-complete'; name?: string; manual?: boolean }
 
 /**
  * Run a flow and receive live per-node progress. Calls `onEvent` for each

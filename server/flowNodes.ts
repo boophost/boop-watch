@@ -13,6 +13,7 @@ import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from '
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
+import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
@@ -146,7 +147,7 @@ export interface NodeSpec {
 
 /** The kind of trigger a run is firing: the named bus (`start`) or an event
  * source. Each maps to a `trigger.<kind>` node type. */
-export type TriggerKind = 'start' | 'new-item' | 'new-portal' | 'release'
+export type TriggerKind = 'start' | 'new-item' | 'new-portal' | 'release' | 'qbit-complete'
 
 /** The event firing a run. Only a trigger node matching this event's kind (and,
  * for the named bus, its name) emits its payload; the rest stay empty. Absent =
@@ -4010,6 +4011,39 @@ const triggerNewPortalItem: NodeImpl = {
   },
 }
 
+const triggerQbitComplete: NodeImpl = {
+  spec: {
+    type: 'trigger.qbit-complete',
+    label: 'Download complete',
+    category: 'trigger',
+    description:
+      'Fires when a qBittorrent download finishes, emitting the completed torrent (hash, name, content_path) — wire it to expand-files to import promptly. Runs automatically on a schedule tick; a manual run samples the most-recently-completed torrent.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'torrent', dataType: 'torrent' }],
+    config: [],
+  },
+  async run(_inputs, _config, ctx) {
+    if (!triggerMatches(ctx, 'qbit-complete')) {
+      ctx.notes.push('idle — waiting on a completed download')
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    let source: FlowItem[] = ctx.trigger?.items ?? []
+    if (ctx.trigger == null || ctx.trigger.manual) {
+      if (!qbitConfigured()) {
+        ctx.notes.push('qBittorrent not configured — nothing to sample')
+        return { out: [] }
+      }
+      const done = (await qbitList()).filter((t) => t.progress >= 1).sort((a, b) => b.added_on - a.added_on)
+      source = done.slice(0, 1).map(qbitToItem) as unknown as FlowItem[]
+      ctx.notes.push(source.length ? 'manual sample: latest completed download' : 'no completed downloads to sample')
+    }
+    const items = source.map((it) => ({ ...it, triggered_at, trigger: 'qbit-complete' }))
+    ctx.notes.push(`${items.length} completed download(s)`)
+    return { out: items }
+  },
+}
+
 const triggerRelease: NodeImpl = {
   spec: {
     type: 'trigger.release',
@@ -4083,6 +4117,7 @@ const IMPLS: NodeImpl[] = [
   triggerStart,
   triggerNewItem,
   triggerNewPortalItem,
+  triggerQbitComplete,
   triggerRelease,
   triggerFire,
   jellyfinSource,

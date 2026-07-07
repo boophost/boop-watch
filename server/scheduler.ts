@@ -30,6 +30,7 @@ import {
 } from './flowsDb.js'
 import { listSeries } from './db.js'
 import { getAllPortalItems } from './portalDb.js'
+import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
 import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
 import type { FlowItem } from './flowNodes.js'
 
@@ -260,6 +261,24 @@ async function watchNewPortalItems(): Promise<void> {
   )
 }
 
+// qBittorrent torrents that have finished downloading since last seen. Keyed by
+// hash under state kind 'qbit-done'; seeds silently on first pass.
+async function watchQbitComplete(): Promise<void> {
+  if (!qbitConfigured() || flowsWithTriggerType('trigger.qbit-complete').length === 0) return
+  const done = (await qbitList()).filter((t) => t.progress >= 1)
+  if (!triggerStateSeeded('qbit-done')) {
+    triggerStateAdd('qbit-done', done.map((t) => t.hash))
+    markTriggerSeeded('qbit-done')
+    return
+  }
+  const fresh = done.filter((t) => !triggerStateHas('qbit-done', t.hash))
+  if (fresh.length === 0) return
+  triggerStateAdd('qbit-done', fresh.map((t) => t.hash))
+  await fireEvent('qbit-complete', fresh.map(qbitToItem) as unknown as FlowItem[]).catch((e) =>
+    console.error('scheduler: fireEvent(qbit-complete) threw', e),
+  )
+}
+
 // Library airings whose air time has passed since last seen.
 async function watchReleases(): Promise<void> {
   if (flowsWithTriggerType('trigger.release').length === 0) return
@@ -286,6 +305,7 @@ async function tick(): Promise<void> {
   // Watchers run after the schedule pass (they take the flow lock per run).
   await watchNewItems().catch((e) => console.error('scheduler: watchNewItems threw', e))
   await watchNewPortalItems().catch((e) => console.error('scheduler: watchNewPortalItems threw', e))
+  await watchQbitComplete().catch((e) => console.error('scheduler: watchQbitComplete threw', e))
   await watchReleases().catch((e) => console.error('scheduler: watchReleases threw', e))
 }
 
