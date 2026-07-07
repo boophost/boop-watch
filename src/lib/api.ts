@@ -105,7 +105,7 @@ export interface WatchData {
 
 export interface ScheduleEvent {
   title: string; ep: string; img: string | null; type: string
-  time: string; aired: boolean; now: boolean
+  time: string; aired: boolean; onBreak: boolean
 }
 export interface ScheduleDay {
   iso: string; dow: string; label: string; today: boolean
