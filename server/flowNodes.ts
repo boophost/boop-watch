@@ -24,7 +24,8 @@ export type FlowItem = Record<string, unknown>
 export interface ConfigField {
   key: string
   label: string
-  kind: 'text' | 'number' | 'select' | 'boolean' | 'password'
+  /** 'json' renders as a multi-line editor in the flow editor. */
+  kind: 'text' | 'number' | 'select' | 'boolean' | 'password' | 'json'
   options?: { value: string; label: string }[]
   default?: string | number | boolean
   help?: string
@@ -305,14 +306,39 @@ function templateHeaders(raw: string, item: FlowItem): Record<string, string> {
   return Object.fromEntries(Object.entries(parsed).map(([k, v]) => [k, String(v)]))
 }
 
+/** Walks a parsed JSON body template: a string that is exactly "{field}"
+ * becomes the item's raw value (numbers/objects keep their type, missing →
+ * null); strings mixing text and placeholders interpolate; everything else is
+ * a literal default and passes through untouched. */
+function fillJsonTemplate(node: unknown, item: FlowItem): unknown {
+  if (typeof node === 'string') {
+    const exact = node.match(/^\{([\w.]+)\}$/)
+    if (exact) return item[exact[1]] ?? null
+    return fillTemplate(node, item, 'none')
+  }
+  if (Array.isArray(node)) return node.map((v) => fillJsonTemplate(v, item))
+  if (node && typeof node === 'object') {
+    return Object.fromEntries(
+      Object.entries(node).map(([k, v]) => [k, fillJsonTemplate(v, item)]),
+    )
+  }
+  return node
+}
+
 function buildBody(tpl: string, item: FlowItem, ctKey: string): string {
-  // JSON bodies get their substituted values JSON-escaped so a quote in a
-  // title can't break the payload; form values are urlencoded the same way.
-  return ctKey === 'json'
-    ? fillTemplate(tpl, item, 'json')
-    : ctKey === 'form'
-      ? fillTemplate(tpl, item, 'url')
-      : fillTemplate(tpl, item, 'none')
+  if (ctKey === 'json') {
+    // A body that is itself valid JSON (placeholders live inside strings) is
+    // treated as a typed template — defaults stay literal, "{field}" values
+    // take the item's raw value. Anything else falls back to plain text
+    // templating with JSON-escaped substitutions so a quote in a title can't
+    // break the payload.
+    try {
+      return JSON.stringify(fillJsonTemplate(JSON.parse(tpl), item))
+    } catch {
+      return fillTemplate(tpl, item, 'json')
+    }
+  }
+  return ctKey === 'form' ? fillTemplate(tpl, item, 'url') : fillTemplate(tpl, item, 'none')
 }
 
 const httpEnrich: NodeImpl = {
@@ -345,15 +371,15 @@ const httpEnrich: NodeImpl = {
       {
         key: 'body',
         label: 'Body',
-        kind: 'text',
+        kind: 'json',
         default: '',
-        help: 'Request body template, e.g. {"title": "{title}"}. Empty (or GET) = no body.',
+        help: 'JSON template mixing defaults with item fields: a value that is exactly "{field}" takes the item’s raw value (numbers/objects stay typed, missing = null); strings can mix text and {field}; anything else is sent as a literal default. Empty (or GET) = no body.',
       },
       { key: 'contentType', label: 'Content type', kind: 'select', default: 'json', options: CONTENT_TYPE_OPTIONS },
       {
         key: 'headers',
         label: 'Extra headers',
-        kind: 'text',
+        kind: 'json',
         default: '',
         help: 'JSON object, e.g. {"X-Api-Key": "secret"}; values support {field} placeholders.',
       },
@@ -460,15 +486,15 @@ const httpSink: NodeImpl = {
       {
         key: 'body',
         label: 'Body',
-        kind: 'text',
+        kind: 'json',
         default: '',
-        help: 'Body template per item. Empty = the whole item as JSON. Ignored when batching.',
+        help: 'JSON template per item mixing defaults with item fields ("{field}" = raw value, strings interpolate). Empty = the whole item as JSON. Ignored when batching.',
       },
       { key: 'contentType', label: 'Content type', kind: 'select', default: 'json', options: CONTENT_TYPE_OPTIONS },
       {
         key: 'headers',
         label: 'Extra headers',
-        kind: 'text',
+        kind: 'json',
         default: '',
         help: 'JSON object, e.g. {"Authorization": "Bearer …"}; values support {field} placeholders.',
       },
@@ -3184,10 +3210,33 @@ const IMPLS: NodeImpl[] = [
       config: [
         { key: 'portId', label: 'Port id', kind: 'text', default: 'in' },
         { key: 'label', label: 'Label', kind: 'text', default: 'Input' },
+        {
+          key: 'testItems',
+          label: 'Test items',
+          kind: 'json',
+          default: '',
+          help: 'JSON array of items this input emits when the flow runs on its own (Dry run and Apply). Ignored when the flow runs as a component inside another flow — the parent’s items are used instead.',
+        },
       ],
     },
-    run: async (inputs) => {
-      return { items: inputs.items ?? [] }
+    // Only reached on standalone runs — when the flow is embedded as a
+    // component, the executor injects the parent's per-port items and skips
+    // run() entirely (see injectOutput in flowExecutor).
+    run: async (inputs, config, ctx) => {
+      const raw = str(config, 'testItems', '')
+      if (!raw) return { items: inputs.items ?? [] }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        throw new Error('Test items must be a JSON array, e.g. [{"title": "Frieren"}]')
+      }
+      const items = Array.isArray(parsed) ? parsed : [parsed]
+      if (!items.every((v): v is FlowItem => typeof v === 'object' && v !== null && !Array.isArray(v))) {
+        throw new Error('Test items must be a JSON array of objects')
+      }
+      ctx.notes.push(`emitting ${items.length} test item(s) — standalone run`)
+      return { items }
     },
   },
   {

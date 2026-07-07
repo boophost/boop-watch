@@ -334,8 +334,8 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
     .map((f) => {
       const v = data.config[f.key] ?? f.default
       if (v === undefined || v === '') return null
-      // Secrets never render on the canvas.
-      return `${f.label}: ${f.kind === 'password' ? '••••••' : String(v)}`
+      // Secrets never render on the canvas; multi-line JSON collapses to one line.
+      return `${f.label}: ${f.kind === 'password' ? '••••••' : String(v).replace(/\s*\n\s*/g, ' ')}`
     })
     .filter(Boolean)
     .slice(0, 3)
@@ -1111,6 +1111,15 @@ function FlowEditorInner() {
                                   </option>
                                 ))}
                               </select>
+                            ) : p.kind === 'json' ? (
+                              <textarea
+                                id={`param-${nestedKey}`}
+                                rows={4}
+                                spellCheck={false}
+                                className="w-full rounded-md border border-input bg-transparent px-2 py-1.5 font-mono text-xs"
+                                value={String(value)}
+                                onChange={(e) => setConfigValue(configKey, e.target.value)}
+                              />
                             ) : p.kind === 'boolean' ? (
                               <select
                                 id={`param-${nestedKey}`}
@@ -1170,6 +1179,15 @@ function FlowEditorInner() {
                               </option>
                             ))}
                           </select>
+                        ) : f.kind === 'json' ? (
+                          <textarea
+                            id={`cfg-${f.key}`}
+                            rows={4}
+                            spellCheck={false}
+                            className="w-full rounded-md border border-input bg-transparent px-2 py-1.5 font-mono text-xs"
+                            value={String(value)}
+                            onChange={(e) => setConfigValue(f.key, e.target.value)}
+                          />
                         ) : f.kind === 'boolean' ? (
                           <select
                             id={`cfg-${f.key}`}
