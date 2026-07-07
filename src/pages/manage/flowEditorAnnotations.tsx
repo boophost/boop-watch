@@ -1,4 +1,4 @@
-import { memo, useCallback } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from '@xyflow/react'
 import { Lock, Unlock } from 'lucide-react'
 import type { EditorArrowConfig, EditorGroupConfig, EditorStickyConfig } from '@/lib/flowEditorMeta'
@@ -27,6 +27,18 @@ export const StickyNoteNode = memo(function StickyNoteNode({ data, selected }: E
   const cfg = data.config as EditorStickyConfig
   const color = cfg.color ?? DEFAULT_STICKY
   const text = cfg.text ?? ''
+  const [editing, setEditing] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (!editing) return
+    textareaRef.current?.focus()
+    textareaRef.current?.select()
+  }, [editing])
+
+  useEffect(() => {
+    if (!selected) setEditing(false)
+  }, [selected])
 
   const onText = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -37,29 +49,42 @@ export const StickyNoteNode = memo(function StickyNoteNode({ data, selected }: E
 
   return (
     <div
-      className={`nodrag nopan relative rounded-sm shadow-md ${
-        selected ? 'ring-2 ring-ring/50' : ''
-      }`}
+      className={`relative rounded-sm shadow-md ${selected ? 'ring-2 ring-ring/50' : ''}`}
       style={{
         width: cfg.width ?? 180,
         height: cfg.height ?? 120,
         backgroundColor: color,
         color: '#422006',
       }}
+      onDoubleClick={() => setEditing(true)}
     >
       <NodeResizer
         minWidth={100}
         minHeight={72}
-        isVisible={Boolean(selected)}
+        isVisible={Boolean(selected) && !editing}
         onResizeEnd={(_, p) => persistSize(data, p.width, p.height)}
       />
-      <textarea
-        className="size-full resize-none bg-transparent px-2.5 py-2 text-xs leading-snug outline-none placeholder:text-amber-900/40"
-        value={text}
-        placeholder="Note…"
-        onChange={onText}
-        onPointerDown={(e) => e.stopPropagation()}
-      />
+      {editing ? (
+        <textarea
+          ref={textareaRef}
+          className="nodrag nopan nowheel size-full resize-none bg-transparent px-2.5 py-2 text-xs leading-snug outline-none placeholder:text-amber-900/40"
+          value={text}
+          placeholder="Note…"
+          onChange={onText}
+          onBlur={() => setEditing(false)}
+          onPointerDown={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setEditing(false)
+              ;(e.target as HTMLTextAreaElement).blur()
+            }
+          }}
+        />
+      ) : (
+        <div className="pointer-events-none size-full overflow-hidden px-2.5 py-2 text-xs leading-snug whitespace-pre-wrap">
+          {text || <span className="text-amber-900/40">Note…</span>}
+        </div>
+      )}
       <span className="pointer-events-none absolute bottom-0 right-0 size-3 bg-gradient-to-tl from-amber-900/15 to-transparent" />
     </div>
   )

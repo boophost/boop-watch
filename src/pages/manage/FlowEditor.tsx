@@ -1184,7 +1184,7 @@ function FlowEditorInner() {
             variant="outline"
             size="sm"
             className="gap-1 px-2"
-            title="Sticky note"
+            title="Notes"
             onClick={() => addEditorNode('editor.sticky')}
           >
             <StickyNote className="size-4" />
@@ -1454,7 +1454,7 @@ function FlowEditorInner() {
                       }
                     >
                       <StickyNote className="size-3.5 text-muted-foreground" />
-                      Sticky note
+                      Notes
                     </button>
                     <button
                       type="button"
@@ -1602,7 +1602,7 @@ function FlowEditorInner() {
                 {selectedSpec
                   ? (componentLabel(selectedComponentInfo) ?? selectedSpec.label)
                   : selected.data.specType === 'editor.sticky'
-                    ? 'Sticky note'
+                    ? 'Notes'
                     : selected.data.specType === 'editor.arrow'
                       ? 'Arrow'
                       : 'Group'}
