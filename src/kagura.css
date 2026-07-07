@@ -642,7 +642,7 @@
 body.theater { overflow: hidden; }
 body.theater .app-version { display: none; } /* fixed badge, z-index above the overlay */
 body.theater .player .topbar, body.theater .player .subbar { display: none; }
-body.theater .player .wrap { display: block; max-width: none; margin: 0; padding: 0; height: 100vh; }
+body.theater .player .wrap { display: block; max-width: none; margin: 0; padding: 0; height: 100vh; height: 100dvh; }
 body.theater .player .col-eps { display: none; }
 body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
 /* Keep .vid in block flow (not flex): JASSUB inserts a 0-width anchor div right
@@ -662,10 +662,10 @@ body.theater .player .vds-player[data-controls] .vds-overlay-btns { bottom: 96px
 body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
   background: oklch(0.145 0.008 285 / 94%); border-top: 1px solid var(--border); }
 
-/* Pseudo-fullscreen (iPhone): element fullscreen doesn't exist there and native
-   video fullscreen drops the JASSUB subtitle overlay, so the Watch page toggles
-   body.fs *with* body.theater — the theater layout does the filling, and this
-   hides the control bar so only the player remains. Exit via the player's own
+/* Pseudo-fullscreen: last-resort fallback when neither element fullscreen nor
+   native video fullscreen is available. The Watch page toggles body.fs *with*
+   body.theater — the theater layout does the filling, and this hides the
+   control bar so only the player remains. Exit via the player's own
    fullscreen button. */
 body.fs .player .pbar { display: none; }
 body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
