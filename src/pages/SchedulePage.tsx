@@ -7,8 +7,9 @@ import { getSchedule, type SchedulePayload, type ScheduleEvent, type ScheduleDay
 const LANG: Record<string, string> = { sub: 'SUB', dub: 'DUB', raw: 'RAW' }
 
 function EventCard({ e }: { e: ScheduleEvent }) {
+  const status = e.onBreak ? 'On break' : e.aired ? 'Aired' : 'Upcoming'
   return (
-    <div className={`evt${e.now ? ' now' : ''}${e.aired ? ' aired' : ''}`}>
+    <div className={`evt${e.aired ? ' aired' : ''}${e.onBreak ? ' break' : ''}`}>
       <div className="evt-main">
         <div className="evt-thumb">
           {e.img && <img src={e.img} alt="" loading="lazy" onError={(ev) => ev.currentTarget.remove()} />}
@@ -16,13 +17,12 @@ function EventCard({ e }: { e: ScheduleEvent }) {
         <div className="evt-body">
           <div className="evt-title">{e.title}</div>
           <div className="evt-meta">
-            <span className="evt-time">{e.time}</span>
+            {!e.onBreak && <span className="evt-time">{e.time}</span>}
             {e.ep && <span className="badge badge-mono badge-square">{e.ep}</span>}
-            <span className={`lang lang-${e.type}`}>{LANG[e.type] || 'RAW'}</span>
+            {!e.onBreak && <span className={`lang lang-${e.type}`}>{LANG[e.type] || 'RAW'}</span>}
           </div>
           <div className="evt-meta">
-            <span className={`evt-label${e.aired ? '' : ' up'}`}>{e.aired ? 'Aired' : 'Upcoming'}</span>
-            {e.now && <span className="badge badge-accent badge-square">Next</span>}
+            <span className={`evt-label${e.aired ? '' : e.onBreak ? ' break' : ' up'}`}>{status}</span>
           </div>
         </div>
       </div>
@@ -117,7 +117,7 @@ export default function SchedulePage() {
               <div key={d.iso} className={`cal-day${d.today ? ' today' : ''}`} data-active={i === activeIdx}>
                 <div className="cal-day-head">
                   <div>
-                    <div className="cal-dow">{d.dow}</div>
+                    <div className="cal-dow">{d.dow}{d.today ? ' · Today' : ''}</div>
                     <div className="cal-date">{d.label}</div>
                   </div>
                   {d.count > 0 && <span className="badge badge-mono">{d.count}</span>}
