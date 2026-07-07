@@ -58,11 +58,6 @@ export async function searchAnime(
   if (res.status === 429) {
     throw new Error('Rate limited — try again in a moment')
   }
-  // Jikan proxies MyAnimeList; a 504 here means MAL itself is down/unreachable
-  // (body: "Jikan failed to connect to MyAnimeList"), not our problem to retry.
-  if (res.status === 502 || res.status === 503 || res.status === 504) {
-    throw new Error('MyAnimeList looks unavailable right now — try again in a bit')
-  }
   if (!res.ok) {
     throw new Error(`Jikan returned ${res.status}`)
   }
