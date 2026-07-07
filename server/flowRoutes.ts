@@ -5,7 +5,8 @@
 import { Router } from 'express'
 import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
-import type { RunReport, RunHooks, SpecResolver } from './flowExecutor.js'
+import type { RunReport, RunFlowResult, RunHooks, SpecResolver } from './flowExecutor.js'
+import type { FlowItem, TriggerEvent, FireRequest } from './flowNodes.js'
 import { randomUUID } from 'node:crypto'
 import {
   deriveInterface,
@@ -70,9 +71,12 @@ export async function runFlowAndRecord(
      * sub-flow nodes with real (non-placeholder) ports doesn't fail the
      * internal pre-flight validateGraph in runFlow. */
     resolveSpec?: SpecResolver
+    /** The named event firing this run (only a matching trigger.start emits its
+     * payload). Omitted = manual whole-flow run (every trigger fires). */
+    trigger?: TriggerEvent | null
   },
   hooks?: RunHooks,
-): Promise<RunReport> {
+): Promise<RunFlowResult> {
   const runToken = randomUUID()
   const typeById = new Map(graph.nodes.map((n) => [n.id, n.type]))
   emitActivity({
@@ -107,7 +111,11 @@ export async function runFlowAndRecord(
   }
 
   try {
-    const report = await runFlow(graph, opts.dryRun, { hooks: wrapped, resolveSpec: opts.resolveSpec })
+    const report = await runFlow(graph, opts.dryRun, {
+      hooks: wrapped,
+      resolveSpec: opts.resolveSpec,
+      trigger: opts.trigger,
+    })
     lastRecordedRunId = null
     const activity = activityFromReport(graph, report)
     try {
@@ -187,6 +195,13 @@ function parseGraph(raw: unknown, flowId?: number): FlowGraph | { error: string 
 
 flowRouter.get('/api/flows/node-types', (_req, res) => {
   res.json({ nodeTypes: NODE_SPECS })
+})
+
+// Distinct trigger.start names across all flows — the targets a schedule (or a
+// Fire trigger node) can publish to. Declared before `/:id` so "triggers"
+// isn't captured as an id.
+flowRouter.get('/api/flows/triggers', (_req, res) => {
+  res.json({ triggers: flowsDb.listTriggerNames() })
 })
 
 // Rolling activity log. Declared before the `/:id` route so "runs" isn't
@@ -377,6 +392,69 @@ export function releaseFlowLock(): void {
   running = false
 }
 
+// Chain-depth cap so a self-firing loop (flow A fires a name that runs A, …)
+// can't run away. Fires past this depth are dropped with a warning.
+const FIRE_DEPTH_CAP = 5
+
+/**
+ * Publish a trigger event: run every flow that has a `trigger.start` of `name`,
+ * seeding it as the firing event so only the matching trigger emits `items`.
+ * Runs are serialized through the flow lock (one at a time), and each run's own
+ * `trigger.fire` outputs are drained recursively (depth-capped). Callers must
+ * NOT already hold the flow lock. Never throws — a bad flow is logged and
+ * skipped so a schedule/chain can't wedge.
+ */
+export async function fireTrigger(name: string, items: FlowItem[], depth = 0): Promise<void> {
+  if (depth > FIRE_DEPTH_CAP) {
+    console.warn(`fireTrigger: depth cap (${FIRE_DEPTH_CAP}) reached at "${name}" — stopping chain`)
+    return
+  }
+  const flows = flowsDb.flowsWithTrigger(name)
+  if (flows.length === 0) {
+    console.warn(`fireTrigger: no flow has a trigger named "${name}"`)
+    return
+  }
+  for (const flow of flows) {
+    if (!acquireFlowLock()) {
+      console.warn(`fireTrigger: "${name}" → flow #${flow.id} skipped (a flow is already running)`)
+      continue
+    }
+    let fires: FireRequest[] = []
+    try {
+      const graph = JSON.parse(flow.graph) as FlowGraph
+      const resolver = buildSpecResolver(flow.id, (id) => flowsDb.getFlow(id))
+      const invalid = validateGraph(graph, resolver)
+      if (invalid) {
+        console.warn(`fireTrigger: flow #${flow.id} "${flow.name}" invalid — ${invalid}`)
+        continue
+      }
+      const report = await runFlowAndRecord(graph, {
+        dryRun: false,
+        flowId: flow.id,
+        flowName: flow.name,
+        resolveSpec: resolver,
+        trigger: { name, items },
+      })
+      fires = report.fires ?? []
+    } catch (e) {
+      console.error(`fireTrigger: flow #${flow.id} "${flow.name}" threw`, e)
+    } finally {
+      releaseFlowLock()
+    }
+    // Drain this flow's own fires (lock released) before moving on.
+    for (const f of fires) await fireTrigger(f.name, f.items, depth + 1)
+  }
+}
+
+// Fan out a run's queued fires as fire-and-forget chains. Call *after* releasing
+// the flow lock; errors are swallowed so a chain can't break the originating run.
+export function dispatchFires(fires: FireRequest[] | undefined): void {
+  if (!fires?.length) return
+  void (async () => {
+    for (const f of fires) await fireTrigger(f.name, f.items, 1)
+  })().catch((e) => console.error('dispatchFires failed', e))
+}
+
 flowRouter.post('/api/flows/:id/run', async (req, res) => {
   const id = Number(req.params.id)
   const row = Number.isFinite(id) ? flowsDb.getFlow(id) : undefined
@@ -389,6 +467,7 @@ flowRouter.post('/api/flows/:id/run', async (req, res) => {
     return
   }
   const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  let fires: FireRequest[] | undefined
   try {
     const graph = JSON.parse(row.graph) as FlowGraph
     const resolver = buildSpecResolver(row.id, (fid) => flowsDb.getFlow(fid))
@@ -403,6 +482,7 @@ flowRouter.post('/api/flows/:id/run', async (req, res) => {
       flowName: row.name,
       resolveSpec: resolver,
     })
+    fires = report.fires
     res.json({ report })
   } catch (e) {
     console.error(e)
@@ -410,6 +490,8 @@ flowRouter.post('/api/flows/:id/run', async (req, res) => {
   } finally {
     releaseFlowLock()
   }
+  // Lock released — fan out any trigger.fire publishes as background chains.
+  dispatchFires(fires)
 })
 
 // Same as /run, but streams live per-node progress as newline-delimited JSON so
@@ -435,6 +517,7 @@ flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
   res.flushHeaders?.()
   const send = (obj: unknown) => res.write(JSON.stringify(obj) + '\n')
   const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  let fires: FireRequest[] | undefined
   try {
     const graph = JSON.parse(row.graph) as FlowGraph
     const resolver = buildSpecResolver(row.id, (fid) => flowsDb.getFlow(fid))
@@ -451,6 +534,7 @@ flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
         onNodeDone: (nodeId, nodeReport) => send({ type: 'node', id: nodeId, report: nodeReport }),
       },
     )
+    fires = report.fires
     send({ type: 'done', report })
   } catch (e) {
     console.error(e)
@@ -459,6 +543,8 @@ flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
     releaseFlowLock()
     res.end()
   }
+  // Lock released — fan out any trigger.fire publishes as background chains.
+  dispatchFires(fires)
 })
 
 // --- Schedules -----------------------------------------------------------
@@ -521,10 +607,17 @@ flowRouter.get('/api/schedules/:id', (req, res) => {
 
 flowRouter.post('/api/schedules', (req, res) => {
   const body = (req.body ?? {}) as Record<string, unknown>
-  const flowId = Number(body.flowId)
-  if (!Number.isFinite(flowId) || !flowsDb.getFlow(flowId)) {
-    res.status(400).json({ error: 'flowId must reference an existing flow' })
-    return
+  // Target: a trigger name (preferred, fires every subscribing flow) or a
+  // legacy single flow id.
+  const triggerName =
+    typeof body.triggerName === 'string' && body.triggerName.trim() ? body.triggerName.trim() : null
+  let flowId = 0
+  if (!triggerName) {
+    flowId = Number(body.flowId)
+    if (!Number.isFinite(flowId) || !flowsDb.getFlow(flowId)) {
+      res.status(400).json({ error: 'Provide triggerName, or flowId referencing an existing flow' })
+      return
+    }
   }
   const kind = body.kind as ScheduleKind
   if (!KINDS.includes(kind)) {
@@ -541,7 +634,16 @@ flowRouter.post('/api/schedules', (req, res) => {
   const dry_run = body.dryRun === undefined ? true : !!body.dryRun
   const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : null
   const next_run = enabled ? computeNextRun(kind, spec) : null
-  const schedule = flowsDb.createSchedule({ flow_id: flowId, name, kind, spec, dry_run, enabled, next_run })
+  const schedule = flowsDb.createSchedule({
+    flow_id: flowId,
+    trigger_name: triggerName,
+    name,
+    kind,
+    spec,
+    dry_run,
+    enabled,
+    next_run,
+  })
   res.json({ schedule })
 })
 
@@ -555,6 +657,12 @@ flowRouter.put('/api/schedules/:id', (req, res) => {
   const body = (req.body ?? {}) as Record<string, unknown>
   const patch: Partial<flowsDb.ScheduleInput> = {}
 
+  if (body.triggerName !== undefined) {
+    const tn =
+      typeof body.triggerName === 'string' && body.triggerName.trim() ? body.triggerName.trim() : null
+    patch.trigger_name = tn
+    if (tn) patch.flow_id = 0 // switching to a name target drops the flow binding
+  }
   if (body.flowId !== undefined) {
     const fid = Number(body.flowId)
     if (!Number.isFinite(fid) || !flowsDb.getFlow(fid)) {
@@ -562,6 +670,7 @@ flowRouter.put('/api/schedules/:id', (req, res) => {
       return
     }
     patch.flow_id = fid
+    patch.trigger_name = null // targeting a flow clears any name binding
   }
   if (body.name !== undefined)
     patch.name = typeof body.name === 'string' && body.name.trim() ? body.name.trim() : null
@@ -614,6 +723,19 @@ flowRouter.post('/api/schedules/:id/run', async (req, res) => {
     res.status(404).json({ error: 'Schedule not found' })
     return
   }
+  // Name-based: publish the trigger (fireTrigger takes the flow lock per run, so
+  // don't hold it here). There may be several matching flows / no single report.
+  if (sched.trigger_name) {
+    try {
+      await fireTrigger(sched.trigger_name, [])
+      res.json({ ok: true, fired: sched.trigger_name })
+    } catch (e) {
+      console.error(e)
+      res.status(500).json({ error: e instanceof Error ? e.message : 'Run failed' })
+    }
+    return
+  }
+  // Legacy flow-id schedule.
   if (!acquireFlowLock()) {
     res.status(409).json({ error: 'A flow is already running' })
     return

@@ -11,6 +11,8 @@ import {
   isRecordType,
   recordLCA,
   type PortDataType,
+  type TriggerEvent,
+  type FireRequest,
 } from './flowNodes.js'
 import { executableGraph, isEditorNode } from './flowEditorMeta.js'
 
@@ -203,6 +205,9 @@ export interface RunFlowOptions {
    * whose subflow nodes use their real, derived port ids.
    */
   resolveSpec?: SpecResolver
+  /** The named event firing this run: only a matching `trigger.start` emits its
+   * payload. Omitted/null = a manual whole-flow run (every trigger fires). */
+  trigger?: TriggerEvent | null
 }
 
 export interface RunFlowResult extends RunReport {
@@ -210,6 +215,9 @@ export interface RunFlowResult extends RunReport {
    * input handle. boundary.output collection reads `items` off of this to
    * recover what a published component produced on each output port. */
   finalInputs?: Map<string, Record<string, FlowItem[]>>
+  /** Deferred publishes from `trigger.fire` nodes, for the caller's dispatcher
+   * to fan out once the flow lock is free (see fireTrigger in flowRoutes). */
+  fires?: FireRequest[]
 }
 
 function normalizeRunOptions(hooksOrOptions?: RunHooks | RunFlowOptions): RunFlowOptions {
@@ -225,12 +233,14 @@ export async function runFlow(
   dryRun: boolean,
   hooksOrOptions?: RunHooks | RunFlowOptions,
 ): Promise<RunFlowResult> {
-  const { hooks, injectOutput, qualifyId, resolveSpec } = normalizeRunOptions(hooksOrOptions)
+  const { hooks, injectOutput, qualifyId, resolveSpec, trigger } = normalizeRunOptions(hooksOrOptions)
   const qid = qualifyId ?? ((id: string) => id)
   const startedAt = new Date().toISOString()
   const t0 = Date.now()
   const reports: Record<string, NodeReport> = {}
   const finalInputs = new Map<string, Record<string, FlowItem[]>>()
+  // trigger.fire nodes push deferred publishes here; returned to the caller.
+  const fireQueue: FireRequest[] = []
 
   const invalid = validateGraph(graph, resolveSpec)
   if (invalid) {
@@ -278,6 +288,8 @@ export async function runFlow(
       notes: [],
       nodeId: node.id,
       hooks,
+      trigger: trigger ?? null,
+      fireQueue,
       mergeNestedReports: (nested) => {
         Object.assign(reports, nested)
       },
@@ -311,5 +323,5 @@ export async function runFlow(
   }
 
   const ok = Object.values(reports).every((r) => r.status === 'ok')
-  return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports, finalInputs }
+  return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports, finalInputs, fires: fireQueue }
 }
