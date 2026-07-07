@@ -286,10 +286,10 @@ function fromJellyfin(it: JfItem): FlowItem {
 const jellyfinSource: NodeImpl = {
   spec: {
     type: 'source.jellyfin',
-    label: 'Jellyfin collection',
+    label: 'Get Jellyfin titles',
     category: 'source',
     description: 'Fetches titles from the Public Jellyfin collection.',
-    inputs: [],
+    inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [
       {
@@ -323,10 +323,10 @@ const jellyfinSource: NodeImpl = {
 const indexerSource: NodeImpl = {
   spec: {
     type: 'source.indexer',
-    label: 'Indexer series',
+    label: 'Get Library',
     category: 'source',
     description: 'Reads the /manage catalog (MAL-backed series list).',
-    inputs: [],
+    inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [],
   },
@@ -338,10 +338,10 @@ const indexerSource: NodeImpl = {
 const portalSource: NodeImpl = {
   spec: {
     type: 'source.portal',
-    label: 'Portal items',
+    label: 'Get Portal items',
     category: 'source',
     description: 'Reads items already stored in the public portal database.',
-    inputs: [],
+    inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [
       {
@@ -371,7 +371,7 @@ const httpSource: NodeImpl = {
     label: 'Fetch JSON',
     category: 'source',
     description: 'GETs a URL and emits the JSON items found at a path in the response.',
-    inputs: [],
+    inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'items' }],
     config: [
       { key: 'url', label: 'URL', kind: 'text', default: '' },
@@ -838,11 +838,11 @@ interface QbitInfo {
 const qbittorrentSource: NodeImpl = {
   spec: {
     type: 'source.qbittorrent',
-    label: 'qBittorrent torrents',
+    label: 'Get Torrents',
     category: 'source',
     description:
       'Lists torrents from qBittorrent (optionally completed only), emitting each one’s on-disk content path so the importer can place the files.',
-    inputs: [],
+    inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'torrents', dataType: 'torrent' }],
     config: [
       { key: 'url', label: 'qBittorrent URL', kind: 'text', default: '', help: 'Empty = QBIT_URL env.' },
