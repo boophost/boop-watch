@@ -339,7 +339,7 @@ const jellyfinSource: NodeImpl = {
 const indexerSource: NodeImpl = {
   spec: {
     type: 'source.indexer',
-    label: 'Get Library',
+    label: 'Get Catalog',
     category: 'source',
     description: 'Reads the /manage catalog (MAL-backed series list).',
     inputs: [{ id: 'when', label: 'when' }],
@@ -3950,44 +3950,30 @@ const triggerMatches = (ctx: RunContext, kind: TriggerKind): boolean =>
 const triggerNewItem: NodeImpl = {
   spec: {
     type: 'trigger.new-item',
-    label: 'New library item',
+    label: 'New catalog item',
     category: 'trigger',
     description:
-      'Fires when a new title (series or movie) appears in the public library, emitting the new item(s). Runs automatically on a schedule tick; a manual run emits the most-recently-added title as a sample.',
+      'Fires when a new title is added to the catalog (the /manage Catalog tab), emitting the new series. Runs automatically on a schedule tick; a manual run emits the most-recently-added title as a sample.',
     inputs: [],
     outputs: [{ id: 'out', label: 'item', dataType: 'catalog' }],
-    config: [
-      {
-        key: 'type',
-        label: 'Item type',
-        kind: 'select',
-        options: [
-          { value: '', label: 'Series + Movies' },
-          { value: 'Series', label: 'Series only' },
-          { value: 'Movie', label: 'Movies only' },
-        ],
-        default: '',
-      },
-    ],
+    config: [],
   },
   async run(_inputs, config, ctx) {
     if (!triggerMatches(ctx, 'new-item')) {
-      ctx.notes.push('idle — waiting on a new library item')
+      ctx.notes.push('idle — waiting on a new catalog item')
       return { out: [] }
     }
-    const typeFilter = str(config, 'type', '')
-    const keep = (it: FlowItem) => !typeFilter || it.type === typeFilter
     const triggered_at = new Date().toISOString()
-    // The watcher passes the new items; a manual run samples the latest title.
+    // The watcher passes the new series; a manual run samples the latest one.
     let source: FlowItem[] = ctx.trigger?.items ?? []
     if (ctx.trigger == null || ctx.trigger.manual) {
-      const titles = getAllPortalItems()
-        .filter((p) => p.type === 'Series' || p.type === 'Movie')
-        .sort((a, b) => String(b.date_created ?? '').localeCompare(String(a.date_created ?? '')))
-      source = titles.slice(0, 1) as unknown as FlowItem[]
-      ctx.notes.push(source.length ? 'manual sample: latest title' : 'no titles to sample')
+      const series = listSeries().sort((a, b) =>
+        String(b.added_at ?? '').localeCompare(String(a.added_at ?? '')),
+      )
+      source = series.slice(0, 1) as unknown as FlowItem[]
+      ctx.notes.push(source.length ? 'manual sample: latest catalog title' : 'no catalog titles to sample')
     }
-    const items = source.filter(keep).map((it) => ({ ...it, triggered_at, trigger: 'new-item' }))
+    const items = source.map((it) => ({ ...it, triggered_at, trigger: 'new-item' }))
     ctx.notes.push(`${items.length} new item(s)`)
     return { out: items }
   },
