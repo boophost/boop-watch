@@ -34,6 +34,12 @@ const PORT = parseInt(process.env.PORT ?? '3001')
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
 const AUTH_USERNAME = process.env.AUTH_USERNAME ?? 'admin'
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD ?? 'changeme'
+// .trim() guards against stray whitespace in the env value — untrimmed, a
+// trailing space survives string interpolation and makes fetch() throw
+// "Failed to parse URL" on every Supabase Bearer-token check, silently
+// falling back to (always-failing) local JWT verification.
+const SUPABASE_URL = process.env.SUPABASE_URL?.trim() || ''
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY?.trim() || ''
 const COOKIE_NAME = 'ai_session'
 const IS_PROD = process.env.NODE_ENV === 'production'
 
@@ -56,8 +62,8 @@ async function requireAuth(
   if (authHeader?.startsWith('Bearer ')) {
     token = authHeader.split(' ')[1]
     try {
-      const resp = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {
-        headers: { Authorization: `Bearer ${token}`, apikey: process.env.SUPABASE_ANON_KEY || '' }
+      const resp = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+        headers: { Authorization: `Bearer ${token}`, apikey: SUPABASE_ANON_KEY }
       })
       if (resp.ok) {
         const user = await resp.json()
@@ -535,8 +541,8 @@ app.get('/config.js', (req, res) => {
   res.setHeader('Content-Type', 'application/javascript')
   res.setHeader('Cache-Control', 'no-store')
   res.send(`window.ENV = {
-    SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
-    SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)},
+    SUPABASE_URL: ${JSON.stringify(SUPABASE_URL)},
+    SUPABASE_ANON_KEY: ${JSON.stringify(SUPABASE_ANON_KEY)},
     POSTHOG_KEY: ${JSON.stringify(process.env.POSTHOG_KEY || '')},
     POSTHOG_UI_HOST: ${JSON.stringify(process.env.POSTHOG_UI_HOST || posthogUiHost())}
   };`)
