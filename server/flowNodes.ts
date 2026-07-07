@@ -146,7 +146,7 @@ export interface NodeSpec {
 
 /** The kind of trigger a run is firing: the named bus (`start`) or an event
  * source. Each maps to a `trigger.<kind>` node type. */
-export type TriggerKind = 'start' | 'new-item' | 'release'
+export type TriggerKind = 'start' | 'new-item' | 'new-portal' | 'release'
 
 /** The event firing a run. Only a trigger node matching this event's kind (and,
  * for the named bus, its name) emits its payload; the rest stay empty. Absent =
@@ -3979,6 +3979,37 @@ const triggerNewItem: NodeImpl = {
   },
 }
 
+const triggerNewPortalItem: NodeImpl = {
+  spec: {
+    type: 'trigger.new-portal',
+    label: 'New portal item',
+    category: 'trigger',
+    description:
+      'Fires when a new title (series or movie) appears in the public portal — the Jellyfin collection live on the site — emitting the new item(s). Runs automatically on a schedule tick; a manual run emits the most-recently-added portal title as a sample.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'item', dataType: 'catalog' }],
+    config: [],
+  },
+  async run(_inputs, _config, ctx) {
+    if (!triggerMatches(ctx, 'new-portal')) {
+      ctx.notes.push('idle — waiting on a new portal item')
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    let source: FlowItem[] = ctx.trigger?.items ?? []
+    if (ctx.trigger == null || ctx.trigger.manual) {
+      const titles = getAllPortalItems()
+        .filter((p) => p.type === 'Series' || p.type === 'Movie')
+        .sort((a, b) => String(b.date_created ?? '').localeCompare(String(a.date_created ?? '')))
+      source = titles.slice(0, 1) as unknown as FlowItem[]
+      ctx.notes.push(source.length ? 'manual sample: latest portal title' : 'no portal titles to sample')
+    }
+    const items = source.map((it) => ({ ...it, triggered_at, trigger: 'new-portal' }))
+    ctx.notes.push(`${items.length} new item(s)`)
+    return { out: items }
+  },
+}
+
 const triggerRelease: NodeImpl = {
   spec: {
     type: 'trigger.release',
@@ -4051,6 +4082,7 @@ const triggerFire: NodeImpl = {
 const IMPLS: NodeImpl[] = [
   triggerStart,
   triggerNewItem,
+  triggerNewPortalItem,
   triggerRelease,
   triggerFire,
   jellyfinSource,
