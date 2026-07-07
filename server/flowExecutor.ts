@@ -47,22 +47,37 @@ export interface RunReport {
 
 const SAMPLE_SIZE = 3
 
-export function validateGraph(graph: FlowGraph): string | null {
+export type NodePortSpec = { id: string }
+export type ResolvedNodeSpec = { inputs: NodePortSpec[]; outputs: NodePortSpec[] }
+
+/**
+ * Resolves a node's port spec for node types that aren't in the static
+ * NODE_REGISTRY (currently just `flow.subflow`, whose ports come from the
+ * referenced flow's published interface). Return null to defer to the
+ * registry / report the type as unknown.
+ */
+export type SpecResolver = (node: FlowNode) => ResolvedNodeSpec | null
+
+export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): string | null {
   const ids = new Set<string>()
   for (const node of graph.nodes) {
     if (!node.id || typeof node.id !== 'string') return 'Node missing id'
     if (ids.has(node.id)) return `Duplicate node id: ${node.id}`
     ids.add(node.id)
     const impl = NODE_REGISTRY.get(node.type)
-    if (!impl) return `Unknown node type: ${node.type}`
+    if (!impl) {
+      const resolved = resolveSpec?.(node)
+      if (!resolved) return `Unknown node type: ${node.type}`
+    }
   }
   for (const edge of graph.edges) {
     const source = graph.nodes.find((n) => n.id === edge.source)
     const target = graph.nodes.find((n) => n.id === edge.target)
     if (!source) return `Edge ${edge.id}: unknown source node`
     if (!target) return `Edge ${edge.id}: unknown target node`
-    const sourceSpec = NODE_REGISTRY.get(source.type)!.spec
-    const targetSpec = NODE_REGISTRY.get(target.type)!.spec
+    const sourceSpec = resolveSpec?.(source) ?? NODE_REGISTRY.get(source.type)?.spec
+    const targetSpec = resolveSpec?.(target) ?? NODE_REGISTRY.get(target.type)?.spec
+    if (!sourceSpec || !targetSpec) return `Unknown node type on edge ${edge.id}`
     if (!sourceSpec.outputs.some((o) => o.id === edge.sourceHandle))
       return `Edge ${edge.id}: ${source.type} has no output "${edge.sourceHandle}"`
     if (!targetSpec.inputs.some((i) => i.id === edge.targetHandle))
@@ -98,16 +113,56 @@ export interface RunHooks {
   onNodeDone?: (nodeId: string, report: NodeReport) => void
 }
 
+export interface RunFlowOptions {
+  hooks?: RunHooks
+  /**
+   * For boundary.input nodes: return items to use as that node's output
+   * instead of running its (empty, pass-through) impl. Returning null falls
+   * back to the normal impl.run. Used by flow.subflow to feed the caller's
+   * per-port inputs into the nested graph.
+   */
+  injectOutput?: (node: FlowNode) => FlowItem[] | null
+  /** Prefix applied to node ids passed to hooks — lets a subflow's nested run
+   * report progress under a qualified id in the parent's live feed. */
+  qualifyId?: (nodeId: string) => string
+  /**
+   * Resolves flow.subflow node ports against the referenced flow's published
+   * interface, same as passed to validateGraph directly. Without this, the
+   * internal pre-flight validateGraph call falls back to flow.subflow's
+   * static placeholder spec (single "in"/"out" ports) and rejects any graph
+   * whose subflow nodes use their real, derived port ids.
+   */
+  resolveSpec?: SpecResolver
+}
+
+export interface RunFlowResult extends RunReport {
+  /** Inputs gathered for each node right before it ran, keyed by node id then
+   * input handle. boundary.output collection reads `items` off of this to
+   * recover what a published component produced on each output port. */
+  finalInputs?: Map<string, Record<string, FlowItem[]>>
+}
+
+function normalizeRunOptions(hooksOrOptions?: RunHooks | RunFlowOptions): RunFlowOptions {
+  if (!hooksOrOptions) return {}
+  if ('onNodeStart' in hooksOrOptions || 'onNodeDone' in hooksOrOptions) {
+    return { hooks: hooksOrOptions as RunHooks }
+  }
+  return hooksOrOptions as RunFlowOptions
+}
+
 export async function runFlow(
   graph: FlowGraph,
   dryRun: boolean,
-  hooks?: RunHooks,
-): Promise<RunReport> {
+  hooksOrOptions?: RunHooks | RunFlowOptions,
+): Promise<RunFlowResult> {
+  const { hooks, injectOutput, qualifyId, resolveSpec } = normalizeRunOptions(hooksOrOptions)
+  const qid = qualifyId ?? ((id: string) => id)
   const startedAt = new Date().toISOString()
   const t0 = Date.now()
   const reports: Record<string, NodeReport> = {}
+  const finalInputs = new Map<string, Record<string, FlowItem[]>>()
 
-  const invalid = validateGraph(graph)
+  const invalid = validateGraph(graph, resolveSpec)
   if (invalid) {
     return { ok: false, dryRun, startedAt, durationMs: Date.now() - t0, nodes: {}, error: invalid }
   }
@@ -119,24 +174,25 @@ export async function runFlow(
 
   for (const node of order) {
     const impl = NODE_REGISTRY.get(node.type)!
+    const reportKey = qid(node.id)
     const incoming = graph.edges.filter((e) => e.target === node.id)
 
     // Skip nodes downstream of a failure so one broken source doesn't cascade
     // into misleading per-node errors.
     if (incoming.some((e) => failed.has(e.source))) {
       failed.add(node.id)
-      reports[node.id] = {
+      reports[reportKey] = {
         status: 'skipped',
         durationMs: 0,
         counts: {},
         samples: {},
         notes: ['skipped: upstream node failed'],
       }
-      hooks?.onNodeDone?.(node.id, reports[node.id])
+      hooks?.onNodeDone?.(reportKey, reports[reportKey])
       continue
     }
 
-    hooks?.onNodeStart?.(node.id)
+    hooks?.onNodeStart?.(reportKey)
 
     const inputs: Record<string, FlowItem[]> = {}
     for (const port of impl.spec.inputs) inputs[port.id] = []
@@ -144,13 +200,23 @@ export async function runFlow(
       const produced = buffers.get(e.source)?.[e.sourceHandle] ?? []
       inputs[e.targetHandle] = [...(inputs[e.targetHandle] ?? []), ...produced]
     }
+    finalInputs.set(node.id, inputs)
 
-    const ctx: RunContext = { dryRun, notes: [] }
+    const ctx: RunContext = {
+      dryRun,
+      notes: [],
+      nodeId: node.id,
+      hooks,
+      mergeNestedReports: (nested) => {
+        Object.assign(reports, nested)
+      },
+    }
     const nodeT0 = Date.now()
     try {
-      const outputs = await impl.run(inputs, node.config ?? {}, ctx)
+      const injected = node.type === 'boundary.input' ? injectOutput?.(node) ?? null : null
+      const outputs = injected !== null ? { items: injected } : await impl.run(inputs, node.config ?? {}, ctx)
       buffers.set(node.id, outputs)
-      reports[node.id] = {
+      reports[reportKey] = {
         status: 'ok',
         durationMs: Date.now() - nodeT0,
         counts: Object.fromEntries(Object.entries(outputs).map(([k, v]) => [k, v.length])),
@@ -161,7 +227,7 @@ export async function runFlow(
       }
     } catch (e) {
       failed.add(node.id)
-      reports[node.id] = {
+      reports[reportKey] = {
         status: 'error',
         durationMs: Date.now() - nodeT0,
         counts: {},
@@ -170,9 +236,9 @@ export async function runFlow(
         error: e instanceof Error ? e.message : String(e),
       }
     }
-    hooks?.onNodeDone?.(node.id, reports[node.id])
+    hooks?.onNodeDone?.(reportKey, reports[reportKey])
   }
 
   const ok = Object.values(reports).every((r) => r.status === 'ok')
-  return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports }
+  return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports, finalInputs }
 }

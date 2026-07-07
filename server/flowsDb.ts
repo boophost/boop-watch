@@ -3,6 +3,7 @@
 // editor opens onto something real instead of a blank canvas.
 
 import { getDb } from './db.js'
+import type { FlowComponentMeta } from './flowComponents.js'
 import type { FlowGraph } from './flowExecutor.js'
 
 export interface FlowRow {
@@ -10,6 +11,7 @@ export interface FlowRow {
   name: string
   description: string | null
   graph: string // JSON FlowGraph
+  component: string | null
   created_at: string
   updated_at: string
 }
@@ -19,6 +21,7 @@ export interface FlowSummary {
   name: string
   description: string | null
   node_count: number
+  published: boolean
   updated_at: string
 }
 
@@ -68,6 +71,10 @@ function db() {
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `)
+    const cols = instance.prepare(`PRAGMA table_info(flows)`).all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'component')) {
+      instance.exec(`ALTER TABLE flows ADD COLUMN component TEXT`)
+    }
     ready = true
     seedFlows(instance)
   }
@@ -275,7 +282,7 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
 
 // Seeds are versioned via SQLite's user_version so later releases can add
 // flows to existing databases without re-creating deleted ones.
-const SEED_VERSION = 3
+const SEED_VERSION = 4
 
 function seedFlows(instance: ReturnType<typeof getDb>) {
   const insert = instance.prepare('INSERT INTO flows (name, description, graph) VALUES (?, ?, ?)')
@@ -314,18 +321,52 @@ export function listFlows(): FlowSummary[] {
     } catch {
       /* corrupt graph JSON — surfaced as 0 nodes */
     }
+    const meta = parseComponent(r.component)
     return {
       id: r.id,
       name: r.name,
       description: r.description,
       node_count: nodeCount,
+      published: !!meta?.published,
       updated_at: r.updated_at,
     }
   })
 }
 
+export function listFlowGraphs(): { id: number; name: string; graph: string }[] {
+  return db().prepare('SELECT id, name, graph FROM flows').all() as {
+    id: number
+    name: string
+    graph: string
+  }[]
+}
+
 export function getFlow(id: number): FlowRow | undefined {
   return db().prepare('SELECT * FROM flows WHERE id = ?').get(id) as FlowRow | undefined
+}
+
+export function parseComponent(raw: string | null): FlowComponentMeta | null {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as FlowComponentMeta
+  } catch {
+    return null
+  }
+}
+
+export function listPublishedComponents(): { row: FlowRow; graph: FlowGraph; meta: FlowComponentMeta }[] {
+  const rows = db().prepare(`SELECT * FROM flows WHERE component IS NOT NULL`).all() as FlowRow[]
+  return rows
+    .map((row) => {
+      const meta = parseComponent(row.component)
+      if (!meta?.published) return null
+      try {
+        return { row, graph: JSON.parse(row.graph) as FlowGraph, meta }
+      } catch {
+        return null
+      }
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
 }
 
 export function createFlow(name: string, description: string | null): FlowRow {
@@ -338,18 +379,23 @@ export function createFlow(name: string, description: string | null): FlowRow {
 
 export function updateFlow(
   id: number,
-  patch: { name?: string; description?: string | null; graph?: FlowGraph },
+  patch: { name?: string; description?: string | null; graph?: FlowGraph; component?: FlowComponentMeta | null },
 ): FlowRow | undefined {
   const existing = getFlow(id)
   if (!existing) return undefined
   db()
     .prepare(
-      `UPDATE flows SET name = ?, description = ?, graph = ?, updated_at = datetime('now') WHERE id = ?`,
+      `UPDATE flows SET name = ?, description = ?, graph = ?, component = ?, updated_at = datetime('now') WHERE id = ?`,
     )
     .run(
       patch.name ?? existing.name,
       patch.description === undefined ? existing.description : patch.description,
       patch.graph ? JSON.stringify(patch.graph) : existing.graph,
+      patch.component === undefined
+        ? existing.component
+        : patch.component
+          ? JSON.stringify(patch.component)
+          : null,
       id,
     )
   return getFlow(id)

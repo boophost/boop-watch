@@ -13,6 +13,9 @@ import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from '
 import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
+import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
+import { getFlow, parseComponent } from './flowsDb.js'
+import { deriveInterface, buildSpecResolver } from './flowComponents.js'
 
 const execFileP = promisify(execFile)
 
@@ -32,10 +35,12 @@ export interface NodePort {
   label: string
 }
 
+export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'boundary'
+
 export interface NodeSpec {
   type: string
   label: string
-  category: 'source' | 'filter' | 'enrich' | 'combine' | 'sink'
+  category: NodeCategory
   description: string
   inputs: NodePort[]
   outputs: NodePort[]
@@ -45,6 +50,12 @@ export interface NodeSpec {
 export interface RunContext {
   dryRun: boolean
   notes: string[]
+  /** Id of the node currently executing in the parent graph (for sub-flow prefixing). */
+  nodeId?: string
+  /** Live progress hooks from the outer runFlow — forwarded into nested runs. */
+  hooks?: RunHooks
+  /** Merge nested graph node reports into the parent run (keys already qualified). */
+  mergeNestedReports?: (nested: Record<string, NodeReport>) => void
 }
 
 export interface NodeImpl {
@@ -2753,6 +2764,95 @@ const portalSink: NodeImpl = {
   },
 }
 
+// Runs a published flow as a composite node: the caller's per-port items feed
+// the referenced graph's boundary.input nodes, and the referenced graph's
+// boundary.output nodes become this node's outputs. The static spec below is
+// a placeholder — real instances get their actual ports from the referenced
+// flow's derived interface via componentToNodeSpec (see flowComponents.ts),
+// swapped in client-side and by buildSpecResolver during graph validation.
+//
+// Imports runFlow dynamically to dodge the flowExecutor <-> flowNodes import
+// cycle (flowExecutor imports NODE_REGISTRY from this file at module scope).
+const subflow: NodeImpl = {
+  spec: {
+    type: 'flow.subflow',
+    label: 'Sub-flow',
+    category: 'combine',
+    description: 'Runs a published flow as a composite node.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [{ key: 'flowId', label: 'Component flow', kind: 'number' }],
+  },
+  run: async (inputs, config, ctx) => {
+    const flowId = Number(config.flowId)
+    if (!Number.isFinite(flowId)) throw new Error('flowId required')
+
+    const row = getFlow(flowId)
+    if (!row) throw new Error(`Flow ${flowId} not found`)
+    const meta = parseComponent(row.component)
+    if (!meta?.published) throw new Error(`Flow ${flowId} is not a published component`)
+
+    const graph = JSON.parse(row.graph) as FlowGraph
+
+    // Exposed-param overrides: componentToNodeSpec exposes them as flat
+    // `params.<nodeId>.<configKey>` config keys on this node; also accept a
+    // nested `params` object (keyed either the same way or by bare configKey)
+    // for callers that build config programmatically (e.g. the verify script).
+    const nestedParams = (config.params ?? {}) as Record<string, unknown>
+    for (const node of graph.nodes) {
+      for (const ep of meta.exposedParams) {
+        if (ep.nodeId !== node.id) continue
+        const flatKey = `params.${ep.nodeId}.${ep.configKey}`
+        const nestedKey = `${ep.nodeId}.${ep.configKey}`
+        if (config[flatKey] !== undefined) {
+          node.config = { ...node.config, [ep.configKey]: config[flatKey] }
+        } else if (nestedParams[nestedKey] !== undefined) {
+          node.config = { ...node.config, [ep.configKey]: nestedParams[nestedKey] }
+        } else if (nestedParams[ep.configKey] !== undefined) {
+          node.config = { ...node.config, [ep.configKey]: nestedParams[ep.configKey] }
+        }
+      }
+    }
+
+    const iface = deriveInterface(flowId, graph, meta)
+    if ('error' in iface) throw new Error(iface.error)
+
+    const { runFlow } = await import('./flowExecutor.js')
+
+    const inner = await runFlow(graph, ctx.dryRun, {
+      injectOutput: (node) => {
+        if (node.type !== 'boundary.input') return null
+        const portId = String(node.config.portId ?? '')
+        return inputs[portId] ?? null
+      },
+      qualifyId: (id) => (ctx.nodeId ? `${ctx.nodeId}/${id}` : id),
+      hooks: ctx.hooks,
+      // This flow's own graph may itself contain flow.subflow nodes
+      // referencing further published components — resolve those too so
+      // nested composites of composites validate correctly.
+      resolveSpec: buildSpecResolver(flowId, getFlow),
+    })
+
+    ctx.mergeNestedReports?.(inner.nodes)
+
+    if (!inner.ok) {
+      const failedEntry = Object.entries(inner.nodes).find(([, r]) => r.status === 'error')
+      throw new Error(failedEntry?.[1].error ?? inner.error ?? 'Sub-flow failed')
+    }
+
+    const outputs: Record<string, FlowItem[]> = {}
+    for (const node of graph.nodes) {
+      if (node.type !== 'boundary.output') continue
+      const portId = String(node.config.portId ?? '')
+      const nodeInputs = inner.finalInputs?.get(node.id)
+      outputs[portId] = nodeInputs?.items ?? []
+    }
+
+    ctx.notes.push(`sub-flow ${flowId}: ${inner.durationMs}ms`)
+    return outputs
+  },
+}
+
 const IMPLS: NodeImpl[] = [
   jellyfinSource,
   indexerSource,
@@ -2786,6 +2886,41 @@ const IMPLS: NodeImpl[] = [
   libraryImport,
   jellyfinScan,
   jellyfinCollection,
+  subflow,
+  {
+    spec: {
+      type: 'boundary.input',
+      label: 'Input',
+      category: 'boundary',
+      description: 'External input port for a published component flow.',
+      inputs: [],
+      outputs: [{ id: 'items', label: 'items' }],
+      config: [
+        { key: 'portId', label: 'Port id', kind: 'text', default: 'in' },
+        { key: 'label', label: 'Label', kind: 'text', default: 'Input' },
+      ],
+    },
+    run: async (inputs) => {
+      return { items: inputs.items ?? [] }
+    },
+  },
+  {
+    spec: {
+      type: 'boundary.output',
+      label: 'Output',
+      category: 'boundary',
+      description: 'External output port for a published component flow.',
+      inputs: [{ id: 'items', label: 'items' }],
+      outputs: [],
+      config: [
+        { key: 'portId', label: 'Port id', kind: 'text', default: 'out' },
+        { key: 'label', label: 'Label', kind: 'text', default: 'Output' },
+      ],
+    },
+    run: async () => {
+      return {}
+    },
+  },
 ]
 
 export const NODE_REGISTRY: Map<string, NodeImpl> = new Map(IMPLS.map((n) => [n.spec.type, n]))
