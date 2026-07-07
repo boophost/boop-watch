@@ -21,6 +21,24 @@ export interface QbitTorrent {
   eta: number
   category: string
   added_on: number
+  content_path?: string
+  save_path?: string
+}
+
+/** Map a qBittorrent torrent to the flow-item shape source.qbittorrent emits, so
+ * the "Download complete" trigger's payload is a drop-in `torrent` record. */
+export function qbitToItem(t: QbitTorrent): Record<string, unknown> {
+  return {
+    name: t.name,
+    torrent_hash: t.hash,
+    torrent_name: t.name,
+    torrent_state: t.state,
+    torrent_progress: t.progress,
+    torrent_category: t.category,
+    torrent_size: t.size ?? null,
+    save_path: t.save_path ?? '',
+    content_path: t.content_path ?? '',
+  }
 }
 
 async function login(): Promise<string> {
