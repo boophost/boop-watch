@@ -1173,6 +1173,25 @@ const convert: NodeImpl = {
   },
 }
 
+const fromValue: NodeImpl = {
+  spec: {
+    type: 'transform.from-value',
+    label: 'Values to items',
+    category: 'combine',
+    description:
+      'Turns a typed value stream back into an item stream: each wired value becomes an item holding it in a field. Use it inside a component to process what a typed boundary input receives (e.g. embeds → Collect).',
+    inputs: [{ id: 'value', label: 'value', dataType: 'json' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [{ key: 'field', label: 'Store in field', kind: 'text', default: 'value' }],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'value')
+    const items = socketValues(inputs.value).map((v): FlowItem => ({ [field]: v }))
+    ctx.notes.push(`${items.length} value(s) → items`)
+    return { items }
+  },
+}
+
 const pick: NodeImpl = {
   spec: {
     type: 'transform.pick',
@@ -3687,6 +3706,7 @@ const IMPLS: NodeImpl[] = [
   setField,
   convert,
   pick,
+  fromValue,
   collect,
   textValue,
   numberValue,
