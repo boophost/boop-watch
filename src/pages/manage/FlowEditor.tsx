@@ -334,6 +334,8 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
     .map((f) => {
       const v = data.config[f.key] ?? f.default
       if (v === undefined || v === '') return null
+      // Default-valued booleans are noise ("Batch: false"); render only when flipped.
+      if (f.kind === 'boolean' && v === (f.default ?? false)) return null
       // Secrets never render on the canvas; multi-line JSON collapses to one line.
       return `${f.label}: ${f.kind === 'password' ? '••••••' : String(v).replace(/\s*\n\s*/g, ' ')}`
     })
@@ -353,8 +355,11 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
               : 'border-border'
       }`}
     >
-      <div className="relative flex items-center gap-2 border-b border-border px-3 py-2">
-        {inputs.length === 1 ? (
+      <div
+        className="relative flex items-center gap-2 border-b border-border px-3 py-2"
+        title={spec.description || undefined}
+      >
+        {inputs.length === 1 && inputs[0].label === 'in' ? (
           <Handle
             id={inputs[0].id}
             type="target"
@@ -376,7 +381,7 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
           <AlertTriangle className="ml-auto size-3.5 shrink-0 text-destructive" />
         ) : null}
       </div>
-      {inputs.length > 1 ? (
+      {inputs.length > 1 || (inputs.length === 1 && inputs[0].label !== 'in') ? (
         <div className="border-b border-border py-1">
           {inputs.map((port) => (
             <div key={port.id} className="relative flex items-center gap-2 px-3 py-0.5">
