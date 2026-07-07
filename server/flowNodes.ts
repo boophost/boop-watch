@@ -32,28 +32,72 @@ export interface ConfigField {
 }
 
 /**
- * What travels over a port. 'items' is the classic stream of loose records;
- * every other type is a *value* port — its items are `{ value: <raw> }`
- * wrappers so the executor can move them like any other stream. Edges only
- * connect compatible types (see portCompatible), and the editor color-codes
- * handles and wires by type.
+ * What travels over a port. The *record* family — base 'items' plus its stage
+ * subtypes (torrent/release/catalog/file/probed) — is the classic stream of
+ * loose records; the subtypes form a lineage under 'items' so a wrong wire (a
+ * torrent into a file input) is caught while generic nodes still interoperate.
+ * Every other type is a *value* port — its items are `{ value: <raw> }` wrappers
+ * so the executor can move them like any other stream. Edges only connect
+ * compatible types (see portCompatible), and the editor color-codes handles and
+ * wires by type. Mirror any change in src/lib/flows.ts.
  */
-export type PortDataType = 'items' | 'text' | 'number' | 'color' | 'url' | 'json' | 'embed'
+export type PortDataType =
+  | 'items'
+  | 'torrent'
+  | 'release'
+  | 'catalog'
+  | 'file'
+  | 'probed'
+  | 'text'
+  | 'number'
+  | 'color'
+  | 'url'
+  | 'json'
+  | 'embed'
 
 export interface NodePort {
   id: string
   label: string
-  /** Omitted = 'items'. */
+  /** Omitted = base 'items'. */
   dataType?: PortDataType
 }
 
-/** Extra source types a target port accepts besides its own. 'items' never
- * mixes with value types; 'json' is the wide value type; text-ish values
- * cross-connect where a runtime parse/stringify is safe. */
-const PORT_ACCEPTS: Record<PortDataType, PortDataType[]> = {
-  items: [],
+/** Record-family subtype lineage (child → parent). Base 'items' is the root of
+ * every record type; value types are a separate family. */
+const RECORD_PARENT: Partial<Record<PortDataType, PortDataType>> = {
+  torrent: 'items',
+  release: 'items',
+  catalog: 'items',
+  file: 'items',
+  probed: 'file',
+}
+
+const RECORD_TYPES: PortDataType[] = ['items', 'torrent', 'release', 'catalog', 'file', 'probed']
+export const isRecordType = (t: PortDataType): boolean => RECORD_TYPES.includes(t)
+
+/** Ancestor chain including self, nearest-first ('probed' → ['probed','file','items']). */
+const recordLineage = (t: PortDataType): PortDataType[] => {
+  const chain: PortDataType[] = [t]
+  let p = RECORD_PARENT[t]
+  while (p) {
+    chain.push(p)
+    p = RECORD_PARENT[p]
+  }
+  return chain
+}
+
+/** Nearest common ancestor of two record types (for propagation through merges). */
+export const recordLCA = (a: PortDataType, b: PortDataType): PortDataType => {
+  const bset = new Set(recordLineage(b))
+  for (const t of recordLineage(a)) if (bset.has(t)) return t
+  return 'items'
+}
+
+/** Extra value-source types a value target accepts besides its own; 'json' is
+ * the wide value type; text-ish values cross-connect where a runtime
+ * parse/stringify is safe. Record types are handled by lineage, not this table. */
+const PORT_ACCEPTS: Partial<Record<PortDataType, PortDataType[]>> = {
   text: ['number', 'url', 'color'],
-  number: [],
   color: ['text'],
   url: ['text'],
   json: ['text', 'number', 'color', 'url', 'embed'],
@@ -66,7 +110,12 @@ export function portCompatible(
 ): boolean {
   const s = source ?? 'items'
   const t = target ?? 'items'
-  return s === t || PORT_ACCEPTS[t].includes(s)
+  if (s === t) return true
+  const sRec = isRecordType(s)
+  const tRec = isRecordType(t)
+  if (sRec !== tRec) return false // record and value families never mix
+  if (sRec) return recordLineage(s).includes(t) || recordLineage(t).includes(s)
+  return (PORT_ACCEPTS[t] ?? []).includes(s)
 }
 
 /** Unwraps a value port's items back to raw values ({ value: x } -> x). */
@@ -212,7 +261,7 @@ const jellyfinSource: NodeImpl = {
     category: 'source',
     description: 'Fetches titles from the Public Jellyfin collection.',
     inputs: [],
-    outputs: [{ id: 'items', label: 'items' }],
+    outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [
       {
         key: 'itemTypes',
@@ -249,7 +298,7 @@ const indexerSource: NodeImpl = {
     category: 'source',
     description: 'Reads the /manage catalog (MAL-backed series list).',
     inputs: [],
-    outputs: [{ id: 'items', label: 'items' }],
+    outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [],
   },
   async run() {
@@ -264,7 +313,7 @@ const portalSource: NodeImpl = {
     category: 'source',
     description: 'Reads items already stored in the public portal database.',
     inputs: [],
-    outputs: [{ id: 'items', label: 'items' }],
+    outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [
       {
         key: 'type',
@@ -765,7 +814,7 @@ const qbittorrentSource: NodeImpl = {
     description:
       'Lists torrents from qBittorrent (optionally completed only), emitting each one’s on-disk content path so the importer can place the files.',
     inputs: [],
-    outputs: [{ id: 'items', label: 'items' }],
+    outputs: [{ id: 'items', label: 'torrents', dataType: 'torrent' }],
     config: [
       { key: 'url', label: 'qBittorrent URL', kind: 'text', default: '', help: 'Empty = QBIT_URL env.' },
       { key: 'username', label: 'Username', kind: 'text', default: '', help: 'Empty = QBIT_USERNAME env.' },
@@ -2232,7 +2281,7 @@ const torrentSearch: NodeImpl = {
       'Searches a torrent index per item, scores results by resolution/audio/seeders, and picks a season-pack batch or one release per episode.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
-      { id: 'found', label: 'found' },
+      { id: 'found', label: 'found', dataType: 'release' },
       { id: 'missed', label: 'missed' },
     ],
     config: [
@@ -2520,9 +2569,9 @@ const expandFiles: NodeImpl = {
     category: 'enrich',
     description:
       'Turns each item into one item per video file at its path (recurses into folders for season packs). Re-parses the episode number from each file name.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'torrent' }],
     outputs: [
-      { id: 'files', label: 'files' },
+      { id: 'files', label: 'files', dataType: 'file' },
       { id: 'empty', label: 'no files' },
     ],
     config: [
@@ -2578,9 +2627,9 @@ const mediaProbe: NodeImpl = {
     category: 'enrich',
     description:
       'ffprobes the video file and emits its stream facts (sub_langs, sub_codecs, sub_track_count, audio_langs, video_codec) plus a sub_tracks list for the extractor. Branch on these with a Compare node.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
-      { id: 'probed', label: 'probed' },
+      { id: 'probed', label: 'probed', dataType: 'probed' },
       { id: 'error', label: 'error' },
     ],
     config: [
@@ -2647,7 +2696,7 @@ const extractSubs: NodeImpl = {
     category: 'enrich',
     description:
       'Pulls an embedded text subtitle track out of the file into a sidecar we own (sets subtitle_path/subtitle_lang), plus any embedded fonts. Picks by language, with fallback. Image subs (PGS/VobSub) can’t be extracted.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
       { id: 'extracted', label: 'extracted' },
       { id: 'none', label: 'no track' },
@@ -2866,7 +2915,7 @@ const muxTracks: NodeImpl = {
     category: 'enrich',
     description:
       'Muxes an audio (and/or subtitle) track from a donor file onto the primary video, stream-copied into a new MKV (no re-encode). Use to build a playable dual-audio file: playable h264 primary + eng dub from a dual donor. Same-source pairs only (matching edit/framerate); audioOffset corrects a constant delay.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
       { id: 'muxed', label: 'muxed' },
       { id: 'skipped', label: 'skipped' },
@@ -3284,7 +3333,7 @@ const libraryImport: NodeImpl = {
     category: 'sink',
     description:
       'Places each video file into the media library at a templated path (hardlink, falling back to copy across filesystems), moving its subtitle sidecars alongside. This is what makes a download watchable.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
       { id: 'imported', label: 'imported' },
       { id: 'skipped', label: 'skipped' },
