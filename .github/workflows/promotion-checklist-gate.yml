@@ -1,0 +1,31 @@
+name: Promotion checklist gate
+
+# Required status check on the rolling dev -> main promotion PR: fails while
+# any aggregated feature test plan (or non-"Post-merge:" item in the prod
+# checklist) is still unchecked. See scripts/check-promotion-checklist.mjs.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to check
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  checklist-complete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check promotion checklist completeness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-promotion-checklist.mjs "${{ github.event.pull_request.number || inputs.pr_number }}"
