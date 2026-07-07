@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
 import { listSeries, upsertSeriesMetadata } from './db.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
+import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
@@ -143,12 +144,21 @@ export interface NodeSpec {
   config: ConfigField[]
 }
 
-/** The named event firing a run. Only a `trigger.start` whose name matches emits
- * its payload; the rest stay empty. Absent = a manual whole-flow run (every
- * trigger fires). */
+/** The kind of trigger a run is firing: the named bus (`start`) or an event
+ * source. Each maps to a `trigger.<kind>` node type. */
+export type TriggerKind = 'start' | 'new-item' | 'release'
+
+/** The event firing a run. Only a trigger node matching this event's kind (and,
+ * for the named bus, its name) emits its payload; the rest stay empty. Absent =
+ * a manual whole-flow run (every trigger fires). `manual` marks an editor
+ * "run from here", so event triggers emit a representative sample instead of a
+ * real event payload. */
 export interface TriggerEvent {
-  name: string
+  kind: TriggerKind
+  /** Only meaningful for kind 'start' — the published trigger name. */
+  name?: string
   items: FlowItem[]
+  manual?: boolean
 }
 
 /** A deferred publish queued by a `trigger.fire` node, drained by the dispatcher
@@ -3840,8 +3850,9 @@ const triggerStart: NodeImpl = {
   },
   async run(_inputs, config, ctx) {
     const name = str(config, 'name', 'start')
-    // A manual run (no trigger event) fires every trigger; a named fire only its match.
-    if (ctx.trigger != null && ctx.trigger.name !== name) {
+    // A manual whole-flow run (no event) fires every trigger; a fire only its
+    // match — kind 'start' with the same name.
+    if (ctx.trigger != null && !(ctx.trigger.kind === 'start' && ctx.trigger.name === name)) {
       ctx.notes.push(`idle — waiting on "${name}"`)
       return { out: [] }
     }
@@ -3851,6 +3862,88 @@ const triggerStart: NodeImpl = {
       ? payload.map((it) => ({ ...it, triggered_at, trigger: name }))
       : [{ triggered_at, trigger: name }]
     ctx.notes.push(ctx.trigger == null ? `manual start (${items.length})` : `fired "${name}" (${items.length})`)
+    return { out: items }
+  },
+}
+
+// Whether this run's event targets a given event-trigger kind: a matching fire,
+// or a manual whole-flow run (null event fires every trigger).
+const triggerMatches = (ctx: RunContext, kind: TriggerKind): boolean =>
+  ctx.trigger == null || ctx.trigger.kind === kind
+
+const triggerNewItem: NodeImpl = {
+  spec: {
+    type: 'trigger.new-item',
+    label: 'New library item',
+    category: 'trigger',
+    description:
+      'Fires when a new title (series or movie) appears in the public library, emitting the new item(s). Runs automatically on a schedule tick; a manual run emits the most-recently-added title as a sample.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'item', dataType: 'catalog' }],
+    config: [
+      {
+        key: 'type',
+        label: 'Item type',
+        kind: 'select',
+        options: [
+          { value: '', label: 'Series + Movies' },
+          { value: 'Series', label: 'Series only' },
+          { value: 'Movie', label: 'Movies only' },
+        ],
+        default: '',
+      },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    if (!triggerMatches(ctx, 'new-item')) {
+      ctx.notes.push('idle — waiting on a new library item')
+      return { out: [] }
+    }
+    const typeFilter = str(config, 'type', '')
+    const keep = (it: FlowItem) => !typeFilter || it.type === typeFilter
+    const triggered_at = new Date().toISOString()
+    // The watcher passes the new items; a manual run samples the latest title.
+    let source: FlowItem[] = ctx.trigger?.items ?? []
+    if (ctx.trigger == null || ctx.trigger.manual) {
+      const titles = getAllPortalItems()
+        .filter((p) => p.type === 'Series' || p.type === 'Movie')
+        .sort((a, b) => String(b.date_created ?? '').localeCompare(String(a.date_created ?? '')))
+      source = titles.slice(0, 1) as unknown as FlowItem[]
+      ctx.notes.push(source.length ? 'manual sample: latest title' : 'no titles to sample')
+    }
+    const items = source.filter(keep).map((it) => ({ ...it, triggered_at, trigger: 'new-item' }))
+    ctx.notes.push(`${items.length} new item(s)`)
+    return { out: items }
+  },
+}
+
+const triggerRelease: NodeImpl = {
+  spec: {
+    type: 'trigger.release',
+    label: 'Release due',
+    category: 'trigger',
+    description:
+      'Fires when a library show’s scheduled episode air time passes, emitting the aired episode (title, ep, air time). Runs automatically on a schedule tick; a manual run emits the next upcoming library airing as a sample.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'airing' }],
+    config: [],
+  },
+  async run(_inputs, config, ctx) {
+    if (!triggerMatches(ctx, 'release')) {
+      ctx.notes.push('idle — waiting on a release')
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    let source: FlowItem[] = ctx.trigger?.items ?? []
+    if (ctx.trigger == null || ctx.trigger.manual) {
+      // Sample: the soonest upcoming airing, else the most recent aired one.
+      const airings = await libraryAirings()
+      const upcoming = airings.find((a) => !a.aired) ?? [...airings].reverse().find((a) => a.aired)
+      source = upcoming ? [upcoming.item as unknown as FlowItem] : []
+      ctx.notes.push(source.length ? 'manual sample: next airing' : 'no airings to sample')
+    }
+    const items = source.map((it) => ({ ...it, triggered_at, trigger: 'release' }))
+    ctx.notes.push(`${items.length} release(s)`)
     return { out: items }
   },
 }
@@ -3895,6 +3988,8 @@ const triggerFire: NodeImpl = {
 
 const IMPLS: NodeImpl[] = [
   triggerStart,
+  triggerNewItem,
+  triggerRelease,
   triggerFire,
   jellyfinSource,
   indexerSource,
