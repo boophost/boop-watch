@@ -159,6 +159,21 @@ function runTriggerFor(specType: string, config: Record<string, unknown>): RunTr
   return null
 }
 
+/** Node ids reachable downstream from `start` over the given edges (includes
+ * `start`). Used to scope run results to the fired trigger's branch — the other
+ * triggers run server-side but did nothing for this fire, so we don't paint them. */
+function reachableFrom(start: string, edges: { source: string; target: string }[]): Set<string> {
+  const adj = new Map<string, string[]>()
+  for (const e of edges) (adj.get(e.source) ?? adj.set(e.source, []).get(e.source)!).push(e.target)
+  const seen = new Set([start])
+  const queue = [start]
+  while (queue.length) {
+    const cur = queue.shift()!
+    for (const t of adj.get(cur) ?? []) if (!seen.has(t)) { seen.add(t); queue.push(t) }
+  }
+  return seen
+}
+
 /** Categories a flow can publish itself as when exposed as a reusable component. */
 const COMPONENT_CATEGORIES: Exclude<NodeCategory, 'boundary'>[] = [
   'source',
@@ -756,7 +771,7 @@ function FlowEditorInner() {
   // Dry vs Live is a persistent toggle (replaces the old Dry run / Apply buttons);
   // the run functions read it. A ref lets per-node ▶ handlers call the latest run.
   const [live, setLive] = useState(false)
-  const runRef = useRef<(dryRun: boolean, trigger?: RunTrigger) => void>(() => {})
+  const runRef = useRef<(dryRun: boolean, trigger?: RunTrigger, fromNodeId?: string) => void>(() => {})
   const liveRef = useRef(live)
   const [report, setReport] = useState<RunReport | null>(null)
   const [error, setError] = useState('')
@@ -869,7 +884,7 @@ function FlowEditorInner() {
             onEditorChange: isEditorNode(n.data.specType)
               ? (patch: Record<string, unknown>) => patchEditorConfig(n.id, patch)
               : undefined,
-            onRunTrigger: trigger ? () => runRef.current(!liveRef.current, trigger) : undefined,
+            onRunTrigger: trigger ? () => runRef.current(!liveRef.current, trigger, n.id) : undefined,
             runDisabled: runningKind !== null,
           },
         }
@@ -1343,12 +1358,17 @@ function FlowEditorInner() {
     }
   }
 
-  const run = async (dryRun: boolean, trigger?: RunTrigger) => {
+  const run = async (dryRun: boolean, trigger?: RunTrigger, fromNodeId?: string) => {
     if (!dryRun && !window.confirm('Really run this flow live? It will write to the portal database.')) {
       return
     }
     setRunningKind(dryRun ? 'dry' : 'real')
     setError('')
+    // Firing a single trigger runs the whole graph server-side, but only its
+    // branch actually did anything — paint results only on nodes reachable from
+    // the fired trigger. A whole-flow run (no fromNodeId) paints everything.
+    const active = fromNodeId ? reachableFrom(fromNodeId, edges) : null
+    const paint = (nodeId: string) => active === null || active.has(nodeId)
     // Clear last run's per-node results so live progress paints from scratch.
     setReport(null)
     setNodes((ns) =>
@@ -1361,11 +1381,11 @@ function FlowEditorInner() {
         id,
         dryRun,
         (ev) => {
-          if (ev.type === 'start') {
+          if (ev.type === 'start' && paint(ev.id)) {
             setNodes((ns) =>
               ns.map((n) => (n.id === ev.id ? { ...n, data: { ...n.data, running: true } } : n)),
             )
-          } else if (ev.type === 'node') {
+          } else if (ev.type === 'node' && paint(ev.id)) {
             setNodes((ns) =>
               ns.map((n) =>
                 n.id === ev.id ? { ...n, data: { ...n.data, report: ev.report, running: false } } : n,
@@ -1378,9 +1398,13 @@ function FlowEditorInner() {
       setReport(report)
       if (report.error) setError(report.error)
       // Reconcile against the final report (covers validation errors that emit
-      // no per-node events, and any node that never streamed).
+      // no per-node events, and any node that never streamed) — scoped to the
+      // fired trigger's branch.
       setNodes((ns) =>
-        ns.map((n) => ({ ...n, data: { ...n.data, report: report.nodes[n.id], running: false } })),
+        ns.map((n) => ({
+          ...n,
+          data: { ...n.data, report: paint(n.id) ? report.nodes[n.id] : undefined, running: false },
+        })),
       )
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Run failed')
