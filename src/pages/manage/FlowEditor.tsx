@@ -19,11 +19,13 @@ import {
 import '@xyflow/react/dist/style.css'
 import {
   AlertTriangle,
+  Box,
   Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
+  ExternalLink,
   Loader2,
   Play,
   Plus,
@@ -37,14 +39,19 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   getFlow,
+  getFlowComponents,
+  getFlowInterface,
   getNodeTypes,
   saveFlow,
   runFlowStream,
   type NodeSpec,
   type NodeCategory,
+  type ConfigField,
   type FlowGraph,
+  type FlowComponentMeta,
   type RunReport,
   type NodeReport,
+  type ComponentInterface,
 } from '@/lib/flows'
 
 // ---- graph <-> React Flow conversion ---------------------------------------
@@ -65,6 +72,7 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
   enrich: 'bg-amber-400',
   combine: 'bg-emerald-400',
   sink: 'bg-rose-400',
+  boundary: 'bg-slate-400',
 }
 
 const CATEGORY_LABEL: Record<NodeCategory, string> = {
@@ -73,9 +81,19 @@ const CATEGORY_LABEL: Record<NodeCategory, string> = {
   enrich: 'Enrich',
   combine: 'Combine',
   sink: 'Sink',
+  boundary: 'Boundary',
 }
 
-const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink']
+const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink', 'boundary']
+
+/** Categories a flow can publish itself as when exposed as a reusable component. */
+const COMPONENT_CATEGORIES: Exclude<NodeCategory, 'boundary'>[] = [
+  'source',
+  'filter',
+  'enrich',
+  'combine',
+  'sink',
+]
 
 /** Categories collapsed by default in the add-node picker (largest / less common first picks). */
 const DEFAULT_COLLAPSED: ReadonlySet<NodeCategory> = new Set(['enrich', 'sink'])
@@ -97,29 +115,39 @@ function groupSpecs(specs: NodeSpec[], query: string) {
   })).filter((g) => g.specs.length > 0)
 }
 
+/** Synthetic key for the collapsible "Custom" folder, tracked alongside NodeCategory keys. */
+const CUSTOM_FOLDER = 'custom' as const
+type FolderKey = NodeCategory | typeof CUSTOM_FOLDER
+
 /** Shared add-node palette: search + collapsible category folders. */
 function NodePicker({
   specs,
+  components = [],
   onSelect,
   compact = false,
 }: {
   specs: NodeSpec[]
+  components?: NodeSpec[]
   onSelect: (spec: NodeSpec) => void
   compact?: boolean
 }) {
   const [query, setQuery] = useState('')
-  const [collapsed, setCollapsed] = useState<Set<NodeCategory>>(() => new Set(DEFAULT_COLLAPSED))
+  const [collapsed, setCollapsed] = useState<Set<FolderKey>>(() => new Set(DEFAULT_COLLAPSED))
 
   const grouped = useMemo(() => groupSpecs(specs, query), [specs, query])
+  const matchedComponents = useMemo(
+    () => components.filter((s) => matchesNodeSearch(s, query)),
+    [components, query],
+  )
   const searching = query.trim().length > 0
 
-  const isCollapsed = (category: NodeCategory) => !searching && collapsed.has(category)
+  const isCollapsed = (folder: FolderKey) => !searching && collapsed.has(folder)
 
-  const toggleCategory = (category: NodeCategory) => {
+  const toggleCategory = (folder: FolderKey) => {
     setCollapsed((prev) => {
       const next = new Set(prev)
-      if (next.has(category)) next.delete(category)
-      else next.add(category)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
       return next
     })
   }
@@ -140,51 +168,95 @@ function NodePicker({
         </div>
       </div>
       <div className={compact ? 'max-h-64 overflow-auto' : 'max-h-72 overflow-auto'}>
-        {grouped.length === 0 ? (
+        {grouped.length === 0 && matchedComponents.length === 0 ? (
           <p className="px-2 py-4 text-center text-xs text-muted-foreground">No matching nodes</p>
         ) : (
-          grouped.map((g) => (
-            <div key={g.category}>
-              <button
-                type="button"
-                className="flex w-full items-center gap-1.5 px-2 pb-0.5 pt-2 text-left text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
-                onClick={() => toggleCategory(g.category)}
-              >
-                {isCollapsed(g.category) ? (
-                  <ChevronRight className="size-3 shrink-0" />
-                ) : (
-                  <ChevronDown className="size-3 shrink-0" />
-                )}
-                {CATEGORY_LABEL[g.category]}
-                <span className="ml-auto tabular-nums">{g.specs.length}</span>
-              </button>
-              {!isCollapsed(g.category)
-                ? g.specs.map((s) => (
-                    <button
-                      key={s.type}
-                      type="button"
-                      role="menuitem"
-                      className={
-                        compact
-                          ? 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted'
-                          : 'flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted'
-                      }
-                      onClick={() => onSelect(s)}
-                    >
-                      <span className="flex items-center gap-2 text-sm">
-                        <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
-                        {s.label}
-                      </span>
-                      {!compact ? (
-                        <span className="line-clamp-2 text-[11px] text-muted-foreground">
-                          {s.description}
+          <>
+            {grouped.map((g) => (
+              <div key={g.category}>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 px-2 pb-0.5 pt-2 text-left text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                  onClick={() => toggleCategory(g.category)}
+                >
+                  {isCollapsed(g.category) ? (
+                    <ChevronRight className="size-3 shrink-0" />
+                  ) : (
+                    <ChevronDown className="size-3 shrink-0" />
+                  )}
+                  {CATEGORY_LABEL[g.category]}
+                  <span className="ml-auto tabular-nums">{g.specs.length}</span>
+                </button>
+                {!isCollapsed(g.category)
+                  ? g.specs.map((s) => (
+                      <button
+                        key={s.type}
+                        type="button"
+                        role="menuitem"
+                        className={
+                          compact
+                            ? 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted'
+                            : 'flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted'
+                        }
+                        onClick={() => onSelect(s)}
+                      >
+                        <span className="flex items-center gap-2 text-sm">
+                          <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
+                          {s.label}
                         </span>
-                      ) : null}
-                    </button>
-                  ))
-                : null}
-            </div>
-          ))
+                        {!compact ? (
+                          <span className="line-clamp-2 text-[11px] text-muted-foreground">
+                            {s.description}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))
+                  : null}
+              </div>
+            ))}
+            {matchedComponents.length > 0 ? (
+              <div key={CUSTOM_FOLDER}>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1.5 px-2 pb-0.5 pt-2 text-left text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                  onClick={() => toggleCategory(CUSTOM_FOLDER)}
+                >
+                  {isCollapsed(CUSTOM_FOLDER) ? (
+                    <ChevronRight className="size-3 shrink-0" />
+                  ) : (
+                    <ChevronDown className="size-3 shrink-0" />
+                  )}
+                  Custom
+                  <span className="ml-auto tabular-nums">{matchedComponents.length}</span>
+                </button>
+                {!isCollapsed(CUSTOM_FOLDER)
+                  ? matchedComponents.map((s) => (
+                      <button
+                        key={s.type + ':' + String(s.config.find((f) => f.key === 'flowId')?.default)}
+                        type="button"
+                        role="menuitem"
+                        className={
+                          compact
+                            ? 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted'
+                            : 'flex w-full flex-col gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted'
+                        }
+                        onClick={() => onSelect(s)}
+                      >
+                        <span className="flex items-center gap-2 text-sm">
+                          <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[s.category]}`} />
+                          {s.label}
+                        </span>
+                        {!compact ? (
+                          <span className="line-clamp-2 text-[11px] text-muted-foreground">
+                            {s.description}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))
+                  : null}
+              </div>
+            ) : null}
+          </>
         )}
       </div>
     </div>
@@ -193,8 +265,46 @@ function NodePicker({
 
 let specLookup: Map<string, NodeSpec> = new Map()
 
+/** Fetches the derived interface (ports + exposed params) for a flow.subflow
+ * node's referenced flow, refetching whenever flowId changes. */
+function useComponentInterface(flowId: number | undefined) {
+  const [iface, setIface] = useState<ComponentInterface | null>(null)
+  useEffect(() => {
+    if (!Number.isFinite(flowId)) {
+      setIface(null)
+      return
+    }
+    let cancelled = false
+    void getFlowInterface(flowId!)
+      .then((r) => {
+        if (!cancelled) setIface(r.interface)
+      })
+      .catch(() => {
+        if (!cancelled) setIface(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [flowId])
+  return iface
+}
+
 function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
-  const spec = specLookup.get(data.specType)
+  const flowId = data.specType === 'flow.subflow' ? Number(data.config.flowId) : undefined
+  const componentIface = useComponentInterface(flowId)
+  const spec =
+    specLookup.get(data.specType) ??
+    (data.specType === 'flow.subflow'
+      ? {
+          type: 'flow.subflow',
+          label: `Sub-flow ${data.config.flowId}`,
+          category: 'combine' as const,
+          description: '',
+          inputs: [],
+          outputs: [],
+          config: [],
+        }
+      : null)
   const report = data.report
   if (!spec) {
     return (
@@ -203,6 +313,8 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
       </div>
     )
   }
+  const inputs = componentIface?.inputs ?? spec.inputs
+  const outputs = componentIface?.outputs ?? spec.outputs
   const configLines = spec.config
     .map((f) => {
       const v = data.config[f.key] ?? f.default
@@ -227,9 +339,9 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
       }`}
     >
       <div className="relative flex items-center gap-2 border-b border-border px-3 py-2">
-        {spec.inputs.length === 1 ? (
+        {inputs.length === 1 ? (
           <Handle
-            id={spec.inputs[0].id}
+            id={inputs[0].id}
             type="target"
             position={Position.Left}
             className="!size-2.5 !border-border !bg-muted-foreground"
@@ -245,9 +357,9 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
           <AlertTriangle className="ml-auto size-3.5 shrink-0 text-destructive" />
         ) : null}
       </div>
-      {spec.inputs.length > 1 ? (
+      {inputs.length > 1 ? (
         <div className="border-b border-border py-1">
-          {spec.inputs.map((port) => (
+          {inputs.map((port) => (
             <div key={port.id} className="relative flex items-center gap-2 px-3 py-0.5">
               <Handle
                 id={port.id}
@@ -271,7 +383,7 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
         </div>
       ) : null}
       <div className="py-1">
-        {spec.outputs.map((port) => (
+        {outputs.map((port) => (
           <div key={port.id} className="relative flex items-center justify-end gap-2 px-3 py-0.5">
             {report ? (
               <span className="rounded bg-muted px-1 text-[10px] tabular-nums text-muted-foreground">
@@ -347,7 +459,10 @@ function FlowEditorInner() {
   const id = Number(flowId)
 
   const [specs, setSpecs] = useState<NodeSpec[]>([])
+  const [components, setComponents] = useState<NodeSpec[]>([])
   const [name, setName] = useState('')
+  const [component, setComponent] = useState<FlowComponentMeta | null>(null)
+  const [componentPanelOpen, setComponentPanelOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -370,11 +485,17 @@ function FlowEditorInner() {
     let cancelled = false
     void (async () => {
       try {
-        const [types, flow] = await Promise.all([getNodeTypes(), getFlow(id)])
+        const [types, flow, comps] = await Promise.all([
+          getNodeTypes(),
+          getFlow(id),
+          getFlowComponents(),
+        ])
         if (cancelled) return
         specLookup = new Map(types.nodeTypes.map((s) => [s.type, s]))
         setSpecs(types.nodeTypes)
+        setComponents(comps)
         setName(flow.flow.name)
+        setComponent(flow.flow.component)
         const rf = toRF(flow.flow.graph)
         setNodes(rf.nodes)
         setEdges(rf.edges)
@@ -391,8 +512,57 @@ function FlowEditorInner() {
 
   const selected = nodes.find((n) => n.selected)
   const selectedSpec = selected ? specLookup.get(selected.data.specType) : undefined
+  const selectedFlowId =
+    selected?.data.specType === 'flow.subflow' ? Number(selected.data.config.flowId) : undefined
+  const selectedComponentIface = useComponentInterface(selectedFlowId)
+
+  const innerReports = useMemo(() => {
+    if (!report || !selected || selected.data.specType !== 'flow.subflow') return []
+    const prefix = `${selected.id}/`
+    return Object.entries(report.nodes).filter(([k]) => k.startsWith(prefix))
+  }, [report, selected])
+
+  // Every non-boundary node on the canvas that has configurable fields, for
+  // the "expose parameters" checklist in the Component panel.
+  const exposableFields = useMemo(() => {
+    const out: { node: RFNode; spec: NodeSpec; field: ConfigField }[] = []
+    for (const n of nodes) {
+      const spec = specLookup.get(n.data.specType)
+      if (!spec || spec.type.startsWith('boundary.')) continue
+      for (const field of spec.config) out.push({ node: n, spec, field })
+    }
+    return out
+  }, [nodes])
 
   const markDirty = () => setDirty(true)
+
+  const togglePublish = (published: boolean) => {
+    setComponent((prev) => {
+      if (published) {
+        return prev
+          ? { ...prev, published: true }
+          : { published: true, label: name, description: '', category: 'source', exposedParams: [] }
+      }
+      return prev ? { ...prev, published: false } : null
+    })
+    markDirty()
+  }
+
+  const setComponentField = <K extends keyof FlowComponentMeta>(key: K, value: FlowComponentMeta[K]) => {
+    setComponent((prev) => (prev ? { ...prev, [key]: value } : prev))
+    markDirty()
+  }
+
+  const toggleExposedParam = (nodeId: string, configKey: string, checked: boolean) => {
+    setComponent((prev) => {
+      if (!prev) return prev
+      const exposedParams = checked
+        ? [...prev.exposedParams, { nodeId, configKey }]
+        : prev.exposedParams.filter((p) => !(p.nodeId === nodeId && p.configKey === configKey))
+      return { ...prev, exposedParams }
+    })
+    markDirty()
+  }
 
   const onConnect = useCallback(
     (conn: Connection) => {
@@ -404,18 +574,22 @@ function FlowEditorInner() {
 
   const addNode = (spec: NodeSpec, position?: { x: number; y: number }) => {
     const n = addAt.current++
+    const config =
+      spec.type === 'flow.subflow'
+        ? {
+            flowId: Number(spec.config.find((f) => f.key === 'flowId')?.default),
+            params: {},
+          }
+        : Object.fromEntries(
+            spec.config.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]),
+          )
     setNodes((ns) => [
       ...ns.map((node) => ({ ...node, selected: false })),
       {
         id: `n${Date.now().toString(36)}${n}`,
         type: 'flow' as const,
         position: position ?? { x: 80 + n * 24, y: 80 + n * 24 },
-        data: {
-          specType: spec.type,
-          config: Object.fromEntries(
-            spec.config.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]),
-          ),
-        },
+        data: { specType: spec.type, config },
         selected: true,
       },
     ])
@@ -465,14 +639,22 @@ function FlowEditorInner() {
     setMenu({ kind, x: event.clientX, y: event.clientY, targetId })
   }
 
+  // Plain config keys set `config[key]` directly. Keys of the form
+  // `params.<nodeId>.<configKey>` (used for flow.subflow exposed-param
+  // overrides) instead merge into a nested `config.params` object, keyed by
+  // `<nodeId>.<configKey>` — matching what the flow.subflow executor reads.
   const setConfigValue = (key: string, value: unknown) => {
     if (!selected) return
     setNodes((ns) =>
-      ns.map((n) =>
-        n.id === selected.id
-          ? { ...n, data: { ...n.data, config: { ...n.data.config, [key]: value } } }
-          : n,
-      ),
+      ns.map((n) => {
+        if (n.id !== selected.id) return n
+        if (key.startsWith('params.')) {
+          const nestedKey = key.slice('params.'.length)
+          const params = { ...(n.data.config.params as Record<string, unknown> | undefined), [nestedKey]: value }
+          return { ...n, data: { ...n.data, config: { ...n.data.config, params } } }
+        }
+        return { ...n, data: { ...n.data, config: { ...n.data.config, [key]: value } } }
+      }),
     )
     setDirty(true)
   }
@@ -481,7 +663,7 @@ function FlowEditorInner() {
     setSaving(true)
     setError('')
     try {
-      await saveFlow(id, { name, graph: fromRF(nodes, edges) })
+      await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
       setDirty(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed')
@@ -502,7 +684,7 @@ function FlowEditorInner() {
       ns.map((n) => ({ ...n, data: { ...n.data, report: undefined, running: false } })),
     )
     try {
-      if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges) })
+      if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
       setDirty(false)
       const report = await runFlowStream(id, dryRun, (ev) => {
         if (ev.type === 'start') {
@@ -567,6 +749,18 @@ function FlowEditorInner() {
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1"
+            onClick={() => setComponentPanelOpen((v) => !v)}
+          >
+            <Box className="size-4" />
+            <span className="hidden sm:inline">Component</span>
+            {component?.published ? (
+              <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden />
+            ) : null}
+          </Button>
           <div className="relative">
             <Button
               variant="outline"
@@ -586,7 +780,7 @@ function FlowEditorInner() {
                   onClick={() => setPaletteOpen(false)}
                 />
                 <div className="fixed inset-x-3 top-28 z-30 overflow-hidden rounded-md border border-border bg-popover shadow-md sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-1 sm:w-72">
-                  <NodePicker specs={specs} onSelect={addNode} />
+                  <NodePicker specs={specs} components={components} onSelect={addNode} />
                 </div>
               </>
             ) : null}
@@ -621,6 +815,109 @@ function FlowEditorInner() {
           </Button>
         </div>
       </header>
+
+      {componentPanelOpen ? (
+        <div className="space-y-3 border-b border-border bg-muted/30 px-4 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                type="checkbox"
+                className="size-4 rounded border-input"
+                checked={component?.published ?? false}
+                onChange={(e) => togglePublish(e.target.checked)}
+              />
+              Publish as component
+            </label>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2"
+              aria-label="Close component panel"
+              onClick={() => setComponentPanelOpen(false)}
+            >
+              <X className="size-3.5" />
+            </Button>
+          </div>
+
+          {component?.published ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <label className="text-xs font-medium" htmlFor="component-label">
+                  Label
+                </label>
+                <Input
+                  id="component-label"
+                  className="h-8"
+                  value={component.label}
+                  placeholder={name}
+                  onChange={(e) => setComponentField('label', e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium" htmlFor="component-category">
+                  Category
+                </label>
+                <select
+                  id="component-category"
+                  className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                  value={component.category}
+                  onChange={(e) =>
+                    setComponentField('category', e.target.value as FlowComponentMeta['category'])
+                  }
+                >
+                  {COMPONENT_CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {CATEGORY_LABEL[c]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1 sm:col-span-2">
+                <label className="text-xs font-medium" htmlFor="component-description">
+                  Description
+                </label>
+                <textarea
+                  id="component-description"
+                  className="min-h-16 w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={component.description}
+                  onChange={(e) => setComponentField('description', e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <p className="text-xs font-medium">Expose parameters</p>
+                {exposableFields.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No configurable nodes on the canvas.</p>
+                ) : (
+                  <div className="max-h-40 space-y-1 overflow-auto rounded-md border border-border p-2">
+                    {exposableFields.map(({ node, spec, field }) => {
+                      const checked = component.exposedParams.some(
+                        (p) => p.nodeId === node.id && p.configKey === field.key,
+                      )
+                      return (
+                        <label
+                          key={`${node.id}.${field.key}`}
+                          className="flex items-center gap-2 text-xs"
+                        >
+                          <input
+                            type="checkbox"
+                            className="size-3.5 rounded border-input"
+                            checked={checked}
+                            onChange={(e) => toggleExposedParam(node.id, field.key, e.target.checked)}
+                          />
+                          <span className={`size-1.5 shrink-0 rounded-full ${CATEGORY_DOT[spec.category]}`} />
+                          <span className="truncate">
+                            {spec.label} · {field.label}
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {error ? (
         <div className="border-b border-destructive/40 bg-destructive/10 px-4 py-1.5 text-xs text-destructive">
@@ -684,6 +981,7 @@ function FlowEditorInner() {
                   </p>
                   <NodePicker
                     specs={specs}
+                    components={components}
                     compact
                     onSelect={(s) => addNode(s, screenToFlowPosition({ x: menu.x, y: menu.y }))}
                   />
@@ -755,7 +1053,80 @@ function FlowEditorInner() {
             <div className="space-y-4 p-4">
               <p className="text-xs text-muted-foreground">{selectedSpec.description}</p>
 
-              {selectedSpec.config.length > 0 ? (
+              {selected.data.specType === 'flow.subflow' ? (
+                <div className="space-y-4">
+                  <Link
+                    to={`/manage/flows/${selected.data.config.flowId}`}
+                    className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+                  >
+                    <ExternalLink className="size-3.5" />
+                    Open component flow
+                  </Link>
+
+                  {selectedComponentIface && selectedComponentIface.exposedParams.length > 0 ? (
+                    <div className="space-y-3 border-t border-border pt-3">
+                      <p className="text-xs font-medium">Parameters</p>
+                      {selectedComponentIface.exposedParams.map((p) => {
+                        const nestedKey = `${p.nodeId}.${p.configKey}`
+                        const params = (selected.data.config.params ?? {}) as Record<string, unknown>
+                        const value = params[nestedKey] ?? p.default ?? ''
+                        const configKey = `params.${nestedKey}`
+                        return (
+                          <div key={nestedKey} className="space-y-1">
+                            <label className="text-xs font-medium" htmlFor={`param-${nestedKey}`}>
+                              {p.label ?? p.configKey}
+                            </label>
+                            {p.kind === 'select' ? (
+                              <select
+                                id={`param-${nestedKey}`}
+                                className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                                value={String(value)}
+                                onChange={(e) => setConfigValue(configKey, e.target.value)}
+                              >
+                                {(p.options ?? []).map((o) => (
+                                  <option key={o.value} value={o.value}>
+                                    {o.label}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : p.kind === 'boolean' ? (
+                              <select
+                                id={`param-${nestedKey}`}
+                                className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                                value={String(Boolean(value))}
+                                onChange={(e) => setConfigValue(configKey, e.target.value === 'true')}
+                              >
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                              </select>
+                            ) : (
+                              <Input
+                                id={`param-${nestedKey}`}
+                                className="h-8"
+                                type={
+                                  p.kind === 'number'
+                                    ? 'number'
+                                    : p.kind === 'password'
+                                      ? 'password'
+                                      : 'text'
+                                }
+                                autoComplete={p.kind === 'password' ? 'new-password' : undefined}
+                                value={String(value)}
+                                onChange={(e) =>
+                                  setConfigValue(
+                                    configKey,
+                                    p.kind === 'number' ? Number(e.target.value) : e.target.value,
+                                  )
+                                }
+                              />
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : selectedSpec.config.length > 0 ? (
                 <div className="space-y-3">
                   {selectedSpec.config.map((f) => {
                     const value = selected.data.config[f.key] ?? f.default ?? ''
@@ -844,6 +1215,38 @@ function FlowEditorInner() {
                       {note}
                     </p>
                   ))}
+                  {innerReports.length > 0 ? (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-muted-foreground">
+                        Inner steps ({innerReports.length})
+                      </summary>
+                      {innerReports.map(([k, r]) => (
+                        <div key={k} className="mt-2 border-t border-border pt-2">
+                          <p>
+                            {k.split('/').pop()} —{' '}
+                            <span
+                              className={
+                                r.status === 'ok'
+                                  ? 'text-emerald-400'
+                                  : r.status === 'error'
+                                    ? 'text-destructive'
+                                    : 'text-muted-foreground'
+                              }
+                            >
+                              {r.status}
+                            </span>{' '}
+                            · {r.durationMs}ms
+                          </p>
+                          {r.error ? <p className="text-destructive">{r.error}</p> : null}
+                          {r.notes.map((note) => (
+                            <p key={note} className="text-[11px] text-muted-foreground">
+                              {note}
+                            </p>
+                          ))}
+                        </div>
+                      ))}
+                    </details>
+                  ) : null}
                   {Object.entries(selected.data.report.samples).map(([port, items]) =>
                     items.length > 0 ? (
                       <details key={port} className="text-[11px]">

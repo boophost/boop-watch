@@ -3,7 +3,7 @@
 // as the manual /run route (one flow at a time). Safe as an in-process loop
 // because the app runs a single replica — see CLAUDE.md.
 
-import { FlowGraph } from './flowExecutor.js'
+import { FlowGraph, validateGraph } from './flowExecutor.js'
 import type { RunReport } from './flowExecutor.js'
 import {
   acquireFlowLock,
@@ -11,6 +11,7 @@ import {
   runFlowAndRecord,
   getLastRecordedRunId,
 } from './flowRoutes.js'
+import { buildSpecResolver } from './flowComponents.js'
 import {
   dueSchedules,
   getFlow,
@@ -123,7 +124,15 @@ async function fireScheduled(sched: FlowSchedule): Promise<void> {
   let runId: number | null = null
   try {
     const graph = JSON.parse(flow.graph) as FlowGraph
-    await runFlowAndRecord(graph, { dryRun: sched.dry_run, flowId: flow.id, flowName: flow.name })
+    const resolver = buildSpecResolver(flow.id, getFlow)
+    const invalid = validateGraph(graph, resolver)
+    if (invalid) throw new Error(invalid)
+    await runFlowAndRecord(graph, {
+      dryRun: sched.dry_run,
+      flowId: flow.id,
+      flowName: flow.name,
+      resolveSpec: resolver,
+    })
     runId = getLastRecordedRunId()
   } catch (e) {
     console.error(`scheduler: schedule #${sched.id} threw`, e)
@@ -144,10 +153,14 @@ export async function runScheduleNow(sched: FlowSchedule): Promise<RunReport> {
   const flow = getFlow(sched.flow_id)
   if (!flow) throw new Error('Flow not found for this schedule')
   const graph = JSON.parse(flow.graph) as FlowGraph
+  const resolver = buildSpecResolver(flow.id, getFlow)
+  const invalid = validateGraph(graph, resolver)
+  if (invalid) throw new Error(invalid)
   const report = await runFlowAndRecord(graph, {
     dryRun: sched.dry_run,
     flowId: flow.id,
     flowName: flow.name,
+    resolveSpec: resolver,
   })
   markScheduleFired(sched.id, {
     last_run: new Date().toISOString(),

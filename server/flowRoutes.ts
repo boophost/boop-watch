@@ -5,9 +5,19 @@
 import { Router } from 'express'
 import { NODE_SPECS } from './flowNodes.js'
 import { runFlow, validateGraph, FlowGraph } from './flowExecutor.js'
-import type { RunReport, RunHooks } from './flowExecutor.js'
+import type { RunReport, RunHooks, SpecResolver } from './flowExecutor.js'
 import { randomUUID } from 'node:crypto'
+import {
+  deriveInterface,
+  validatePublish,
+  componentToNodeSpec,
+  buildSpecResolver,
+  detectReferenceCycle,
+  findReferrers,
+  type FlowComponentMeta,
+} from './flowComponents.js'
 import * as flowsDb from './flowsDb.js'
+import { listPublishedComponents, parseComponent } from './flowsDb.js'
 import type { FlowRunRow, RunActivity, ScheduleKind, ScheduleSpec, WeekDay } from './flowsDb.js'
 import { computeNextRun, runScheduleNow } from './scheduler.js'
 import { emitActivity, subscribeActivity } from './runEvents.js'
@@ -51,7 +61,16 @@ export function getLastRecordedRunId(): number | null {
 // the Activity page can watch the run live. Logging never fails the run.
 export async function runFlowAndRecord(
   graph: FlowGraph,
-  opts: { dryRun: boolean; flowId: number | null; flowName: string },
+  opts: {
+    dryRun: boolean
+    flowId: number | null
+    flowName: string
+    /** Resolves flow.subflow ports against their referenced flow's published
+     * interface — pass buildSpecResolver(flowId, ...) so a graph containing
+     * sub-flow nodes with real (non-placeholder) ports doesn't fail the
+     * internal pre-flight validateGraph in runFlow. */
+    resolveSpec?: SpecResolver
+  },
   hooks?: RunHooks,
 ): Promise<RunReport> {
   const runToken = randomUUID()
@@ -88,7 +107,7 @@ export async function runFlowAndRecord(
   }
 
   try {
-    const report = await runFlow(graph, opts.dryRun, wrapped)
+    const report = await runFlow(graph, opts.dryRun, { hooks: wrapped, resolveSpec: opts.resolveSpec })
     lastRecordedRunId = null
     const activity = activityFromReport(graph, report)
     try {
@@ -124,14 +143,45 @@ export async function runFlowAndRecord(
   }
 }
 
-function parseGraph(raw: unknown): FlowGraph | { error: string } {
+// flowId is the id of the flow being saved, when known (undefined when
+// creating a graph with no id yet). It's threaded through to reject a
+// flow.subflow node that embeds its own parent flow (directly or, via
+// detectReferenceCycle, transitively) and to resolve flow.subflow ports
+// against other flows' published interfaces during validation.
+function parseGraph(raw: unknown, flowId?: number): FlowGraph | { error: string } {
   if (typeof raw !== 'object' || raw === null) return { error: 'graph must be an object' }
   const g = raw as Partial<FlowGraph>
   if (!Array.isArray(g.nodes) || !Array.isArray(g.edges))
     return { error: 'graph needs nodes[] and edges[]' }
   const graph: FlowGraph = { nodes: g.nodes, edges: g.edges }
-  const invalid = validateGraph(graph)
+
+  if (flowId !== undefined) {
+    const selfRef = graph.nodes.find(
+      (n) => n.type === 'flow.subflow' && Number(n.config.flowId) === flowId,
+    )
+    if (selfRef) return { error: `Node ${selfRef.id}: a flow cannot embed itself as a sub-flow` }
+  }
+
+  const resolver = buildSpecResolver(flowId ?? null, (id) => flowsDb.getFlow(id))
+  const invalid = validateGraph(graph, resolver)
   if (invalid) return { error: invalid }
+
+  if (flowId !== undefined) {
+    // The graph being saved isn't in the DB yet, so serve it directly for the
+    // root id — every other id (already-published flows) loads from the DB.
+    const cycle = detectReferenceCycle(flowId, (id) => {
+      if (id === flowId) return graph
+      const row = flowsDb.getFlow(id)
+      if (!row) return null
+      try {
+        return JSON.parse(row.graph) as FlowGraph
+      } catch {
+        return null
+      }
+    })
+    if (cycle) return { error: cycle }
+  }
+
   return graph
 }
 
@@ -189,6 +239,38 @@ flowRouter.post('/api/flows', (req, res) => {
   res.status(201).json({ flow: { ...row, graph: JSON.parse(row.graph) } })
 })
 
+flowRouter.get('/api/flows/components', (_req, res) => {
+  const specs = listPublishedComponents().flatMap(({ row, graph, meta }) => {
+    const iface = deriveInterface(row.id, graph, meta)
+    if ('error' in iface) return []
+    return [componentToNodeSpec(row.id, row.name, meta, iface)]
+  })
+  res.json({ components: specs })
+})
+
+flowRouter.get('/api/flows/:id/references', (req, res) => {
+  const id = Number(req.params.id)
+  const referrers = findReferrers(id, () => flowsDb.listFlowGraphs())
+  res.json({ references: referrers })
+})
+
+flowRouter.get('/api/flows/:id/interface', (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' })
+  const row = flowsDb.getFlow(id)
+  if (!row) return res.status(404).json({ error: 'not found' })
+  let graph: FlowGraph
+  try {
+    graph = JSON.parse(row.graph) as FlowGraph
+  } catch {
+    return res.status(500).json({ error: 'corrupt graph' })
+  }
+  const meta = parseComponent(row.component)
+  const iface = deriveInterface(id, graph, meta)
+  if ('error' in iface) return res.status(400).json({ error: iface.error })
+  res.json({ interface: iface, component: meta })
+})
+
 flowRouter.get('/api/flows/:id', (req, res) => {
   const id = Number(req.params.id)
   const row = Number.isFinite(id) ? flowsDb.getFlow(id) : undefined
@@ -196,7 +278,7 @@ flowRouter.get('/api/flows/:id', (req, res) => {
     res.status(404).json({ error: 'Flow not found' })
     return
   }
-  res.json({ flow: { ...row, graph: JSON.parse(row.graph) } })
+  res.json({ flow: { ...row, graph: JSON.parse(row.graph), component: parseComponent(row.component) } })
 })
 
 flowRouter.put('/api/flows/:id', (req, res) => {
@@ -205,7 +287,12 @@ flowRouter.put('/api/flows/:id', (req, res) => {
     res.status(400).json({ error: 'Invalid id' })
     return
   }
-  const body = req.body as { name?: unknown; description?: unknown; graph?: unknown }
+  const body = req.body as {
+    name?: unknown
+    description?: unknown
+    graph?: unknown
+    component?: unknown
+  }
   const patch: Parameters<typeof flowsDb.updateFlow>[1] = {}
   if (body.name !== undefined) {
     if (typeof body.name !== 'string' || !body.name.trim()) {
@@ -218,24 +305,59 @@ flowRouter.put('/api/flows/:id', (req, res) => {
     patch.description = typeof body.description === 'string' ? body.description : null
   }
   if (body.graph !== undefined) {
-    const parsed = parseGraph(body.graph)
+    const parsed = parseGraph(body.graph, id)
     if ('error' in parsed) {
       res.status(400).json({ error: parsed.error })
       return
     }
     patch.graph = parsed
   }
+  if (body.component !== undefined) {
+    patch.component = body.component as FlowComponentMeta | null
+  }
+  if (body.component !== undefined) {
+    const component = body.component as FlowComponentMeta | null
+    const existing = flowsDb.getFlow(id)
+    if (!existing) {
+      res.status(404).json({ error: 'Flow not found' })
+      return
+    }
+    const prevMeta = parseComponent(existing.component)
+    if (component?.published === true) {
+      const graph = patch.graph ?? (JSON.parse(existing.graph) as FlowGraph)
+      const publishErr = validatePublish(graph)
+      if (publishErr) {
+        res.status(400).json({ error: publishErr })
+        return
+      }
+    } else if (prevMeta?.published) {
+      const refs = findReferrers(id, () => flowsDb.listFlowGraphs())
+      if (refs.length > 0) {
+        res.status(409).json({ error: 'flow is referenced by other flows', references: refs })
+        return
+      }
+    }
+  }
   const row = flowsDb.updateFlow(id, patch)
   if (!row) {
     res.status(404).json({ error: 'Flow not found' })
     return
   }
-  res.json({ flow: { ...row, graph: JSON.parse(row.graph) } })
+  res.json({ flow: { ...row, graph: JSON.parse(row.graph), component: parseComponent(row.component) } })
 })
 
 flowRouter.delete('/api/flows/:id', (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isFinite(id) || !flowsDb.deleteFlow(id)) {
+  if (!Number.isFinite(id)) {
+    res.status(404).json({ error: 'Flow not found' })
+    return
+  }
+  const refs = findReferrers(id, () => flowsDb.listFlowGraphs())
+  if (refs.length > 0) {
+    res.status(409).json({ error: 'flow is referenced by other flows', references: refs })
+    return
+  }
+  if (!flowsDb.deleteFlow(id)) {
     res.status(404).json({ error: 'Flow not found' })
     return
   }
@@ -269,7 +391,18 @@ flowRouter.post('/api/flows/:id/run', async (req, res) => {
   const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
   try {
     const graph = JSON.parse(row.graph) as FlowGraph
-    const report = await runFlowAndRecord(graph, { dryRun, flowId: row.id, flowName: row.name })
+    const resolver = buildSpecResolver(row.id, (fid) => flowsDb.getFlow(fid))
+    const invalid = validateGraph(graph, resolver)
+    if (invalid) {
+      res.status(400).json({ error: invalid })
+      return
+    }
+    const report = await runFlowAndRecord(graph, {
+      dryRun,
+      flowId: row.id,
+      flowName: row.name,
+      resolveSpec: resolver,
+    })
     res.json({ report })
   } catch (e) {
     console.error(e)
@@ -304,9 +437,15 @@ flowRouter.post('/api/flows/:id/run/stream', async (req, res) => {
   const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
   try {
     const graph = JSON.parse(row.graph) as FlowGraph
+    const resolver = buildSpecResolver(row.id, (fid) => flowsDb.getFlow(fid))
+    const invalid = validateGraph(graph, resolver)
+    if (invalid) {
+      send({ type: 'error', error: invalid })
+      return
+    }
     const report = await runFlowAndRecord(
       graph,
-      { dryRun, flowId: row.id, flowName: row.name },
+      { dryRun, flowId: row.id, flowName: row.name, resolveSpec: resolver },
       {
         onNodeStart: (nodeId) => send({ type: 'start', id: nodeId }),
         onNodeDone: (nodeId, nodeReport) => send({ type: 'node', id: nodeId, report: nodeReport }),
