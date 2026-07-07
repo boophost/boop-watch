@@ -10,6 +10,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { extractSection, findUncheckedInLines, splitIncludedByPr } from './lib/promotion-checklist.mjs'
 
 function sh(cmd, args = []) {
   return execFileSync(cmd, args, { encoding: 'utf8' })
@@ -19,30 +20,7 @@ function shJson(cmd, args = []) {
   return JSON.parse(sh(cmd, args))
 }
 
-const CHECKBOX_RE = /^-\s*\[([ xX])\]\s*(.+)$/
 const POST_MERGE_RE = /^post-merge:/i
-const HEADING_BOUNDARY_RE = /^##\s/
-const INCLUDED_PR_HEADING_RE = /^###\s+\[#(\d+)\]\([^)]*\)\s*(.+)$/
-
-function extractSection(body, heading) {
-  const lines = body.split(/\r?\n/)
-  const startIdx = lines.findIndex((l) => l.trim() === heading)
-  if (startIdx === -1) return null
-  const rest = lines.slice(startIdx + 1)
-  const endIdx = rest.findIndex((l) => HEADING_BOUNDARY_RE.test(l))
-  return endIdx === -1 ? rest : rest.slice(0, endIdx)
-}
-
-function findUncheckedInLines(lines) {
-  const unchecked = []
-  for (const line of lines) {
-    const m = line.match(CHECKBOX_RE)
-    if (!m) continue
-    const [, mark, text] = m
-    if (mark.trim() === '') unchecked.push(text.trim())
-  }
-  return unchecked
-}
 
 function checkProductionChecklist(body) {
   const lines = extractSection(body, '## Production promotion checklist')
@@ -55,27 +33,10 @@ function checkIncludedChanges(body) {
   if (!lines) return []
 
   const issues = []
-  let currentPr = null
-  let currentLines = []
-
-  const flush = () => {
-    if (!currentPr) return
-    const unchecked = findUncheckedInLines(currentLines)
-    if (unchecked.length > 0) issues.push({ pr: currentPr, unchecked })
+  for (const [prNumber, { title, lines: prLines }] of splitIncludedByPr(lines)) {
+    const unchecked = findUncheckedInLines(prLines)
+    if (unchecked.length > 0) issues.push({ prNumber, title, unchecked })
   }
-
-  for (const line of lines) {
-    const headingMatch = line.match(INCLUDED_PR_HEADING_RE)
-    if (headingMatch) {
-      flush()
-      currentPr = `#${headingMatch[1]} ${headingMatch[2]}`.trim()
-      currentLines = []
-      continue
-    }
-    currentLines.push(line)
-  }
-  flush()
-
   return issues
 }
 
@@ -107,8 +68,8 @@ function main() {
 
   if (includedIssues.length > 0) {
     console.error('Included changes with unfinished staging test plans:')
-    for (const { pr: prLabel, unchecked } of includedIssues) {
-      console.error(`  ${prLabel}:`)
+    for (const { prNumber: num, title, unchecked } of includedIssues) {
+      console.error(`  #${num} ${title}:`)
       for (const item of unchecked) console.error(`    - [ ] ${item}`)
     }
   }
