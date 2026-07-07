@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
-  { to: '/manage', label: 'Library', icon: Library, end: true },
+  { to: '/manage', label: 'Catalog', icon: Library, end: true },
   { to: '/manage/flows', label: 'Flows', icon: Workflow, end: false },
   { to: '/manage/schedules', label: 'Schedules', icon: CalendarClock, end: false },
   { to: '/manage/activity', label: 'Activity', icon: Activity, end: false },
