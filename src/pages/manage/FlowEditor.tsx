@@ -139,6 +139,10 @@ const portColor = (t: PortDataType | undefined) => PORT_COLOR[t ?? 'items']
 const portTitle = (p: NodePort, eff?: PortDataType) =>
   `${p.label} (${eff ?? p.dataType ?? 'items'})`
 
+/** Activation color: trigger outputs, `when` gate inputs, and the wires between
+ * them read lime (matching the trigger category), so the fire path stands out. */
+const TRIGGER_LIME = '#a3e635' // lime-400
+
 /** Effective (propagated) port types keyed `${nodeId}:in|out:${portId}`, so a
  * generic node's sockets/wires show the record subtype flowing through it. */
 const PropagatedTypesContext = createContext<Map<string, PortDataType>>(new Map())
@@ -404,8 +408,14 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
     )
   }
   const resolvedPorts = resolveNodePorts(spec, data.config)
-  const inputs = componentIface?.inputs ?? resolvedPorts.inputs
+  const allInputs = componentIface?.inputs ?? resolvedPorts.inputs
   const outputs = componentIface?.outputs ?? resolvedPorts.outputs
+  // The `when` gate input is a trigger/activation socket — render it in the
+  // header next to the title (an "action" affordance), not as a data-input row.
+  const whenPort = allInputs.find((p) => p.id === 'when')
+  const inputs = allInputs.filter((p) => p.id !== 'when')
+  // Trigger nodes emit an activation signal — their outputs read lime.
+  const isTrigger = (componentInfo?.component?.category ?? spec.category) === 'trigger'
   // Effective (propagated) type per port — a generic 'items' port shows the
   // record subtype flowing through it; falls back to the declared type.
   const effIn = (p: NodePort): PortDataType => propTypes.get(`${id}:in:${p.id}`) ?? p.dataType ?? 'items'
@@ -443,6 +453,15 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
         className="relative flex items-center gap-2 border-b border-border px-3 py-2"
         title={spec.description || undefined}
       >
+        {whenPort ? (
+          <Handle
+            id={whenPort.id}
+            type="target"
+            position={Position.Left}
+            className="!size-2.5 !border-border !bg-lime-400"
+            title={`${whenPort.label} — runs only when a trigger fires it`}
+          />
+        ) : null}
         <span
           className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[componentInfo?.component?.category ?? spec.category]}`}
         />
@@ -509,7 +528,10 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
                 {report.counts[port.id] ?? 0}
               </span>
             ) : null}
-            <span className="text-[10px] text-muted-foreground" style={typedStyle(effOut(port))}>
+            <span
+              className="text-[10px] text-muted-foreground"
+              style={isTrigger ? { color: TRIGGER_LIME } : typedStyle(effOut(port))}
+            >
               {port.label}
             </span>
             <Handle
@@ -517,7 +539,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
               type="source"
               position={Position.Right}
               className="!size-2.5 !border-border"
-              style={{ top: '50%', background: portColor(effOut(port)) }}
+              style={{ top: '50%', background: isTrigger ? TRIGGER_LIME : portColor(effOut(port)) }}
               title={portTitle(port, effOut(port))}
             />
           </div>
@@ -936,13 +958,20 @@ function FlowEditorInner() {
   const styledEdges = useMemo(
     () =>
       edges.map((e) => {
+        // The activation path — a wire into a `when` gate, or any wire out of a
+        // trigger node — reads lime, matching the sockets it connects.
+        const sourceCat = specLookup.get(
+          nodes.find((n) => n.id === e.source)?.data.specType ?? '',
+        )?.category
+        if (e.targetHandle === 'when' || sourceCat === 'trigger')
+          return { ...e, style: { ...e.style, stroke: TRIGGER_LIME, strokeWidth: 1.5 } }
         const dataType =
           propagatedTypes.get(`${e.source}:out:${e.sourceHandle}`) ??
           findPort(e.source, e.sourceHandle, 'out')?.dataType
         if (!dataType || dataType === 'items') return e
         return { ...e, style: { ...e.style, stroke: portColor(dataType), strokeWidth: 1.5 } }
       }),
-    [edges, findPort, propagatedTypes],
+    [edges, findPort, propagatedTypes, nodes],
   )
 
   const addEditorNode = (
