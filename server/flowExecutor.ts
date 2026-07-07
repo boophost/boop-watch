@@ -283,6 +283,27 @@ export async function runFlow(
     }
     finalInputs.set(node.id, inputs)
 
+    // Trigger gate: a node whose `when` port is wired but received nothing did
+    // not fire this run — skip it (emit empty), so a trigger can drive an
+    // otherwise self-starting source. Unwired `when` (or wired-with-items) runs
+    // normally, so existing flows are unaffected.
+    const whenWired = incoming.some((e) => e.targetHandle === 'when')
+    if (whenWired && (inputs.when?.length ?? 0) === 0) {
+      const outPorts = impl.resolvePorts?.(node.config ?? {}).outputs ?? impl.spec.outputs
+      const emptyOutputs: Record<string, FlowItem[]> = {}
+      for (const p of outPorts) emptyOutputs[p.id] = []
+      buffers.set(node.id, emptyOutputs)
+      reports[reportKey] = {
+        status: 'ok',
+        durationMs: 0,
+        counts: Object.fromEntries(outPorts.map((p) => [p.id, 0])),
+        samples: {},
+        notes: ['gated: not triggered'],
+      }
+      hooks?.onNodeDone?.(reportKey, reports[reportKey])
+      continue
+    }
+
     const ctx: RunContext = {
       dryRun,
       notes: [],
