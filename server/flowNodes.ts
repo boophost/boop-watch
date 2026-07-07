@@ -107,11 +107,25 @@ export interface RunContext {
 
 export interface NodeImpl {
   spec: NodeSpec
+  /** Ports that depend on the node's config — boundary nodes take their
+   * dataType from config, transform.pick types its output. Omitted = the
+   * static spec ports. Mirror any change in resolveNodePorts (src/lib/flows.ts). */
+  resolvePorts?(config: Record<string, unknown>): { inputs: NodePort[]; outputs: NodePort[] }
   run(
     inputs: Record<string, FlowItem[]>,
     config: Record<string, unknown>,
     ctx: RunContext,
   ): Promise<Record<string, FlowItem[]>>
+}
+
+/** Config select options for ports that can carry any data type. */
+const DATA_TYPE_OPTIONS = (['items', 'text', 'number', 'color', 'url', 'json', 'embed'] as const).map(
+  (t) => ({ value: t, label: t }),
+)
+
+const configDataType = (config: Record<string, unknown>): PortDataType | undefined => {
+  const v = String(config.dataType ?? '')
+  return (DATA_TYPE_OPTIONS.some((o) => o.value === v) ? v : undefined) as PortDataType | undefined
 }
 
 const str = (config: Record<string, unknown>, key: string, fallback: string): string => {
@@ -1005,21 +1019,16 @@ const collect: NodeImpl = {
   },
 }
 
-// Discord embed hard limits — values are truncated and field lists capped so a
-// long overview can't 400 the whole webhook.
-const EMBED_LIMITS = {
-  title: 256,
-  description: 4096,
-  footer: 2048,
-  author: 256,
-  fieldName: 256,
-  fieldValue: 1024,
-  fields: 25,
-  total: 6000,
-}
+// ---------------------------------------------------------------------------
+// Generic typed-socket primitives. These (not domain nodes) are what Discord
+// components are built from: set-field wires any value socket into an item
+// field, convert covers the mechanical transforms (hex color -> Discord's
+// decimal int, truncation, timestamps), and pick lifts a field back out onto
+// a typed value port so components can expose typed outputs.
+// ---------------------------------------------------------------------------
 
 const truncate = (s: string, max: number): string =>
-  s.length <= max ? s : s.slice(0, max - 1) + '…'
+  s.length <= max ? s : s.slice(0, max - 1) + '\u2026'
 
 /** Discord wants colors as a decimal int; accept "#7c5cff", "7c5cff", or a number. */
 function parseEmbedColor(s: string): number | undefined {
@@ -1038,223 +1047,163 @@ const asHttpUrl = (s: string): string => {
   }
 }
 
-const discordEmbed: NodeImpl = {
+const setField: NodeImpl = {
   spec: {
-    type: 'transform.discord-embed',
-    label: 'Discord embed',
-    category: 'enrich',
+    type: 'combine.set-field',
+    label: 'Set field from value',
+    category: 'combine',
     description:
-      'Builds a Discord-format embed object per item. Each part is a {field} template in config, or wired into its typed socket (a wired value overrides config; one value applies to every item). Empty values are omitted and Discord’s size limits are enforced. Feed "embeds" into a Discord message node.',
+      'Writes a wired value into a field on each item \u2014 the bridge from typed sockets to item fields. One value broadcasts to every item; N values zip by index. Nothing wired = items pass through untouched (so config templates upstream act as the fallback).',
     inputs: [
       { id: 'in', label: 'in' },
-      { id: 'title', label: 'title', dataType: 'text' },
-      { id: 'description', label: 'description', dataType: 'text' },
-      { id: 'url', label: 'link', dataType: 'url' },
-      { id: 'color', label: 'color', dataType: 'color' },
-      { id: 'imageUrl', label: 'image', dataType: 'url' },
-      { id: 'thumbnailUrl', label: 'thumbnail', dataType: 'url' },
-      { id: 'footerText', label: 'footer', dataType: 'text' },
+      { id: 'value', label: 'value', dataType: 'json' },
     ],
-    outputs: [
-      { id: 'items', label: 'items' },
-      { id: 'embeds', label: 'embeds', dataType: 'embed' },
-    ],
+    outputs: [{ id: 'items', label: 'items' }],
     config: [
-      { key: 'field', label: 'Store in field', kind: 'text', default: 'embed' },
-      { key: 'title', label: 'Title', kind: 'text', default: '{title}' },
-      { key: 'description', label: 'Description', kind: 'text', default: '' },
-      { key: 'url', label: 'Title link URL', kind: 'text', default: '' },
+      { key: 'field', label: 'Set field', kind: 'text', default: 'value' },
       {
-        key: 'color',
-        label: 'Color',
-        kind: 'text',
-        default: '',
-        help: 'Hex like #7c5cff (or a {field}); left bar of the embed.',
-      },
-      { key: 'imageUrl', label: 'Image URL', kind: 'text', default: '', help: 'Large image below the text.' },
-      { key: 'thumbnailUrl', label: 'Thumbnail URL', kind: 'text', default: '', help: 'Small image top-right.' },
-      { key: 'authorName', label: 'Author name', kind: 'text', default: '' },
-      { key: 'authorUrl', label: 'Author link URL', kind: 'text', default: '' },
-      { key: 'authorIconUrl', label: 'Author icon URL', kind: 'text', default: '' },
-      { key: 'footerText', label: 'Footer text', kind: 'text', default: '' },
-      { key: 'footerIconUrl', label: 'Footer icon URL', kind: 'text', default: '' },
-      {
-        key: 'timestamp',
-        label: 'Timestamp',
-        kind: 'text',
-        default: '',
-        help: '"now", a {field} holding a date, or empty for none.',
-      },
-      {
-        key: 'embedFields',
-        label: 'Fields (JSON)',
-        kind: 'json',
-        default: '',
-        help: 'JSON array of {"name", "value", "inline"} rows; name/value are templates. Rows whose name or value fills empty are dropped. Max 25.',
+        key: 'skipEmpty',
+        label: 'Ignore empty values',
+        kind: 'boolean',
+        default: true,
+        help: 'Leave the item untouched when the wired value is null or "" (keeps the field\u2019s existing fallback).',
       },
     ],
   },
   async run(inputs, config, ctx) {
-    const outField = str(config, 'field', 'embed')
-    const fieldsRaw = str(config, 'embedFields', '')
-    let fieldRows: unknown[] = []
-    if (fieldsRaw) {
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(fieldsRaw)
-      } catch {
-        throw new Error('Fields must be a JSON array, e.g. [{"name": "Episode", "value": "{episode}"}]')
-      }
-      if (!Array.isArray(parsed)) throw new Error('Fields must be a JSON array of {name, value} rows')
-      fieldRows = parsed
-    }
-
-    // Typed value sockets — a wired value beats the config template.
-    const SOCKETS = ['title', 'description', 'url', 'color', 'imageUrl', 'thumbnailUrl', 'footerText'] as const
-    const wired = Object.fromEntries(SOCKETS.map((id) => [id, socketValues(inputs[id])]))
-
-    let empty = 0
-    const embeds: FlowItem[] = []
+    const field = str(config, 'field', 'value')
+    const skipEmpty = bool(config, 'skipEmpty', true)
+    const vals = socketValues(inputs.value)
     const items = (inputs.in ?? []).map((item, idx) => {
-      const fill = (key: string): string => {
-        const socket = pickValue(wired[key] ?? [], idx)
-        if (socket !== undefined && socket !== null && socket !== '') return String(socket).trim()
-        return fillTemplate(str(config, key, ''), item, 'none').trim()
-      }
-
-      const embed: Record<string, unknown> = {}
-      const title = truncate(fill('title'), EMBED_LIMITS.title)
-      if (title) embed.title = title
-      let description = truncate(fill('description'), EMBED_LIMITS.description)
-      if (description) embed.description = description
-      const url = asHttpUrl(fill('url'))
-      if (url && title) embed.url = url // Discord ignores a url without a title
-      const color = fill('color')
-      if (color) {
-        const parsed = parseEmbedColor(color)
-        if (parsed !== undefined) embed.color = parsed
-      }
-      const imageUrl = asHttpUrl(fill('imageUrl'))
-      if (imageUrl) embed.image = { url: imageUrl }
-      const thumbnailUrl = asHttpUrl(fill('thumbnailUrl'))
-      if (thumbnailUrl) embed.thumbnail = { url: thumbnailUrl }
-      const authorName = truncate(fill('authorName'), EMBED_LIMITS.author)
-      if (authorName) {
-        embed.author = pruneEmpty({
-          name: authorName,
-          url: asHttpUrl(fill('authorUrl')),
-          icon_url: asHttpUrl(fill('authorIconUrl')),
-        })
-      }
-      const footerText = truncate(fill('footerText'), EMBED_LIMITS.footer)
-      if (footerText) {
-        embed.footer = pruneEmpty({ text: footerText, icon_url: asHttpUrl(fill('footerIconUrl')) })
-      }
-      const tsRaw = fill('timestamp')
-      if (tsRaw) {
-        const date = tsRaw.toLowerCase() === 'now' ? new Date() : new Date(tsRaw)
-        if (!Number.isNaN(date.getTime())) embed.timestamp = date.toISOString()
-      }
-      const rows = fieldRows
-        .map((row) => fillJsonTemplate(row, item))
-        .filter((row): row is Record<string, unknown> => !!row && typeof row === 'object' && !Array.isArray(row))
-        .map((row) => ({
-          name: truncate(String(row.name ?? '').trim(), EMBED_LIMITS.fieldName),
-          value: truncate(String(row.value ?? '').trim(), EMBED_LIMITS.fieldValue),
-          inline: row.inline === true || row.inline === 'true',
-        }))
-        .filter((row) => row.name && row.value)
-        .slice(0, EMBED_LIMITS.fields)
-      if (rows.length > 0) embed.fields = rows
-
-      // Discord also caps the *combined* text of an embed; shrink the
-      // description first since it's the usual offender.
-      const textSize = () =>
-        [title, description, footerText, authorName].join('').length +
-        rows.reduce((n, row) => n + row.name.length + row.value.length, 0)
-      if (embed.description && textSize() > EMBED_LIMITS.total) {
-        const excess = textSize() - EMBED_LIMITS.total
-        description = truncate(description, Math.max(0, description.length - excess - 1))
-        if (description) embed.description = description
-        else delete embed.description
-      }
-
-      if (Object.keys(embed).length === 0) {
-        empty++
-        return item
-      }
-      embeds.push(embed)
-      return { ...item, [outField]: embed }
+      const v = pickValue(vals, idx)
+      if (v === undefined || (skipEmpty && (v === null || v === ''))) return item
+      return { ...item, [field]: v }
     })
-    if (empty > 0) ctx.notes.push(`${empty} item(s) produced an empty embed — field not set`)
-    return { items, embeds: asValueItems(embeds) }
+    if (vals.length === 0) ctx.notes.push('no value wired \u2014 items passed through')
+    return { items }
   },
 }
 
-const discordMessage: NodeImpl = {
+const convert: NodeImpl = {
   spec: {
-    type: 'combine.discord-message',
-    label: 'Discord message',
-    category: 'combine',
+    type: 'transform.convert',
+    label: 'Convert field',
+    category: 'enrich',
     description:
-      'Assembles Discord webhook payloads from typed sockets: embeds in batches (up to 10 per message), with message text, bot name, and avatar wired in or set in config. Emits one item per message carrying the payload — send with "Send web request" (body: "{payload}").',
-    inputs: [
-      { id: 'embeds', label: 'embeds', dataType: 'embed' },
-      { id: 'content', label: 'content', dataType: 'text' },
-      { id: 'username', label: 'bot name', dataType: 'text' },
-      { id: 'avatar_url', label: 'avatar', dataType: 'url' },
-    ],
-    outputs: [{ id: 'messages', label: 'messages' }],
+      'Mechanical field conversions: hex color \u2192 decimal int (Discord\u2019s format), truncate to a length, date \u2192 ISO timestamp, "now" \u2192 ISO timestamp, string \u2192 number. Missing/empty fields are left untouched.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
     config: [
-      { key: 'field', label: 'Store in field', kind: 'text', default: 'payload' },
+      { key: 'field', label: 'Field', kind: 'text', default: '' },
       {
-        key: 'content',
-        label: 'Message text',
+        key: 'op',
+        label: 'Conversion',
+        kind: 'select',
+        default: 'hex-color-int',
+        options: [
+          { value: 'hex-color-int', label: 'Hex color \u2192 int' },
+          { value: 'truncate', label: 'Truncate text' },
+          { value: 'to-iso-date', label: 'Date \u2192 ISO timestamp' },
+          { value: 'now', label: 'Set to now (ISO timestamp)' },
+          { value: 'to-number', label: 'Text \u2192 number' },
+        ],
+      },
+      {
+        key: 'length',
+        label: 'Max length',
+        kind: 'number',
+        default: 0,
+        help: 'For Truncate: keep this many characters (adds \u2026). 0 = no-op.',
+      },
+      {
+        key: 'outField',
+        label: 'Store in field',
         kind: 'text',
         default: '',
-        help: 'Plain text above the embeds (used when the content socket is not wired). Max 2000 chars.',
-      },
-      { key: 'username', label: 'Bot name', kind: 'text', default: '', help: 'Overrides the webhook’s default name.' },
-      { key: 'avatarUrl', label: 'Bot avatar URL', kind: 'text', default: '' },
-      {
-        key: 'maxEmbeds',
-        label: 'Embeds per message',
-        kind: 'number',
-        default: 10,
-        help: 'Discord’s cap is 10; more embeds become additional messages.',
+        help: 'Empty = overwrite the source field.',
       },
     ],
   },
   async run(inputs, config, ctx) {
-    const field = str(config, 'field', 'payload')
-    const maxEmbeds = Math.min(10, Math.max(1, Math.floor(num(config, 'maxEmbeds', 10))))
+    const field = str(config, 'field', '')
+    const op = str(config, 'op', 'hex-color-int')
+    const length = Math.max(0, Math.floor(num(config, 'length', 0)))
+    const outField = str(config, 'outField', '') || field
+    if (!field && op !== 'now') throw new Error('Field is required')
+    if (op === 'now' && !outField) throw new Error('Store in field is required for "now"')
 
-    const socketFirst = (id: string, fallback: string): string => {
-      const v = socketValues(inputs[id])[0]
-      return v !== undefined && v !== null && v !== '' ? String(v) : fallback
-    }
-    const content = truncate(socketFirst('content', str(config, 'content', '')), 2000)
-    const username = socketFirst('username', str(config, 'username', ''))
-    const avatarUrl = asHttpUrl(socketFirst('avatar_url', str(config, 'avatarUrl', '')))
+    let failed = 0
+    const items = allInputs(inputs).map((item) => {
+      if (op === 'now') return { ...item, [outField]: new Date().toISOString() }
+      const raw = item[field]
+      if (raw == null || raw === '') return item
+      switch (op) {
+        case 'hex-color-int': {
+          const parsed = parseEmbedColor(String(raw))
+          if (parsed === undefined) {
+            failed++
+            return item
+          }
+          return { ...item, [outField]: parsed }
+        }
+        case 'truncate':
+          return length > 0 ? { ...item, [outField]: truncate(String(raw), length) } : item
+        case 'to-iso-date': {
+          const d = new Date(String(raw))
+          if (Number.isNaN(d.getTime())) {
+            failed++
+            return item
+          }
+          return { ...item, [outField]: d.toISOString() }
+        }
+        case 'to-number': {
+          const n = Number(raw)
+          if (!Number.isFinite(n)) {
+            failed++
+            return item
+          }
+          return { ...item, [outField]: n }
+        }
+        default:
+          throw new Error(`Unknown conversion: ${op}`)
+      }
+    })
+    if (failed > 0) ctx.notes.push(`${failed} item(s) had an unconvertible value \u2014 left untouched`)
+    return { items }
+  },
+}
 
-    const embeds = socketValues(inputs.embeds).filter(
-      (e): e is Record<string, unknown> => !!e && typeof e === 'object' && !Array.isArray(e),
-    )
-    if (embeds.length === 0 && !content) {
-      ctx.notes.push('nothing to send — no embeds wired and no message text')
-      return { messages: [] }
-    }
-
-    const messages: FlowItem[] = []
-    const chunks: Record<string, unknown>[][] = []
-    if (embeds.length === 0) chunks.push([])
-    for (let i = 0; i < embeds.length; i += maxEmbeds) chunks.push(embeds.slice(i, i + maxEmbeds))
-    for (const chunk of chunks) {
-      const payload = pruneEmpty({ content, username, avatar_url: avatarUrl, embeds: chunk })
-      messages.push({ [field]: payload, embed_count: chunk.length })
-    }
-    ctx.notes.push(`${messages.length} message(s) from ${embeds.length} embed(s)`)
-    return { messages }
+const pick: NodeImpl = {
+  spec: {
+    type: 'transform.pick',
+    label: 'Pick field as value',
+    category: 'enrich',
+    description:
+      'Lifts a field off each item onto a typed value port (the inverse of "Set field from value"). Use it in front of a typed boundary output so a component can emit e.g. embeds. Items without the field are skipped.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'value', label: 'value', dataType: 'json' }],
+    config: [
+      { key: 'field', label: 'Field', kind: 'text', default: 'value', help: 'Dot paths reach nested values.' },
+      {
+        key: 'dataType',
+        label: 'Value type',
+        kind: 'select',
+        default: 'json',
+        options: DATA_TYPE_OPTIONS.filter((o) => o.value !== 'items'),
+      },
+    ],
+  },
+  resolvePorts: (config) => ({
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'value', label: 'value', dataType: configDataType(config) ?? 'json' }],
+  }),
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'value')
+    const vals = allInputs(inputs)
+      .map((item) => fieldValue(item, field))
+      .filter((v) => v !== undefined && v !== null)
+    ctx.notes.push(`${vals.length} value(s) picked from "${field}"`)
+    return { value: asValueItems(vals) }
   },
 }
 
@@ -3735,8 +3684,9 @@ const IMPLS: NodeImpl[] = [
   jikanEnrich,
   template,
   setJson,
-  discordEmbed,
-  discordMessage,
+  setField,
+  convert,
+  pick,
   collect,
   textValue,
   numberValue,
@@ -3767,14 +3717,26 @@ const IMPLS: NodeImpl[] = [
         { key: 'portId', label: 'Port id', kind: 'text', default: 'in' },
         { key: 'label', label: 'Label', kind: 'text', default: 'Input' },
         {
+          key: 'dataType',
+          label: 'Type',
+          kind: 'select',
+          options: DATA_TYPE_OPTIONS,
+          default: 'items',
+          help: 'What this port carries. Value types (text, color, …) make the component input a typed socket.',
+        },
+        {
           key: 'testItems',
           label: 'Test items',
           kind: 'json',
           default: '',
-          help: 'JSON array of items this input emits when the flow runs on its own (Dry run and Apply). Ignored when the flow runs as a component inside another flow — the parent’s items are used instead.',
+          help: 'JSON array of items this input emits when the flow runs on its own (Dry run and Apply). For a value-typed port use {"value": …} wrappers, e.g. [{"value": "#7c5cff"}]. Ignored when the flow runs as a component inside another flow — the parent’s items are used instead.',
         },
       ],
     },
+    resolvePorts: (config) => ({
+      inputs: [],
+      outputs: [{ id: 'items', label: 'items', dataType: configDataType(config) }],
+    }),
     // Only reached on standalone runs — when the flow is embedded as a
     // component, the executor injects the parent's per-port items and skips
     // run() entirely (see injectOutput in flowExecutor).
@@ -3806,8 +3768,20 @@ const IMPLS: NodeImpl[] = [
       config: [
         { key: 'portId', label: 'Port id', kind: 'text', default: 'out' },
         { key: 'label', label: 'Label', kind: 'text', default: 'Output' },
+        {
+          key: 'dataType',
+          label: 'Type',
+          kind: 'select',
+          options: DATA_TYPE_OPTIONS,
+          default: 'items',
+          help: 'What this port carries — a value type makes the component output a typed socket.',
+        },
       ],
     },
+    resolvePorts: (config) => ({
+      inputs: [{ id: 'items', label: 'items', dataType: configDataType(config) }],
+      outputs: [],
+    }),
     run: async () => {
       return {}
     },
