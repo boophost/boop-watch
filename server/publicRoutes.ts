@@ -414,8 +414,9 @@ publicRouter.get('/api/play/:id/*splat', async (req, res) => {
   await proxy(req, res, url)
 })
 
-// Text-subtitle delivery (rendered client-side by JASSUB). Jellyfin converts any
-// text track to ASS, so one path covers every subtitle.
+// Text-subtitle delivery. Jellyfin converts any text track to the requested
+// format: ASS for the client-side JASSUB renderer (the default), or VTT
+// (?format=vtt) for the native <track> the iPhone fullscreen player uses.
 publicRouter.get('/api/sub/:id/:index', async (req, res) => {
   if (!ensureConfigured(res)) return
   const { id } = req.params
@@ -426,5 +427,6 @@ publicRouter.get('/api/sub/:id/:index', async (req, res) => {
 
   res.set('cache-control', 'public, max-age=86400') // subtitles are static per item
   res.set('access-control-allow-origin', '*')        // JASSUB's worker may fetch cross-origin
-  await proxy(req, res, jfUrl(`/Videos/${id}/${id}/Subtitles/${index}/0/Stream.ass`))
+  const fmt = qStr(req.query.format) === 'vtt' ? 'vtt' : 'ass'
+  await proxy(req, res, jfUrl(`/Videos/${id}/${id}/Subtitles/${index}/0/Stream.${fmt}`))
 })
