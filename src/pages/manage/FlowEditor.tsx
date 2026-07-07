@@ -265,33 +265,48 @@ function NodePicker({
 
 let specLookup: Map<string, NodeSpec> = new Map()
 
-/** Fetches the derived interface (ports + exposed params) for a flow.subflow
- * node's referenced flow, refetching whenever flowId changes. */
+interface ComponentInfo {
+  interface: ComponentInterface
+  component: FlowComponentMeta | null
+  name: string
+}
+
+/** Fetches the derived interface (ports + exposed params) and component meta
+ * for a flow.subflow node's referenced flow, refetching whenever flowId
+ * changes. */
 function useComponentInterface(flowId: number | undefined) {
-  const [iface, setIface] = useState<ComponentInterface | null>(null)
+  const [info, setInfo] = useState<ComponentInfo | null>(null)
   useEffect(() => {
     if (!Number.isFinite(flowId)) {
-      setIface(null)
+      setInfo(null)
       return
     }
     let cancelled = false
     void getFlowInterface(flowId!)
       .then((r) => {
-        if (!cancelled) setIface(r.interface)
+        if (!cancelled) setInfo(r)
       })
       .catch(() => {
-        if (!cancelled) setIface(null)
+        if (!cancelled) setInfo(null)
       })
     return () => {
       cancelled = true
     }
   }, [flowId])
-  return iface
+  return info
+}
+
+/** Display name for a flow.subflow node: the component's custom label, falling
+ * back to the referenced flow's name (same precedence as the node palette). */
+function componentLabel(info: ComponentInfo | null): string | undefined {
+  if (!info) return undefined
+  return info.component?.label || info.name || undefined
 }
 
 function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
   const flowId = data.specType === 'flow.subflow' ? Number(data.config.flowId) : undefined
-  const componentIface = useComponentInterface(flowId)
+  const componentInfo = useComponentInterface(flowId)
+  const componentIface = componentInfo?.interface ?? null
   const spec =
     specLookup.get(data.specType) ??
     (data.specType === 'flow.subflow'
@@ -347,8 +362,12 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
             className="!size-2.5 !border-border !bg-muted-foreground"
           />
         ) : null}
-        <span className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[spec.category]}`} />
-        <span className="truncate text-xs font-medium">{spec.label}</span>
+        <span
+          className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[componentInfo?.component?.category ?? spec.category]}`}
+        />
+        <span className="truncate text-xs font-medium">
+          {componentLabel(componentInfo) ?? spec.label}
+        </span>
         {running ? (
           <Loader2 className="ml-auto size-3.5 shrink-0 animate-spin text-ring" />
         ) : report?.status === 'ok' ? (
@@ -514,7 +533,8 @@ function FlowEditorInner() {
   const selectedSpec = selected ? specLookup.get(selected.data.specType) : undefined
   const selectedFlowId =
     selected?.data.specType === 'flow.subflow' ? Number(selected.data.config.flowId) : undefined
-  const selectedComponentIface = useComponentInterface(selectedFlowId)
+  const selectedComponentInfo = useComponentInterface(selectedFlowId)
+  const selectedComponentIface = selectedComponentInfo?.interface ?? null
 
   const innerReports = useMemo(() => {
     if (!report || !selected || selected.data.specType !== 'flow.subflow') return []
@@ -1025,9 +1045,11 @@ function FlowEditorInner() {
         {selected && selectedSpec ? (
           <aside className="absolute inset-x-0 bottom-0 z-20 max-h-[45%] overflow-auto border-t border-border bg-card/95 backdrop-blur md:inset-x-auto md:inset-y-0 md:right-0 md:max-h-none md:w-80 md:border-l md:border-t-0">
             <div className="flex items-center gap-2 border-b border-border px-4 py-3">
-              <span className={`size-2 rounded-full ${CATEGORY_DOT[selectedSpec.category]}`} />
+              <span
+                className={`size-2 rounded-full ${CATEGORY_DOT[selectedComponentInfo?.component?.category ?? selectedSpec.category]}`}
+              />
               <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                {selectedSpec.label}
+                {componentLabel(selectedComponentInfo) ?? selectedSpec.label}
               </span>
               <Button
                 variant="ghost"
