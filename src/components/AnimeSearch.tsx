@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { fetchAuth } from '@/lib/api'
+import { fetchAuth, parseAuthJson } from '@/lib/api'
 
 export interface AnimeSearchHit {
   mal_id: number
@@ -51,7 +51,7 @@ export function AnimeSearch({ className, onAdded }: AnimeSearchProps) {
           const r = await fetchAuth(
             `/api/search/anime?q=${encodeURIComponent(t)}`,
           )
-          const raw = (await r.json()) as { results?: AnimeSearchHit[]; error?: string }
+          const raw = await parseAuthJson<{ results?: AnimeSearchHit[]; error?: string }>(r)
           if (!r.ok) {
             throw new Error(raw.error ?? 'Search failed')
           }
@@ -80,7 +80,7 @@ export function AnimeSearch({ className, onAdded }: AnimeSearchProps) {
           url: hit.url,
         }),
       })
-      const raw = (await r.json()) as { error?: string }
+      const raw = await parseAuthJson<{ error?: string }>(r)
       if (r.status === 409) {
         setError(raw.error ?? 'Already in your list')
         return
