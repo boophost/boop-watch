@@ -11,6 +11,8 @@ export type EditorStickyConfig = {
   color?: string
   width?: number
   height?: number
+  fontSize?: number
+  textAlign?: 'left' | 'center' | 'right'
 }
 
 export type EditorArrowConfig = {
