@@ -63,7 +63,7 @@ import {
   type NodeReport,
   type ComponentInterface,
 } from '@/lib/flows'
-import { isEditorNode } from '@/lib/flowEditorMeta'
+import { isEditorNode, editorRotationFromConfig, normalizeRotation } from '@/lib/flowEditorMeta'
 import {
   editorNodeTypes,
   editorRfType,
@@ -568,9 +568,72 @@ interface MenuState {
 }
 
 const EDITOR_DEFAULTS: Record<string, Record<string, unknown>> = {
-  'editor.sticky': { text: '', color: '#fef08a', width: 180, height: 120, fontSize: 12, textAlign: 'left' },
-  'editor.arrow': { direction: 'right', width: 160, height: 48 },
+  'editor.sticky': {
+    text: '',
+    color: '#fef08a',
+    width: 180,
+    height: 120,
+    fontSize: 12,
+    textAlign: 'left',
+    verticalAlign: 'top',
+    rotation: 0,
+  },
+  'editor.arrow': { width: 160, height: 48, rotation: 0 },
   'editor.group': { title: 'Group', color: 'rgba(124, 92, 255, 0.12)', width: 280, height: 180, locked: false },
+}
+
+function EditorRotationField({
+  value,
+  onChange,
+}: {
+  value: number
+  onChange: (deg: number) => void
+}) {
+  return (
+    <div className="space-y-1">
+      <label className="text-xs font-medium" htmlFor="ed-rotation">
+        Rotation
+      </label>
+      <div className="flex flex-wrap gap-1">
+        <Input
+          id="ed-rotation"
+          className="h-8 w-16"
+          type="number"
+          min={0}
+          max={359}
+          value={value}
+          onChange={(e) => onChange(normalizeRotation(Number(e.target.value) || 0))}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 px-2 text-xs"
+          onClick={() => onChange(normalizeRotation(value - 15))}
+        >
+          −15°
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 px-2 text-xs"
+          onClick={() => onChange(normalizeRotation(value + 15))}
+        >
+          +15°
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 px-2 text-xs"
+          onClick={() => onChange(normalizeRotation(value + 90))}
+        >
+          +90°
+        </Button>
+      </div>
+    </div>
+  )
 }
 
 function FlowEditorInner() {
@@ -1671,7 +1734,7 @@ function FlowEditorInner() {
                         />
                       </div>
                       <div className="space-y-1">
-                        <span className="text-xs font-medium">Alignment</span>
+                        <span className="text-xs font-medium">Horizontal align</span>
                         <div className="flex gap-1">
                           {(['left', 'center', 'right'] as const).map((align) => (
                             <Button
@@ -1687,6 +1750,27 @@ function FlowEditorInner() {
                           ))}
                         </div>
                       </div>
+                      <div className="space-y-1">
+                        <span className="text-xs font-medium">Vertical align</span>
+                        <div className="flex gap-1">
+                          {(['top', 'center', 'bottom'] as const).map((align) => (
+                            <Button
+                              key={align}
+                              type="button"
+                              variant={(selected.data.config.verticalAlign ?? 'top') === align ? 'secondary' : 'outline'}
+                              size="sm"
+                              className="h-8 flex-1 px-2 text-xs capitalize"
+                              onClick={() => setConfigValue('verticalAlign', align)}
+                            >
+                              {align}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                      <EditorRotationField
+                        value={editorRotationFromConfig('editor.sticky', selected.data.config)}
+                        onChange={(rotation) => setConfigValue('rotation', rotation)}
+                      />
                       <div className="space-y-1">
                         <label className="text-xs font-medium" htmlFor="ed-sticky-color">
                           Color
@@ -1713,34 +1797,10 @@ function FlowEditorInner() {
                     </>
                   ) : selected.data.specType === 'editor.arrow' ? (
                     <>
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium" htmlFor="ed-arrow-label">
-                          Label
-                        </label>
-                        <Input
-                          id="ed-arrow-label"
-                          className="h-8"
-                          value={String(selected.data.config.text ?? '')}
-                          placeholder="Optional label"
-                          onChange={(e) => setConfigValue('text', e.target.value)}
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium" htmlFor="ed-arrow-dir">
-                          Direction
-                        </label>
-                        <select
-                          id="ed-arrow-dir"
-                          className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
-                          value={String(selected.data.config.direction ?? 'right')}
-                          onChange={(e) => setConfigValue('direction', e.target.value)}
-                        >
-                          <option value="right">Right</option>
-                          <option value="left">Left</option>
-                          <option value="up">Up</option>
-                          <option value="down">Down</option>
-                        </select>
-                      </div>
+                      <EditorRotationField
+                        value={editorRotationFromConfig('editor.arrow', selected.data.config)}
+                        onChange={(rotation) => setConfigValue('rotation', rotation)}
+                      />
                       <div className="space-y-1">
                         <label className="text-xs font-medium" htmlFor="ed-arrow-color">
                           Color
