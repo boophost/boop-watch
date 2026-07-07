@@ -13,8 +13,26 @@ export interface ConfigField {
   help?: string
 }
 
-/** What travels over a port; omitted = 'items'. Mirrors server/flowNodes.ts. */
-export type PortDataType = 'items' | 'text' | 'number' | 'color' | 'url' | 'json' | 'embed'
+/**
+ * What travels over a port; omitted = base 'items'. Mirrors server/flowNodes.ts.
+ * Two families: the *record* stream ('items' + its stage subtypes) and the
+ * *value* ports (text/number/…). The record subtypes form a lineage under the
+ * base 'items' so a wrong wire (a torrent into a file input) is caught, while
+ * generic nodes still interoperate. Keep this in sync with server/flowNodes.ts.
+ */
+export type PortDataType =
+  | 'items'
+  | 'torrent'
+  | 'release'
+  | 'catalog'
+  | 'file'
+  | 'probed'
+  | 'text'
+  | 'number'
+  | 'color'
+  | 'url'
+  | 'json'
+  | 'embed'
 
 export interface NodePort {
   id: string
@@ -22,13 +40,43 @@ export interface NodePort {
   dataType?: PortDataType
 }
 
-/** Extra source types a target port accepts besides its own — keep in sync
- * with PORT_ACCEPTS in server/flowNodes.ts (the server enforces this on save;
- * the editor uses it to block bad connections as you drag). */
-const PORT_ACCEPTS: Record<PortDataType, PortDataType[]> = {
-  items: [],
+/** Record-family subtype lineage (child → parent). Base 'items' is the root of
+ * every record type; value types are a separate family. Keep in sync with
+ * server/flowNodes.ts. */
+const RECORD_PARENT: Partial<Record<PortDataType, PortDataType>> = {
+  torrent: 'items',
+  release: 'items',
+  catalog: 'items',
+  file: 'items',
+  probed: 'file',
+}
+
+const RECORD_TYPES: PortDataType[] = ['items', 'torrent', 'release', 'catalog', 'file', 'probed']
+export const isRecordType = (t: PortDataType): boolean => RECORD_TYPES.includes(t)
+
+/** Ancestor chain including self, nearest-first ('probed' → ['probed','file','items']). */
+const recordLineage = (t: PortDataType): PortDataType[] => {
+  const chain: PortDataType[] = [t]
+  let p = RECORD_PARENT[t]
+  while (p) {
+    chain.push(p)
+    p = RECORD_PARENT[p]
+  }
+  return chain
+}
+
+/** Nearest common ancestor of two record types (for propagation through merges). */
+export const recordLCA = (a: PortDataType, b: PortDataType): PortDataType => {
+  const bset = new Set(recordLineage(b))
+  for (const t of recordLineage(a)) if (bset.has(t)) return t
+  return 'items'
+}
+
+/** Extra value-source types a value target accepts besides its own — keep in
+ * sync with PORT_ACCEPTS in server/flowNodes.ts. Record types are handled by
+ * lineage (below), not this table. */
+const PORT_ACCEPTS: Partial<Record<PortDataType, PortDataType[]>> = {
   text: ['number', 'url', 'color'],
-  number: [],
   color: ['text'],
   url: ['text'],
   json: ['text', 'number', 'color', 'url', 'embed'],
@@ -38,7 +86,12 @@ const PORT_ACCEPTS: Record<PortDataType, PortDataType[]> = {
 export function portCompatible(source: PortDataType | undefined, target: PortDataType | undefined): boolean {
   const s = source ?? 'items'
   const t = target ?? 'items'
-  return s === t || PORT_ACCEPTS[t].includes(s)
+  if (s === t) return true
+  const sRec = isRecordType(s)
+  const tRec = isRecordType(t)
+  if (sRec !== tRec) return false // record and value families never mix
+  if (sRec) return recordLineage(s).includes(t) || recordLineage(t).includes(s)
+  return (PORT_ACCEPTS[t] ?? []).includes(s)
 }
 
 const VALUE_TYPES: PortDataType[] = ['text', 'number', 'color', 'url', 'json', 'embed']
@@ -62,6 +115,80 @@ export function resolveNodePorts(
     return { inputs: spec.inputs, outputs: [{ id: 'value', label: 'value', dataType: dt ?? 'json' }] }
   }
   return { inputs: spec.inputs, outputs: spec.outputs }
+}
+
+/** A port's declared record type is "fixed" (doesn't propagate) when it's a
+ * value type or a concrete record subtype; base 'items'/undefined propagates. */
+const isFixedType = (t: PortDataType | undefined): boolean => t !== undefined && t !== 'items'
+
+/**
+ * Blender-style type propagation over the record family. Generic nodes leave
+ * their record ports as base 'items'; this traces the upstream subtype through
+ * them so a 'probed' stream stays 'probed' all the way to the sink. Returns a
+ * map of effective types keyed `${nodeId}:in|out:${portId}`, for socket/wire
+ * colouring and connection validation. Value ports keep their declared type.
+ * Mirrors propagateRecordTypes in server/flowExecutor.ts — keep in sync.
+ */
+export function propagateRecordTypes(
+  graph: FlowGraph,
+  portsFor: (node: FlowNodeData) => { inputs: NodePort[]; outputs: NodePort[] } | null,
+): Map<string, PortDataType> {
+  const resolved = new Map<string, { inputs: NodePort[]; outputs: NodePort[] }>()
+  for (const node of graph.nodes) {
+    const ports = portsFor(node)
+    if (ports) resolved.set(node.id, ports)
+  }
+  const edges = graph.edges.filter((e) => resolved.has(e.source) && resolved.has(e.target))
+
+  // Kahn topological order; nodes left over by a cycle are appended as-is.
+  const indeg = new Map<string, number>([...resolved.keys()].map((id) => [id, 0]))
+  for (const e of edges) indeg.set(e.target, (indeg.get(e.target) ?? 0) + 1)
+  const queue = [...indeg].filter(([, d]) => d === 0).map(([id]) => id)
+  const order: string[] = []
+  while (queue.length) {
+    const id = queue.shift() as string
+    order.push(id)
+    for (const e of edges) {
+      if (e.source !== id) continue
+      const d = (indeg.get(e.target) ?? 0) - 1
+      indeg.set(e.target, d)
+      if (d === 0) queue.push(e.target)
+    }
+  }
+  for (const id of resolved.keys()) if (!order.includes(id)) order.push(id)
+
+  const eff = new Map<string, PortDataType>()
+  const outType = (nodeId: string, portId: string): PortDataType => {
+    const declared = resolved.get(nodeId)?.outputs.find((p) => p.id === portId)?.dataType
+    return eff.get(`${nodeId}:out:${portId}`) ?? declared ?? 'items'
+  }
+
+  for (const id of order) {
+    const ports = resolved.get(id)
+    if (!ports) continue
+    // Effective input per port = combined type of its inbound edges' sources.
+    let mergedRecordIn: PortDataType | undefined
+    for (const inp of ports.inputs) {
+      let e: PortDataType | undefined
+      for (const edge of edges) {
+        if (edge.target !== id || edge.targetHandle !== inp.id) continue
+        const st = outType(edge.source, edge.sourceHandle)
+        e = e === undefined ? st : isRecordType(e) && isRecordType(st) ? recordLCA(e, st) : e
+      }
+      const effIn = e ?? inp.dataType ?? 'items'
+      eff.set(`${id}:in:${inp.id}`, effIn)
+      if (isRecordType(effIn) && (e !== undefined || isFixedType(inp.dataType))) {
+        mergedRecordIn = mergedRecordIn === undefined ? effIn : recordLCA(mergedRecordIn, effIn)
+      }
+    }
+    // Effective output: a fixed type stays; a propagating record port takes the
+    // merged inbound record type (base 'items' if there were no record inputs).
+    for (const out of ports.outputs) {
+      const effOut = isFixedType(out.dataType) ? (out.dataType as PortDataType) : mergedRecordIn ?? 'items'
+      eff.set(`${id}:out:${out.id}`, effOut)
+    }
+  }
+  return eff
 }
 
 export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
