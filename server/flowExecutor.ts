@@ -59,24 +59,31 @@ export type ResolvedNodeSpec = { inputs: NodePortSpec[]; outputs: NodePortSpec[]
 export type SpecResolver = (node: FlowNode) => ResolvedNodeSpec | null
 
 export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): string | null {
+  // Ports for a node: an external resolver (flow.subflow interfaces) wins,
+  // then the impl's config-driven ports (typed boundaries, transform.pick),
+  // then the static spec.
+  const portsFor = (node: FlowNode): ResolvedNodeSpec | undefined => {
+    const resolved = resolveSpec?.(node)
+    if (resolved) return resolved
+    const impl = NODE_REGISTRY.get(node.type)
+    if (!impl) return undefined
+    return impl.resolvePorts?.(node.config ?? {}) ?? impl.spec
+  }
+
   const ids = new Set<string>()
   for (const node of graph.nodes) {
     if (!node.id || typeof node.id !== 'string') return 'Node missing id'
     if (ids.has(node.id)) return `Duplicate node id: ${node.id}`
     ids.add(node.id)
-    const impl = NODE_REGISTRY.get(node.type)
-    if (!impl) {
-      const resolved = resolveSpec?.(node)
-      if (!resolved) return `Unknown node type: ${node.type}`
-    }
+    if (!portsFor(node)) return `Unknown node type: ${node.type}`
   }
   for (const edge of graph.edges) {
     const source = graph.nodes.find((n) => n.id === edge.source)
     const target = graph.nodes.find((n) => n.id === edge.target)
     if (!source) return `Edge ${edge.id}: unknown source node`
     if (!target) return `Edge ${edge.id}: unknown target node`
-    const sourceSpec = resolveSpec?.(source) ?? NODE_REGISTRY.get(source.type)?.spec
-    const targetSpec = resolveSpec?.(target) ?? NODE_REGISTRY.get(target.type)?.spec
+    const sourceSpec = portsFor(source)
+    const targetSpec = portsFor(target)
     if (!sourceSpec || !targetSpec) return `Unknown node type on edge ${edge.id}`
     const out = sourceSpec.outputs.find((o) => o.id === edge.sourceHandle)
     if (!out) return `Edge ${edge.id}: ${source.type} has no output "${edge.sourceHandle}"`

@@ -1,7 +1,15 @@
 import type { FlowGraph, SpecResolver } from './flowExecutor.js'
 import { NODE_REGISTRY } from './flowNodes.js'
-import type { ConfigField, NodePort, NodeSpec } from './flowNodes.js'
+import type { ConfigField, NodePort, NodeSpec, PortDataType } from './flowNodes.js'
 import { parseComponent } from './flowsDb.js'
+
+/** A boundary node's configured dataType — the component port inherits it,
+ * so typed sockets survive publication. 'items'/invalid = undefined. */
+function boundaryDataType(config: Record<string, unknown>): PortDataType | undefined {
+  const v = String(config.dataType ?? '')
+  const VALUE_TYPES: PortDataType[] = ['text', 'number', 'color', 'url', 'json', 'embed']
+  return VALUE_TYPES.includes(v as PortDataType) ? (v as PortDataType) : undefined
+}
 
 export interface ExposedParam {
   nodeId: string
@@ -60,14 +68,14 @@ export function deriveInterface(
       if (!portId) return { error: `Boundary input ${node.id} missing portId` }
       if (portIds.has(portId)) return { error: `Duplicate portId: ${portId}` }
       portIds.add(portId)
-      inputs.push({ id: portId, label })
+      inputs.push({ id: portId, label, dataType: boundaryDataType(node.config) })
     } else if (node.type === 'boundary.output') {
       const portId = String(node.config.portId ?? '').trim()
       const label = String(node.config.label ?? portId)
       if (!portId) return { error: `Boundary output ${node.id} missing portId` }
       if (portIds.has(portId)) return { error: `Duplicate portId: ${portId}` }
       portIds.add(portId)
-      outputs.push({ id: portId, label })
+      outputs.push({ id: portId, label, dataType: boundaryDataType(node.config) })
     }
   }
 
