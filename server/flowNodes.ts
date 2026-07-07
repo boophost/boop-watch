@@ -224,6 +224,22 @@ const bool = (config: Record<string, unknown>, key: string, fallback: boolean): 
   return fallback
 }
 
+// Per-node "Run on dry runs" toggle for side-effecting nodes (delay, web
+// requests, activity log). A dry run normally skips a node's real action; when
+// this is on, the node performs it even in a dry run. `def` is the node's
+// natural default (e.g. the activity log keeps logging on dry, a web request
+// stays skipped). `runOnDryField(def)` declares the matching config field.
+const runsLive = (config: Record<string, unknown>, ctx: RunContext, def: boolean): boolean =>
+  !ctx.dryRun || bool(config, 'runOnDry', def)
+
+const runOnDryField = (def: boolean): ConfigField => ({
+  key: 'runOnDry',
+  label: 'Run on dry runs',
+  kind: 'boolean',
+  default: def,
+  help: 'Off = does nothing on a dry run (safe preview). On = performs its action even in a dry run.',
+})
+
 const norm = (s: unknown): string =>
   String(s ?? '')
     .toLowerCase()
@@ -535,6 +551,7 @@ const httpEnrich: NodeImpl = {
         help: 'Dot path into the JSON response, e.g. "data.0.score". Empty = whole body.',
       },
       { key: 'field', label: 'Store in field', kind: 'text', default: 'response' },
+      runOnDryField(false),
     ],
   },
   async run(inputs, config, ctx) {
@@ -549,8 +566,9 @@ const httpEnrich: NodeImpl = {
 
     const items = allInputs(inputs)
     // GETs are read-only and run even on dry runs (like Fetch JSON); anything
-    // else could mutate the remote side, so a dry run only counts them.
-    if (ctx.dryRun && method !== 'GET') {
+    // else could mutate the remote side, so a dry run only counts them unless
+    // "Run on dry runs" is on.
+    if (method !== 'GET' && !runsLive(config, ctx, false)) {
       ctx.notes.push(`dry run — would send ${items.length} ${method} request(s)`)
       return { ok: items, error: [] }
     }
@@ -640,6 +658,9 @@ const logSink: NodeImpl = {
         default: true,
         help: 'Off = log the message (with {count} = 0) even when nothing arrives.',
       },
+      // Logs on both dry and live by default (a dry run's log is its preview);
+      // turn off to keep dry runs out of the activity feed.
+      runOnDryField(true),
     ],
   },
   async run(inputs, config, ctx) {
@@ -649,6 +670,11 @@ const logSink: NodeImpl = {
     const skipEmpty = bool(config, 'skipEmpty', true)
 
     const items = allInputs(inputs)
+    // Pass items through regardless; only the logging respects the dry-run toggle.
+    if (!runsLive(config, ctx, true)) {
+      ctx.notes.push(`dry run — logging skipped (${items.length} item(s))`)
+      return { items }
+    }
     const fill = (item: FlowItem) =>
       fillTemplate(message, { ...item, count: items.length }, 'none').trim()
 
@@ -719,6 +745,7 @@ const httpSink: NodeImpl = {
         default: false,
         help: 'Send a single request with every item as a JSON array (URL placeholders resolve empty).',
       },
+      runOnDryField(false),
     ],
   },
   async run(inputs, config, ctx) {
@@ -732,7 +759,7 @@ const httpSink: NodeImpl = {
 
     const items = allInputs(inputs)
     if (items.length === 0) return { sent: [], failed: [] }
-    if (ctx.dryRun) {
+    if (!runsLive(config, ctx, false)) {
       ctx.notes.push(`dry run — would send ${batch ? 1 : items.length} ${method} request(s)`)
       return { sent: items, failed: [] }
     }
@@ -3693,19 +3720,22 @@ const delay: NodeImpl = {
     label: 'Delay',
     category: 'enrich',
     description:
-      'Waits the configured time, then passes its input straight through unchanged. Waits once (not per item). A dry run skips the wait. Capped at 10 minutes — the run holds the flow lock while waiting.',
+      'Waits the configured time, then passes its input straight through unchanged. Waits once (not per item). A dry run skips the wait unless "Run on dry runs" is on. Capped at 10 minutes — the run holds the flow lock while waiting.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [{ id: 'out', label: 'out' }],
-    config: [{ key: 'seconds', label: 'Delay (seconds)', kind: 'number', default: 5 }],
+    config: [
+      { key: 'seconds', label: 'Delay (seconds)', kind: 'number', default: 5 },
+      runOnDryField(false),
+    ],
   },
   async run(inputs, config, ctx) {
     const items = allInputs(inputs)
     const seconds = Math.min(Math.max(0, num(config, 'seconds', 5)), MAX_DELAY_S)
-    if (ctx.dryRun) {
-      ctx.notes.push(`would wait ${seconds}s, then pass ${items.length} item(s)`)
-    } else {
+    if (runsLive(config, ctx, false)) {
       if (seconds > 0) await new Promise((resolve) => setTimeout(resolve, seconds * 1000))
       ctx.notes.push(`waited ${seconds}s, passed ${items.length} item(s)`)
+    } else {
+      ctx.notes.push(`would wait ${seconds}s, then pass ${items.length} item(s)`)
     }
     return { out: items }
   },
