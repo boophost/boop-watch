@@ -3695,6 +3695,24 @@ const jellyfinCollection: NodeImpl = {
   },
 }
 
+// A wire-routing waypoint (the editor renders it as a movable dot): passes its
+// input straight through unchanged, so it's transparent at run time. Its output
+// is untyped, so the connection's record type propagates through it.
+const reroute: NodeImpl = {
+  spec: {
+    type: 'transform.reroute',
+    label: 'Reroute',
+    category: 'combine',
+    description: 'A movable anchor for routing wires — passes its input through unchanged.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [],
+  },
+  async run(inputs) {
+    return { out: allInputs(inputs) }
+  },
+}
+
 const merge: NodeImpl = {
   spec: {
     type: 'combine.merge',
@@ -4087,6 +4105,7 @@ const IMPLS: NodeImpl[] = [
   torrentSearch,
   diff,
   merge,
+  reroute,
   delay,
   portalSink,
   httpSink,
