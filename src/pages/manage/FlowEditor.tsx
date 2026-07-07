@@ -45,6 +45,7 @@ import {
   saveFlow,
   runFlowStream,
   portCompatible,
+  resolveNodePorts,
   type NodeSpec,
   type NodeCategory,
   type NodePort,
@@ -286,6 +287,11 @@ function NodePicker({
 
 let specLookup: Map<string, NodeSpec> = new Map()
 
+/** Last-fetched interface per component flow id — lets edge coloring and
+ * connection validation (which run outside React components) see a subflow
+ * node's typed ports. Populated by useComponentInterface. */
+const ifaceCache = new Map<number, ComponentInterface>()
+
 interface ComponentInfo {
   interface: ComponentInterface
   component: FlowComponentMeta | null
@@ -305,6 +311,7 @@ function useComponentInterface(flowId: number | undefined) {
     let cancelled = false
     void getFlowInterface(flowId!)
       .then((r) => {
+        ifaceCache.set(flowId!, r.interface)
         if (!cancelled) setInfo(r)
       })
       .catch(() => {
@@ -349,8 +356,9 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
       </div>
     )
   }
-  const inputs = componentIface?.inputs ?? spec.inputs
-  const outputs = componentIface?.outputs ?? spec.outputs
+  const resolvedPorts = resolveNodePorts(spec, data.config)
+  const inputs = componentIface?.inputs ?? resolvedPorts.inputs
+  const outputs = componentIface?.outputs ?? resolvedPorts.outputs
   const configLines = spec.config
     .map((f) => {
       const v = data.config[f.key] ?? f.default
@@ -632,8 +640,9 @@ function FlowEditorInner() {
     [setEdges],
   )
 
-  /** Resolves the NodePort behind one end of a connection. Unknown specs
-   * (flow.subflow — its boundary ports carry no dataType) resolve to
+  /** Resolves the NodePort behind one end of a connection: subflow nodes via
+   * the fetched component interface (typed boundary ports), everything else
+   * via its spec + config-driven ports. Unresolvable ports come back
    * undefined, which portCompatible treats as plain 'items'. */
   const findPort = useCallback(
     (
@@ -642,9 +651,16 @@ function FlowEditorInner() {
       dir: 'out' | 'in',
     ): NodePort | undefined => {
       const node = nodes.find((n) => n.id === nodeId)
-      const spec = node ? specLookup.get(node.data.specType) : undefined
+      if (!node) return undefined
+      if (node.data.specType === 'flow.subflow') {
+        const iface = ifaceCache.get(Number(node.data.config.flowId))
+        if (!iface) return undefined
+        return (dir === 'out' ? iface.outputs : iface.inputs).find((p) => p.id === handleId)
+      }
+      const spec = specLookup.get(node.data.specType)
       if (!spec) return undefined
-      return (dir === 'out' ? spec.outputs : spec.inputs).find((p) => p.id === handleId)
+      const ports = resolveNodePorts(spec, node.data.config)
+      return (dir === 'out' ? ports.outputs : ports.inputs).find((p) => p.id === handleId)
     },
     [nodes],
   )

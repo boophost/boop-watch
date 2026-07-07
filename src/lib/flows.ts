@@ -41,6 +41,29 @@ export function portCompatible(source: PortDataType | undefined, target: PortDat
   return s === t || PORT_ACCEPTS[t].includes(s)
 }
 
+const VALUE_TYPES: PortDataType[] = ['text', 'number', 'color', 'url', 'json', 'embed']
+
+/** Ports that depend on a node's config — boundary nodes take their dataType
+ * from config, transform.pick types its output. Mirrors the impls'
+ * resolvePorts in server/flowNodes.ts; keep in sync. */
+export function resolveNodePorts(
+  spec: NodeSpec,
+  config: Record<string, unknown>,
+): { inputs: NodePort[]; outputs: NodePort[] } {
+  const raw = String(config.dataType ?? '')
+  const dt = VALUE_TYPES.includes(raw as PortDataType) ? (raw as PortDataType) : undefined
+  if (spec.type === 'boundary.input') {
+    return { inputs: spec.inputs, outputs: [{ id: 'items', label: 'items', dataType: dt }] }
+  }
+  if (spec.type === 'boundary.output') {
+    return { inputs: [{ id: 'items', label: 'items', dataType: dt }], outputs: spec.outputs }
+  }
+  if (spec.type === 'transform.pick') {
+    return { inputs: spec.inputs, outputs: [{ id: 'value', label: 'value', dataType: dt ?? 'json' }] }
+  }
+  return { inputs: spec.inputs, outputs: spec.outputs }
+}
+
 export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
 
 export interface NodeSpec {
