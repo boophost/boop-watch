@@ -75,6 +75,12 @@ function db() {
     if (!cols.some((c) => c.name === 'component')) {
       instance.exec(`ALTER TABLE flows ADD COLUMN component TEXT`)
     }
+    // A schedule can target a trigger name (fires every flow with that trigger)
+    // instead of a single flow_id; legacy flow_id rows keep working.
+    const schedCols = instance.prepare(`PRAGMA table_info(flow_schedules)`).all() as { name: string }[]
+    if (!schedCols.some((c) => c.name === 'trigger_name')) {
+      instance.exec(`ALTER TABLE flow_schedules ADD COLUMN trigger_name TEXT`)
+    }
     ready = true
     seedFlows(instance)
   }
@@ -345,6 +351,34 @@ export function getFlow(id: number): FlowRow | undefined {
   return db().prepare('SELECT * FROM flows WHERE id = ?').get(id) as FlowRow | undefined
 }
 
+// The trigger.start names declared in a flow graph (deduped, non-empty).
+function triggerNamesOf(graphJson: string): string[] {
+  try {
+    const g = JSON.parse(graphJson) as { nodes?: { type?: string; config?: Record<string, unknown> }[] }
+    const names = (g.nodes ?? [])
+      .filter((n) => n.type === 'trigger.start')
+      .map((n) => String(n.config?.name ?? '').trim())
+      .filter(Boolean)
+    return [...new Set(names)]
+  } catch {
+    return []
+  }
+}
+
+// Flows whose graph contains a trigger.start with the given name — the
+// subscribers a fireTrigger(name) publish fans out to (server/flowRoutes.ts).
+export function flowsWithTrigger(name: string): { id: number; name: string; graph: string }[] {
+  return listFlowGraphs().filter((f) => triggerNamesOf(f.graph).includes(name))
+}
+
+// Distinct trigger names across all flows, sorted — for the schedule target
+// picker (GET /api/flows/triggers).
+export function listTriggerNames(): string[] {
+  const names = new Set<string>()
+  for (const f of listFlowGraphs()) for (const n of triggerNamesOf(f.graph)) names.add(n)
+  return [...names].sort()
+}
+
 export function parseComponent(raw: string | null): FlowComponentMeta | null {
   if (!raw) return null
   try {
@@ -504,7 +538,10 @@ export type ScheduleSpec =
   | { runAt: string } // once, ISO instant
 
 export interface ScheduleInput {
+  // Legacy target: a single flow. 0 when the schedule fires a trigger name.
   flow_id: number
+  // Preferred target: fire this trigger name across every subscribing flow.
+  trigger_name: string | null
   name: string | null
   kind: ScheduleKind
   spec: ScheduleSpec
@@ -516,6 +553,7 @@ export interface ScheduleInput {
 export interface FlowSchedule {
   id: number
   flow_id: number
+  trigger_name: string | null // when set, fires this trigger name (not flow_id)
   flow_name: string | null // joined from flows; null if the flow was deleted
   name: string | null
   kind: ScheduleKind
@@ -534,6 +572,7 @@ export interface FlowSchedule {
 interface ScheduleRaw {
   id: number
   flow_id: number
+  trigger_name: string | null
   flow_name: string | null
   name: string | null
   kind: ScheduleKind
@@ -565,6 +604,7 @@ function decodeSchedule(r: ScheduleRaw): FlowSchedule {
   return {
     id: r.id,
     flow_id: r.flow_id,
+    trigger_name: r.trigger_name,
     flow_name: r.flow_name,
     name: r.name,
     kind: r.kind,
@@ -606,11 +646,12 @@ export function dueSchedules(nowIso: string): FlowSchedule[] {
 export function createSchedule(input: ScheduleInput): FlowSchedule {
   const info = db()
     .prepare(
-      `INSERT INTO flow_schedules (flow_id, name, kind, spec, dry_run, enabled, next_run)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO flow_schedules (flow_id, trigger_name, name, kind, spec, dry_run, enabled, next_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.flow_id,
+      input.trigger_name,
       input.name,
       input.kind,
       JSON.stringify(input.spec),
@@ -630,12 +671,13 @@ export function updateSchedule(
   db()
     .prepare(
       `UPDATE flow_schedules
-       SET flow_id = ?, name = ?, kind = ?, spec = ?, dry_run = ?, enabled = ?, next_run = ?,
+       SET flow_id = ?, trigger_name = ?, name = ?, kind = ?, spec = ?, dry_run = ?, enabled = ?, next_run = ?,
            updated_at = datetime('now')
        WHERE id = ?`,
     )
     .run(
       patch.flow_id ?? existing.flow_id,
+      patch.trigger_name === undefined ? existing.trigger_name : patch.trigger_name,
       patch.name === undefined ? existing.name : patch.name,
       patch.kind ?? existing.kind,
       JSON.stringify(patch.spec ?? existing.spec),

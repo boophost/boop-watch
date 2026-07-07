@@ -131,7 +131,7 @@ const pickValue = (vals: unknown[], idx: number): unknown =>
 
 const asValueItems = (vals: unknown[]): FlowItem[] => vals.map((value) => ({ value }))
 
-export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
+export type NodeCategory = 'trigger' | 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
 
 export interface NodeSpec {
   type: string
@@ -143,6 +143,21 @@ export interface NodeSpec {
   config: ConfigField[]
 }
 
+/** The named event firing a run. Only a `trigger.start` whose name matches emits
+ * its payload; the rest stay empty. Absent = a manual whole-flow run (every
+ * trigger fires). */
+export interface TriggerEvent {
+  name: string
+  items: FlowItem[]
+}
+
+/** A deferred publish queued by a `trigger.fire` node, drained by the dispatcher
+ * once the current run releases the flow lock (see fireTrigger in flowRoutes). */
+export interface FireRequest {
+  name: string
+  items: FlowItem[]
+}
+
 export interface RunContext {
   dryRun: boolean
   notes: string[]
@@ -152,6 +167,10 @@ export interface RunContext {
   hooks?: RunHooks
   /** Merge nested graph node reports into the parent run (keys already qualified). */
   mergeNestedReports?: (nested: Record<string, NodeReport>) => void
+  /** The trigger event firing this run (null = manual whole-flow run). */
+  trigger?: TriggerEvent | null
+  /** Sink that `trigger.fire` pushes deferred publishes onto. */
+  fireQueue?: FireRequest[]
 }
 
 export interface NodeImpl {
@@ -3797,7 +3816,86 @@ const subflow: NodeImpl = {
   },
 }
 
+// --- Triggers: a named event bus for starting flows ------------------------
+
+const triggerStart: NodeImpl = {
+  spec: {
+    type: 'trigger.start',
+    label: 'Trigger',
+    category: 'trigger',
+    description:
+      'The named entry point of a flow — "this is where the flow starts". When its name is fired (by a schedule or a "Fire trigger" node in another flow) the flow starts here, emitting the trigger payload plus triggered_at. A manual run fires every trigger.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'start' }],
+    config: [
+      {
+        key: 'name',
+        label: 'Trigger name',
+        kind: 'text',
+        default: 'start',
+        help: 'Schedules and "Fire trigger" nodes address this name.',
+      },
+      { key: 'description', label: 'Note', kind: 'text', default: '' },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const name = str(config, 'name', 'start')
+    // A manual run (no trigger event) fires every trigger; a named fire only its match.
+    if (ctx.trigger != null && ctx.trigger.name !== name) {
+      ctx.notes.push(`idle — waiting on "${name}"`)
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    const payload = ctx.trigger?.items ?? []
+    const items: FlowItem[] = payload.length
+      ? payload.map((it) => ({ ...it, triggered_at, trigger: name }))
+      : [{ triggered_at, trigger: name }]
+    ctx.notes.push(ctx.trigger == null ? `manual start (${items.length})` : `fired "${name}" (${items.length})`)
+    return { out: items }
+  },
+}
+
+const triggerFire: NodeImpl = {
+  spec: {
+    type: 'trigger.fire',
+    label: 'Fire trigger',
+    category: 'trigger',
+    description:
+      'Publishes to a trigger name: every flow with a "Trigger" of that name runs, receiving these items as its payload. The fire is deferred until this flow finishes, so use it to chain flows. Items pass straight through.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'fired' }],
+    config: [
+      {
+        key: 'name',
+        label: 'Trigger name',
+        kind: 'text',
+        default: '',
+        help: 'The Trigger name to fire in other flows.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const name = str(config, 'name', '')
+    const items = allInputs(inputs)
+    if (!name) {
+      ctx.notes.push('no trigger name set — nothing fired')
+      return { out: items }
+    }
+    if (ctx.dryRun) {
+      ctx.notes.push(`would fire "${name}" with ${items.length} item(s)`)
+    } else if (ctx.fireQueue) {
+      ctx.fireQueue.push({ name, items })
+      ctx.notes.push(`queued fire "${name}" with ${items.length} item(s)`)
+    } else {
+      ctx.notes.push(`fire "${name}" skipped (no dispatcher in this context)`)
+    }
+    return { out: items }
+  },
+}
+
 const IMPLS: NodeImpl[] = [
+  triggerStart,
+  triggerFire,
   jellyfinSource,
   indexerSource,
   portalSource,
