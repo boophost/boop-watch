@@ -463,7 +463,7 @@ export async function fireEvent(kind: TriggerKind, items: FlowItem[], depth = 0)
   await runMatchingFlows(flows, { kind, items }, depth)
 }
 
-const TRIGGER_KINDS: TriggerKind[] = ['start', 'new-item', 'release']
+const TRIGGER_KINDS: TriggerKind[] = ['start', 'new-item', 'new-portal', 'release']
 
 // Validate an editor "run from here" trigger from a run request body. Returns
 // null for a whole-flow run (every trigger fires). Items are always empty here —
