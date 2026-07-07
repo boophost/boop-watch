@@ -44,8 +44,11 @@ import {
   getNodeTypes,
   saveFlow,
   runFlowStream,
+  portCompatible,
   type NodeSpec,
   type NodeCategory,
+  type NodePort,
+  type PortDataType,
   type ConfigField,
   type FlowGraph,
   type FlowComponentMeta,
@@ -72,6 +75,7 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
   enrich: 'bg-amber-400',
   combine: 'bg-emerald-400',
   sink: 'bg-rose-400',
+  value: 'bg-pink-400',
   boundary: 'bg-slate-400',
 }
 
@@ -81,10 +85,27 @@ const CATEGORY_LABEL: Record<NodeCategory, string> = {
   enrich: 'Enrich',
   combine: 'Combine',
   sink: 'Sink',
+  value: 'Value',
   boundary: 'Boundary',
 }
 
-const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink', 'boundary']
+const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink', 'value', 'boundary']
+
+/** Handle/wire color per port data type. 'items' keeps the neutral gray the
+ * editor always had; value types get distinct hues so a color socket is
+ * findable at a glance (matching Blender-style typed sockets). */
+const PORT_COLOR: Record<PortDataType, string> = {
+  items: 'var(--muted-foreground)',
+  text: '#38bdf8', // sky-400
+  number: '#fbbf24', // amber-400
+  color: '#f472b6', // pink-400
+  url: '#2dd4bf', // teal-400
+  json: '#fb923c', // orange-400
+  embed: '#a78bfa', // violet-400
+}
+
+const portColor = (t: PortDataType | undefined) => PORT_COLOR[t ?? 'items']
+const portTitle = (p: NodePort) => `${p.label} (${p.dataType ?? 'items'})`
 
 /** Categories a flow can publish itself as when exposed as a reusable component. */
 const COMPONENT_CATEGORIES: Exclude<NodeCategory, 'boundary'>[] = [
@@ -364,7 +385,9 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
             id={inputs[0].id}
             type="target"
             position={Position.Left}
-            className="!size-2.5 !border-border !bg-muted-foreground"
+            className="!size-2.5 !border-border"
+            style={{ background: portColor(inputs[0].dataType) }}
+            title={portTitle(inputs[0])}
           />
         ) : null}
         <span
@@ -389,10 +412,16 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
                 id={port.id}
                 type="target"
                 position={Position.Left}
-                className="!size-2.5 !border-border !bg-muted-foreground"
-                style={{ top: '50%' }}
+                className="!size-2.5 !border-border"
+                style={{ top: '50%', background: portColor(port.dataType) }}
+                title={portTitle(port)}
               />
-              <span className="text-[10px] text-muted-foreground">{port.label}</span>
+              <span
+                className="text-[10px] text-muted-foreground"
+                style={port.dataType && port.dataType !== 'items' ? { color: portColor(port.dataType) } : undefined}
+              >
+                {port.label}
+              </span>
             </div>
           ))}
         </div>
@@ -414,13 +443,19 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
                 {report.counts[port.id] ?? 0}
               </span>
             ) : null}
-            <span className="text-[10px] text-muted-foreground">{port.label}</span>
+            <span
+              className="text-[10px] text-muted-foreground"
+              style={port.dataType && port.dataType !== 'items' ? { color: portColor(port.dataType) } : undefined}
+            >
+              {port.label}
+            </span>
             <Handle
               id={port.id}
               type="source"
               position={Position.Right}
-              className="!size-2.5 !border-border !bg-muted-foreground"
-              style={{ top: '50%' }}
+              className="!size-2.5 !border-border"
+              style={{ top: '50%', background: portColor(port.dataType) }}
+              title={portTitle(port)}
             />
           </div>
         ))}
@@ -595,6 +630,46 @@ function FlowEditorInner() {
       setDirty(true)
     },
     [setEdges],
+  )
+
+  /** Resolves the NodePort behind one end of a connection. Unknown specs
+   * (flow.subflow — its boundary ports carry no dataType) resolve to
+   * undefined, which portCompatible treats as plain 'items'. */
+  const findPort = useCallback(
+    (
+      nodeId: string | null | undefined,
+      handleId: string | null | undefined,
+      dir: 'out' | 'in',
+    ): NodePort | undefined => {
+      const node = nodes.find((n) => n.id === nodeId)
+      const spec = node ? specLookup.get(node.data.specType) : undefined
+      if (!spec) return undefined
+      return (dir === 'out' ? spec.outputs : spec.inputs).find((p) => p.id === handleId)
+    },
+    [nodes],
+  )
+
+  // Blender-style typed sockets: dragging onto an incompatible input is
+  // rejected live (the server re-validates on save as the backstop).
+  const isValidConnection = useCallback(
+    (conn: Connection | RFEdge) =>
+      portCompatible(
+        findPort(conn.source, conn.sourceHandle, 'out')?.dataType,
+        findPort(conn.target, conn.targetHandle, 'in')?.dataType,
+      ),
+    [findPort],
+  )
+
+  // Wires take the color of the value type they carry; items edges keep the
+  // default stroke.
+  const styledEdges = useMemo(
+    () =>
+      edges.map((e) => {
+        const dataType = findPort(e.source, e.sourceHandle, 'out')?.dataType
+        if (!dataType || dataType === 'items') return e
+        return { ...e, style: { ...e.style, stroke: portColor(dataType), strokeWidth: 1.5 } }
+      }),
+    [edges, findPort],
   )
 
   const addNode = (spec: NodeSpec, position?: { x: number; y: number }) => {
@@ -953,8 +1028,9 @@ function FlowEditorInner() {
       <div className="relative min-h-0 flex-1">
         <ReactFlow<RFNode, RFEdge>
           nodes={nodes}
-          edges={edges}
+          edges={styledEdges}
           nodeTypes={nodeTypes}
+          isValidConnection={isValidConnection}
           onNodesChange={(changes) => {
             onNodesChange(changes)
             if (changes.some((c) => c.type === 'position' || c.type === 'remove')) markDirty()
@@ -1125,6 +1201,21 @@ function FlowEditorInner() {
                                 value={String(value)}
                                 onChange={(e) => setConfigValue(configKey, e.target.value)}
                               />
+                            ) : p.kind === 'color' ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  id={`param-${nestedKey}`}
+                                  type="color"
+                                  className="h-8 w-10 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
+                                  value={/^#[0-9a-f]{6}$/i.test(String(value)) ? String(value) : '#7c5cff'}
+                                  onChange={(e) => setConfigValue(configKey, e.target.value)}
+                                />
+                                <Input
+                                  className="h-8 font-mono"
+                                  value={String(value)}
+                                  onChange={(e) => setConfigValue(configKey, e.target.value)}
+                                />
+                              </div>
                             ) : p.kind === 'boolean' ? (
                               <select
                                 id={`param-${nestedKey}`}
@@ -1193,6 +1284,21 @@ function FlowEditorInner() {
                             value={String(value)}
                             onChange={(e) => setConfigValue(f.key, e.target.value)}
                           />
+                        ) : f.kind === 'color' ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              id={`cfg-${f.key}`}
+                              type="color"
+                              className="h-8 w-10 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
+                              value={/^#[0-9a-f]{6}$/i.test(String(value)) ? String(value) : '#7c5cff'}
+                              onChange={(e) => setConfigValue(f.key, e.target.value)}
+                            />
+                            <Input
+                              className="h-8 font-mono"
+                              value={String(value)}
+                              onChange={(e) => setConfigValue(f.key, e.target.value)}
+                            />
+                          </div>
                         ) : f.kind === 'boolean' ? (
                           <select
                             id={`cfg-${f.key}`}
