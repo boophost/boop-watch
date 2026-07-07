@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ReactFlow,
@@ -52,6 +52,7 @@ import {
   runFlowStream,
   portCompatible,
   resolveNodePorts,
+  propagateRecordTypes,
   type NodeSpec,
   type NodeCategory,
   type NodePort,
@@ -104,11 +105,21 @@ const CATEGORY_LABEL: Record<NodeCategory, string> = {
 
 const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink', 'value', 'boundary']
 
-/** Handle/wire color per port data type. 'items' keeps the neutral gray the
- * editor always had; value types get distinct hues so a color socket is
- * findable at a glance (matching Blender-style typed sockets). */
+/** Handle/wire color per port data type. Base 'items' keeps the neutral gray
+ * the editor always had (it's genuinely "any record"); the record subtypes get
+ * distinct bright hues — cool purples/indigo/fuchsia for the torrent/release/
+ * catalog side, a warm gold pair for file/probed (probed a near-shade of file,
+ * to read as is-a) — and the value types keep their own hues, so any socket is
+ * findable at a glance (matching Blender-style typed sockets). Green and red are
+ * deliberately NOT used here — they're reserved for run/dry-run outcome
+ * (node ✓/✕), so a healthy typed graph never looks like an all-pass run. */
 const PORT_COLOR: Record<PortDataType, string> = {
   items: 'var(--muted-foreground)',
+  torrent: '#c084fc', // purple-400 — a raw download
+  release: '#818cf8', // indigo-400 — a magnet search result
+  catalog: '#e879f9', // fuchsia-400 — a metadata catalog entry
+  file: '#facc15', // yellow-400 — a video file on disk
+  probed: '#F9A825', // yellow-800 — a probed file (is-a file)
   text: '#38bdf8', // sky-400
   number: '#fbbf24', // amber-400
   color: '#f472b6', // pink-400
@@ -118,7 +129,12 @@ const PORT_COLOR: Record<PortDataType, string> = {
 }
 
 const portColor = (t: PortDataType | undefined) => PORT_COLOR[t ?? 'items']
-const portTitle = (p: NodePort) => `${p.label} (${p.dataType ?? 'items'})`
+const portTitle = (p: NodePort, eff?: PortDataType) =>
+  `${p.label} (${eff ?? p.dataType ?? 'items'})`
+
+/** Effective (propagated) port types keyed `${nodeId}:in|out:${portId}`, so a
+ * generic node's sockets/wires show the record subtype flowing through it. */
+const PropagatedTypesContext = createContext<Map<string, PortDataType>>(new Map())
 
 /** Categories a flow can publish itself as when exposed as a reusable component. */
 const COMPONENT_CATEGORIES: Exclude<NodeCategory, 'boundary'>[] = [
@@ -343,7 +359,8 @@ function componentLabel(info: ComponentInfo | null): string | undefined {
   return info.component?.label || info.name || undefined
 }
 
-function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
+function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
+  const propTypes = useContext(PropagatedTypesContext)
   const flowId = data.specType === 'flow.subflow' ? Number(data.config.flowId) : undefined
   const componentInfo = useComponentInterface(flowId)
   const componentIface = componentInfo?.interface ?? null
@@ -371,6 +388,14 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
   const resolvedPorts = resolveNodePorts(spec, data.config)
   const inputs = componentIface?.inputs ?? resolvedPorts.inputs
   const outputs = componentIface?.outputs ?? resolvedPorts.outputs
+  // Effective (propagated) type per port — a generic 'items' port shows the
+  // record subtype flowing through it; falls back to the declared type.
+  const effIn = (p: NodePort): PortDataType => propTypes.get(`${id}:in:${p.id}`) ?? p.dataType ?? 'items'
+  const effOut = (p: NodePort): PortDataType => propTypes.get(`${id}:out:${p.id}`) ?? p.dataType ?? 'items'
+  // A bare "in" label conveys nothing; show the type instead so every socket
+  // reads as typed (this is what the single-input header dot used to hide).
+  const inLabel = (p: NodePort) => (p.label === 'in' ? effIn(p) : p.label)
+  const typedStyle = (t: PortDataType) => (t !== 'items' ? { color: portColor(t) } : undefined)
   const configLines = spec.config
     .map((f) => {
       const v = data.config[f.key] ?? f.default
@@ -400,16 +425,6 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
         className="relative flex items-center gap-2 border-b border-border px-3 py-2"
         title={spec.description || undefined}
       >
-        {inputs.length === 1 && inputs[0].label === 'in' ? (
-          <Handle
-            id={inputs[0].id}
-            type="target"
-            position={Position.Left}
-            className="!size-2.5 !border-border"
-            style={{ background: portColor(inputs[0].dataType) }}
-            title={portTitle(inputs[0])}
-          />
-        ) : null}
         <span
           className={`size-2 shrink-0 rounded-full ${CATEGORY_DOT[componentInfo?.component?.category ?? spec.category]}`}
         />
@@ -424,7 +439,7 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
           <AlertTriangle className="ml-auto size-3.5 shrink-0 text-destructive" />
         ) : null}
       </div>
-      {inputs.length > 1 || (inputs.length === 1 && inputs[0].label !== 'in') ? (
+      {inputs.length > 0 ? (
         <div className="border-b border-border py-1">
           {inputs.map((port) => (
             <div key={port.id} className="relative flex items-center gap-2 px-3 py-0.5">
@@ -433,14 +448,11 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
                 type="target"
                 position={Position.Left}
                 className="!size-2.5 !border-border"
-                style={{ top: '50%', background: portColor(port.dataType) }}
-                title={portTitle(port)}
+                style={{ top: '50%', background: portColor(effIn(port)) }}
+                title={portTitle(port, effIn(port))}
               />
-              <span
-                className="text-[10px] text-muted-foreground"
-                style={port.dataType && port.dataType !== 'items' ? { color: portColor(port.dataType) } : undefined}
-              >
-                {port.label}
+              <span className="text-[10px] text-muted-foreground" style={typedStyle(effIn(port))}>
+                {inLabel(port)}
               </span>
             </div>
           ))}
@@ -463,10 +475,7 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
                 {report.counts[port.id] ?? 0}
               </span>
             ) : null}
-            <span
-              className="text-[10px] text-muted-foreground"
-              style={port.dataType && port.dataType !== 'items' ? { color: portColor(port.dataType) } : undefined}
-            >
+            <span className="text-[10px] text-muted-foreground" style={typedStyle(effOut(port))}>
               {port.label}
             </span>
             <Handle
@@ -474,8 +483,8 @@ function FlowNodeView({ data, selected }: NodeProps<RFNode>) {
               type="source"
               position={Position.Right}
               className="!size-2.5 !border-border"
-              style={{ top: '50%', background: portColor(port.dataType) }}
-              title={portTitle(port)}
+              style={{ top: '50%', background: portColor(effOut(port)) }}
+              title={portTitle(port, effOut(port))}
             />
           </div>
         ))}
@@ -832,32 +841,64 @@ function FlowEditorInner() {
     [nodes],
   )
 
+  // Blender-style record propagation: trace each generic node's inbound subtype
+  // through to its outputs so sockets/wires show — and connections validate
+  // against — the effective type. Mirrors the server's validateGraph.
+  const propagatedTypes = useMemo(
+    () =>
+      propagateRecordTypes(
+        {
+          nodes: nodes.map((n) => ({ id: n.id, type: n.data.specType, position: n.position, config: n.data.config })),
+          edges: edges.map((e) => ({
+            id: e.id,
+            source: e.source,
+            sourceHandle: e.sourceHandle ?? '',
+            target: e.target,
+            targetHandle: e.targetHandle ?? '',
+          })),
+        },
+        (node) => {
+          if (node.type === 'flow.subflow') {
+            const iface = ifaceCache.get(Number(node.config.flowId))
+            return iface ? { inputs: iface.inputs, outputs: iface.outputs } : null
+          }
+          if (isEditorNode(node.type)) return null
+          const spec = specLookup.get(node.type)
+          return spec ? resolveNodePorts(spec, node.config) : null
+        },
+      ),
+    [nodes, edges],
+  )
+
   // Blender-style typed sockets: dragging onto an incompatible input is
-  // rejected live (the server re-validates on save as the backstop).
+  // rejected live (the server re-validates on save as the backstop). The source
+  // side uses its propagated (effective) type; the target its declared type.
   const isValidConnection = useCallback(
     (conn: Connection | RFEdge) => {
       const sourceNode = nodes.find((n) => n.id === conn.source)
       const targetNode = nodes.find((n) => n.id === conn.target)
       if (!sourceNode || !targetNode) return false
       if (sourceNode.type !== 'flow' || targetNode.type !== 'flow') return false
-      return portCompatible(
-        findPort(conn.source, conn.sourceHandle, 'out')?.dataType,
-        findPort(conn.target, conn.targetHandle, 'in')?.dataType,
-      )
+      const srcEff =
+        propagatedTypes.get(`${conn.source}:out:${conn.sourceHandle}`) ??
+        findPort(conn.source, conn.sourceHandle, 'out')?.dataType
+      return portCompatible(srcEff, findPort(conn.target, conn.targetHandle, 'in')?.dataType)
     },
-    [findPort, nodes],
+    [findPort, nodes, propagatedTypes],
   )
 
-  // Wires take the color of the value type they carry; items edges keep the
-  // default stroke.
+  // Wires take the color of the (propagated) type they carry; base items edges
+  // keep the default stroke.
   const styledEdges = useMemo(
     () =>
       edges.map((e) => {
-        const dataType = findPort(e.source, e.sourceHandle, 'out')?.dataType
+        const dataType =
+          propagatedTypes.get(`${e.source}:out:${e.sourceHandle}`) ??
+          findPort(e.source, e.sourceHandle, 'out')?.dataType
         if (!dataType || dataType === 'items') return e
         return { ...e, style: { ...e.style, stroke: portColor(dataType), strokeWidth: 1.5 } }
       }),
-    [edges, findPort],
+    [edges, findPort, propagatedTypes],
   )
 
   const addEditorNode = (
@@ -1437,6 +1478,7 @@ function FlowEditorInner() {
       ) : null}
 
       <div className="flow-editor-canvas relative min-h-0 flex-1">
+        <PropagatedTypesContext.Provider value={propagatedTypes}>
         <ReactFlow<RFNode, RFEdge>
           nodes={displayNodes}
           edges={styledEdges}
@@ -1477,6 +1519,7 @@ function FlowEditorInner() {
           <Background gap={24} />
           <Controls className="!bottom-4 !left-4" showInteractive={false} />
         </ReactFlow>
+        </PropagatedTypesContext.Provider>
 
         {menu ? (
           <>

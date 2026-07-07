@@ -3,7 +3,15 @@
 // editor renders after a run. Items are loose JSON records; nodes decide what
 // fields mean.
 
-import { NODE_REGISTRY, FlowItem, RunContext, portCompatible, type PortDataType } from './flowNodes.js'
+import {
+  NODE_REGISTRY,
+  FlowItem,
+  RunContext,
+  portCompatible,
+  isRecordType,
+  recordLCA,
+  type PortDataType,
+} from './flowNodes.js'
 import { executableGraph, isEditorNode } from './flowEditorMeta.js'
 
 export interface FlowNode {
@@ -81,6 +89,13 @@ export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): str
     if (!portsFor(node)) return `Unknown node type: ${node.type}`
   }
   const runnable = executableGraph(graph)
+  // Record-family type propagation (mirrors propagateRecordTypes in
+  // src/lib/flows.ts): generic nodes carry their inbound record subtype through
+  // to undeclared outputs, so save-time validation matches the editor's live
+  // socket colours. We only need effective *output* types — an edge is checked
+  // as source-effective-output vs target-declared-input.
+  const effOut = effectiveOutputs(runnable, portsFor)
+  const srcType = (nodeId: string, portId: string): PortDataType => effOut.get(`${nodeId}:${portId}`) ?? 'items'
   for (const edge of runnable.edges) {
     const source = runnable.nodes.find((n) => n.id === edge.source)
     const target = runnable.nodes.find((n) => n.id === edge.target)
@@ -93,11 +108,53 @@ export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): str
     if (!out) return `Edge ${edge.id}: ${source.type} has no output "${edge.sourceHandle}"`
     const inp = targetSpec.inputs.find((i) => i.id === edge.targetHandle)
     if (!inp) return `Edge ${edge.id}: ${target.type} has no input "${edge.targetHandle}"`
-    if (!portCompatible(out.dataType, inp.dataType))
-      return `Edge ${edge.id}: can't connect ${out.dataType ?? 'items'} output "${edge.sourceHandle}" to ${inp.dataType ?? 'items'} input "${edge.targetHandle}"`
+    const srcEff = srcType(edge.source, edge.sourceHandle)
+    if (!portCompatible(srcEff, inp.dataType))
+      return `Edge ${edge.id}: can't connect ${srcEff} output "${edge.sourceHandle}" to ${inp.dataType ?? 'items'} input "${edge.targetHandle}"`
   }
   if (topoOrder(runnable) === null) return 'Graph has a cycle'
   return null
+}
+
+/** A declared record type is "fixed" (doesn't propagate) when it's a value type
+ * or a concrete record subtype; base 'items'/undefined propagates. */
+const isFixedType = (t: PortDataType | undefined): boolean => t !== undefined && t !== 'items'
+
+/** Effective output type per port after record-family propagation, keyed
+ * `${nodeId}:${portId}`. Fixed ports keep their declared type; propagating
+ * record ports take the LCA of their inbound record types. Mirrors the output
+ * half of propagateRecordTypes in src/lib/flows.ts — keep in sync. */
+function effectiveOutputs(
+  graph: FlowGraph,
+  portsFor: (node: FlowNode) => ResolvedNodeSpec | undefined,
+): Map<string, PortDataType> {
+  const ordered = topoOrder(graph) ?? graph.nodes
+  const eff = new Map<string, PortDataType>()
+  const outEff = (nodeId: string, portId: string): PortDataType => {
+    const node = graph.nodes.find((n) => n.id === nodeId)
+    const declared = node ? portsFor(node)?.outputs.find((o) => o.id === portId)?.dataType : undefined
+    return eff.get(`${nodeId}:${portId}`) ?? declared ?? 'items'
+  }
+  for (const node of ordered) {
+    const ports = portsFor(node)
+    if (!ports) continue
+    let mergedIn: PortDataType | undefined
+    for (const inp of ports.inputs) {
+      let e: PortDataType | undefined
+      for (const edge of graph.edges) {
+        if (edge.target !== node.id || edge.targetHandle !== inp.id) continue
+        const st = outEff(edge.source, edge.sourceHandle)
+        e = e === undefined ? st : isRecordType(e) && isRecordType(st) ? recordLCA(e, st) : e
+      }
+      const effIn = e ?? inp.dataType ?? 'items'
+      if (isRecordType(effIn) && (e !== undefined || isFixedType(inp.dataType)))
+        mergedIn = mergedIn === undefined ? effIn : recordLCA(mergedIn, effIn)
+    }
+    for (const out of ports.outputs) {
+      eff.set(`${node.id}:${out.id}`, isFixedType(out.dataType) ? (out.dataType as PortDataType) : mergedIn ?? 'items')
+    }
+  }
+  return eff
 }
 
 function topoOrder(graph: FlowGraph): FlowNode[] | null {
