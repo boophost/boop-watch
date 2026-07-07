@@ -7,18 +7,41 @@ import { fetchAuth } from './api'
 export interface ConfigField {
   key: string
   label: string
-  kind: 'text' | 'number' | 'select' | 'boolean' | 'password' | 'json'
+  kind: 'text' | 'number' | 'select' | 'boolean' | 'password' | 'json' | 'color'
   options?: { value: string; label: string }[]
   default?: string | number | boolean
   help?: string
 }
 
+/** What travels over a port; omitted = 'items'. Mirrors server/flowNodes.ts. */
+export type PortDataType = 'items' | 'text' | 'number' | 'color' | 'url' | 'json' | 'embed'
+
 export interface NodePort {
   id: string
   label: string
+  dataType?: PortDataType
 }
 
-export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'boundary'
+/** Extra source types a target port accepts besides its own — keep in sync
+ * with PORT_ACCEPTS in server/flowNodes.ts (the server enforces this on save;
+ * the editor uses it to block bad connections as you drag). */
+const PORT_ACCEPTS: Record<PortDataType, PortDataType[]> = {
+  items: [],
+  text: ['number', 'url', 'color'],
+  number: [],
+  color: ['text'],
+  url: ['text'],
+  json: ['text', 'number', 'color', 'url', 'embed'],
+  embed: ['json'],
+}
+
+export function portCompatible(source: PortDataType | undefined, target: PortDataType | undefined): boolean {
+  const s = source ?? 'items'
+  const t = target ?? 'items'
+  return s === t || PORT_ACCEPTS[t].includes(s)
+}
+
+export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
 
 export interface NodeSpec {
   type: string
