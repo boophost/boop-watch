@@ -81,6 +81,14 @@ function loadScript(src: string): Promise<void> {
 }
 
 // ── localStorage helpers (playback preferences) ──
+// No element-fullscreen API (iPhone): fullscreen/PiP go through the *native*
+// video player, which presents the bare <video> layer — a DOM subtitle overlay
+// (JASSUB) can never follow it there. On these devices the selected subtitle is
+// burned into the transcode instead (?sub= on the stream URL; Jellyfin encodes
+// with libass, so styling matches). Costs a transcode restart on sub toggle,
+// which the pendingSeek restore already handles.
+const BURN_IN_SUBS = !canFullscreen()
+
 const PREF_KEY = 'bw:pref'
 type Pref = { audioLang?: string; quality?: string; subGroup?: string }
 const readPref = (): Pref => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') } catch { return {} } }
@@ -131,8 +139,10 @@ export default function Watch() {
   const epsListRef = useRef<HTMLDivElement>(null)
 
   // Load the subtitle library (JASSUB) once. A CDN hiccup is non-fatal: the
-  // player and page chrome still work; only subtitle rendering waits.
+  // player and page chrome still work; only subtitle rendering waits. Skipped
+  // where subs are burned in — JASSUB is never used there.
   useEffect(() => {
+    if (BURN_IN_SUBS) return
     let alive = true
     loadScript(JASSUB_SRC)
       .then(() => { if (alive) setSubsReady(true) })
@@ -202,17 +212,19 @@ export default function Watch() {
 
   const quality = useMemo(() => data?.quality.find((q) => q.key === qKey) || { h: 0, vb: 0, key: 'auto', label: 'Auto' }, [data, qKey])
 
-  // The HLS source. Audio + quality are muxed into the transcode, so changing
-  // them changes the URL and Vidstack reloads; position is restored on canplay.
+  // The HLS source. Audio + quality are muxed into the transcode (and on burn-in
+  // devices the subtitle track too), so changing them changes the URL and
+  // Vidstack reloads; position is restored on canplay.
   const src = useMemo(() => {
     if (!data || !selReady) return ''
     const params = new URLSearchParams()
     if (audioIndex != null && audioIndex !== '') params.set('audio', audioIndex)
     if (quality.h) params.set('h', String(quality.h))
     if (quality.vb) params.set('vb', String(quality.vb))
+    if (BURN_IN_SUBS && subIndex !== '') params.set('sub', subIndex)
     const qs = params.toString()
     return `/api/play/${encodeURIComponent(data.id)}/master.m3u8${qs ? `?${qs}` : ''}`
-  }, [data, selReady, audioIndex, quality])
+  }, [data, selReady, audioIndex, quality, subIndex])
 
   // Use our bundled hls.js (not Vidstack's CDN default) and grab the real <video>
   // element so JASSUB can render the ASS overlay onto it.
@@ -320,8 +332,9 @@ export default function Watch() {
   }
 
   // Client-side subtitles (JASSUB overlay) — independent of the transcode.
+  // Burn-in devices never reach this: their subs are in the video itself.
   useEffect(() => {
-    if (!data || !subsReady || !videoEl) return
+    if (BURN_IN_SUBS || !data || !subsReady || !videoEl) return
     if (subIndex === '') {
       if (subRef.current) { subRef.current.destroy(); subRef.current = null }
       return
@@ -441,10 +454,10 @@ export default function Watch() {
   // bails on defaultPrevented) and present the *native* video fullscreen player.
   // Only the native layer hides the browser URL bar, and it's what iOS pops into
   // picture-in-picture when the user swipes home mid-play. It presents the bare
-  // <video>, which loses JASSUB's canvas — the hidden VTT track (next effect)
-  // covers subtitles there. If the native call fails (metadata not ready), fall
-  // back to pseudo-fullscreen; Vidstack's fullscreen state never turns on, so
-  // every button press dispatches an *enter* request — hence toggle.
+  // <video> — fine here, because on these devices the subtitle track is burned
+  // into the stream (BURN_IN_SUBS). If the native call fails (metadata not
+  // ready), fall back to pseudo-fullscreen; Vidstack's fullscreen state never
+  // turns on, so every button press dispatches an *enter* request — hence toggle.
   useEffect(() => {
     if (canFullscreen()) return
     const onRequest = (e: Event) => {
@@ -460,32 +473,6 @@ export default function Watch() {
     document.addEventListener('media-enter-fullscreen-request', onRequest, true)
     return () => document.removeEventListener('media-enter-fullscreen-request', onRequest, true)
   }, [videoEl])
-
-  // Native-fullscreen subtitles (iPhone): the native player presents the bare
-  // <video>, hiding JASSUB's DOM canvas. Keep a hidden VTT copy of the selected
-  // track on the element and flip it to 'showing' only while native fullscreen
-  // is up. Appended to the raw element (not through Vidstack) so it stays out of
-  // the layout's caption menu; JASSUB remains the inline renderer.
-  useEffect(() => {
-    const v = videoEl as (HTMLVideoElement & { webkitSupportsFullscreen?: boolean }) | null
-    if (!v?.webkitSupportsFullscreen || canFullscreen() || !data || subIndex === '') return
-    const track = document.createElement('track')
-    track.kind = 'subtitles'
-    track.label = 'English'
-    track.srclang = 'en'
-    track.src = `/api/sub/${encodeURIComponent(data.id)}/${encodeURIComponent(subIndex)}?format=vtt`
-    v.appendChild(track)
-    track.track.mode = 'hidden'
-    const onBegin = () => { track.track.mode = 'showing' }
-    const onEnd = () => { track.track.mode = 'hidden' }
-    v.addEventListener('webkitbeginfullscreen', onBegin)
-    v.addEventListener('webkitendfullscreen', onEnd)
-    return () => {
-      v.removeEventListener('webkitbeginfullscreen', onBegin)
-      v.removeEventListener('webkitendfullscreen', onEnd)
-      track.remove()
-    }
-  }, [videoEl, data, subIndex])
 
   // Opt the inline video into iOS auto-PiP: leaving the browser while playing
   // pops the video out instead of pausing it (Safari honors this per element).
@@ -614,11 +601,11 @@ export default function Watch() {
             {data.subs.length > 0 && (
               <Menu kind="subs" icon="captions" title="Subtitles" label={`Subtitles: ${subLabel}`}>
                 <PopItem active={subIndex === ''} label="Off"
-                  onClick={(e) => { closeMenu(e); setSubIndex(''); savePref({ subGroup: 'off' }) }} />
+                  onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(''); savePref({ subGroup: 'off' }) }} />
                 {data.subs.map((s, i) => (
                   <PopItem key={s.index} active={String(s.index) === subIndex} label="English"
                     detail={s.group || (data.subs.length > 1 ? `Track ${i + 1}` : 'Full')}
-                    onClick={(e) => { closeMenu(e); setSubIndex(String(s.index)); savePref({ subGroup: s.group || 'on' }) }} />
+                    onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(String(s.index)); savePref({ subGroup: s.group || 'on' }) }} />
                 ))}
               </Menu>
             )}
