@@ -3683,6 +3683,34 @@ const merge: NodeImpl = {
   },
 }
 
+// Longest a Delay will actually wait — the run holds the single flow lock, so an
+// unbounded delay would block the scheduler and other runs.
+const MAX_DELAY_S = 600
+
+const delay: NodeImpl = {
+  spec: {
+    type: 'transform.delay',
+    label: 'Delay',
+    category: 'enrich',
+    description:
+      'Waits the configured time, then passes its input straight through unchanged. Waits once (not per item). A dry run skips the wait. Capped at 10 minutes — the run holds the flow lock while waiting.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [{ key: 'seconds', label: 'Delay (seconds)', kind: 'number', default: 5 }],
+  },
+  async run(inputs, config, ctx) {
+    const items = allInputs(inputs)
+    const seconds = Math.min(Math.max(0, num(config, 'seconds', 5)), MAX_DELAY_S)
+    if (ctx.dryRun) {
+      ctx.notes.push(`would wait ${seconds}s, then pass ${items.length} item(s)`)
+    } else {
+      if (seconds > 0) await new Promise((resolve) => setTimeout(resolve, seconds * 1000))
+      ctx.notes.push(`waited ${seconds}s, passed ${items.length} item(s)`)
+    }
+    return { out: items }
+  },
+}
+
 const portalSink: NodeImpl = {
   spec: {
     type: 'sink.portal-upsert',
@@ -4029,6 +4057,7 @@ const IMPLS: NodeImpl[] = [
   torrentSearch,
   diff,
   merge,
+  delay,
   portalSink,
   httpSink,
   logSink,
