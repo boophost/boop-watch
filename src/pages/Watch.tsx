@@ -99,11 +99,10 @@ export default function Watch() {
   const [error, setError] = useState('')
   const [subsReady, setSubsReady] = useState(false) // JASSUB library loaded
   const [theater, setTheater] = useState(false)
-  // Pseudo-fullscreen for iPhone: no element-fullscreen API there, so Vidstack's
-  // fullscreen button falls back to the video's *native* fullscreen — which
-  // presents the bare <video> layer and leaves the JASSUB subtitle canvas (a DOM
-  // overlay) behind. We intercept the request and fill the viewport with CSS
-  // instead (theater layout with the control bar hidden), keeping subs rendered.
+  // Pseudo-fullscreen (CSS viewport fill): last-resort fallback for devices with
+  // no element-fullscreen API where the native video fullscreen call also fails.
+  // On iPhone the fullscreen button normally goes native instead (see below) —
+  // CSS can't hide the browser URL bar or keep iOS's swipe-home pop-out working.
   const [pseudoFs, setPseudoFs] = useState(false)
   // Gate the source URL until audio/quality are initialised from the response, so
   // the player loads once with the final selection instead of reloading the
@@ -439,15 +438,60 @@ export default function Watch() {
 
   // Where element fullscreen doesn't exist (iPhone), catch Vidstack's fullscreen
   // request before its own handler runs (capture phase on document; the handler
-  // bails on defaultPrevented) and toggle pseudo-fullscreen instead. Vidstack's
-  // fullscreen state never turns on, so every button press dispatches an
-  // *enter* request — hence toggle.
+  // bails on defaultPrevented) and present the *native* video fullscreen player.
+  // Only the native layer hides the browser URL bar, and it's what iOS pops into
+  // picture-in-picture when the user swipes home mid-play. It presents the bare
+  // <video>, which loses JASSUB's canvas — the hidden VTT track (next effect)
+  // covers subtitles there. If the native call fails (metadata not ready), fall
+  // back to pseudo-fullscreen; Vidstack's fullscreen state never turns on, so
+  // every button press dispatches an *enter* request — hence toggle.
   useEffect(() => {
     if (canFullscreen()) return
-    const onRequest = (e: Event) => { e.preventDefault(); setPseudoFs((v) => !v) }
+    const onRequest = (e: Event) => {
+      e.preventDefault()
+      const v = videoEl as (HTMLVideoElement & {
+        webkitSupportsFullscreen?: boolean; webkitEnterFullscreen?: () => void
+      }) | null
+      if (v?.webkitSupportsFullscreen && v.webkitEnterFullscreen) {
+        try { v.webkitEnterFullscreen(); return } catch { /* not ready — fall through */ }
+      }
+      setPseudoFs((s) => !s)
+    }
     document.addEventListener('media-enter-fullscreen-request', onRequest, true)
     return () => document.removeEventListener('media-enter-fullscreen-request', onRequest, true)
-  }, [])
+  }, [videoEl])
+
+  // Native-fullscreen subtitles (iPhone): the native player presents the bare
+  // <video>, hiding JASSUB's DOM canvas. Keep a hidden VTT copy of the selected
+  // track on the element and flip it to 'showing' only while native fullscreen
+  // is up. Appended to the raw element (not through Vidstack) so it stays out of
+  // the layout's caption menu; JASSUB remains the inline renderer.
+  useEffect(() => {
+    const v = videoEl as (HTMLVideoElement & { webkitSupportsFullscreen?: boolean }) | null
+    if (!v?.webkitSupportsFullscreen || canFullscreen() || !data || subIndex === '') return
+    const track = document.createElement('track')
+    track.kind = 'subtitles'
+    track.label = 'English'
+    track.srclang = 'en'
+    track.src = `/api/sub/${encodeURIComponent(data.id)}/${encodeURIComponent(subIndex)}?format=vtt`
+    v.appendChild(track)
+    track.track.mode = 'hidden'
+    const onBegin = () => { track.track.mode = 'showing' }
+    const onEnd = () => { track.track.mode = 'hidden' }
+    v.addEventListener('webkitbeginfullscreen', onBegin)
+    v.addEventListener('webkitendfullscreen', onEnd)
+    return () => {
+      v.removeEventListener('webkitbeginfullscreen', onBegin)
+      v.removeEventListener('webkitendfullscreen', onEnd)
+      track.remove()
+    }
+  }, [videoEl, data, subIndex])
+
+  // Opt the inline video into iOS auto-PiP: leaving the browser while playing
+  // pops the video out instead of pausing it (Safari honors this per element).
+  useEffect(() => {
+    if (videoEl) (videoEl as HTMLVideoElement & { autoPictureInPicture?: boolean }).autoPictureInPicture = true
+  }, [videoEl])
 
   // Keyboard: 't' toggles theater, Esc exits (ignored while typing).
   useEffect(() => {
