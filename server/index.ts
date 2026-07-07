@@ -18,6 +18,7 @@ import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from '
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
+import { searchAnimeAniList } from './anilist.js'
 import { warmScope } from './jellyfin.js'
 import { getSeriesDownloadStatus, getSeriesLibraryMedia } from './downloads.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
@@ -152,10 +153,18 @@ app.get('/api/search/anime', requireAuth, async (req, res) => {
         url: a.url,
       })),
     })
-  } catch (e) {
-    console.error(e)
-    const msg = e instanceof Error ? e.message : 'Search failed'
-    res.status(502).json({ error: msg })
+  } catch (jikanErr) {
+    // Jikan is an unofficial MAL proxy and periodically can't reach MAL (504
+    // "failed to connect to MyAnimeList"). Fall back to AniList, which needs no
+    // auth and carries idMal, so results stay addable to our MAL-id catalog.
+    console.error('search: Jikan failed, trying AniList —', jikanErr)
+    try {
+      const results = await searchAnimeAniList(q)
+      res.json({ results })
+    } catch (anilistErr) {
+      console.error('search: AniList fallback also failed —', anilistErr)
+      res.status(502).json({ error: 'Anime metadata lookup is temporarily unavailable — try again shortly' })
+    }
   }
 })
 
