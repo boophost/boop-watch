@@ -702,13 +702,16 @@ const template: NodeImpl = {
         label: 'Template',
         kind: 'text',
         default: '{title}',
-        help: '{name} placeholders are replaced with the item’s field values.',
+        help: '{name} placeholders are replaced with the item’s field values. Empty = set the field to an empty value.',
       },
     ],
   },
   async run(inputs, config) {
     const field = str(config, 'field', 'query')
-    const tpl = str(config, 'template', '{title}')
+    // An explicitly empty template means "set the field to ''" (so optional
+    // component params can be left blank) — only a missing key falls back.
+    const tplRaw = config['template']
+    const tpl = typeof tplRaw === 'string' ? tplRaw : '{title}'
     const items = allInputs(inputs).map((item) => ({
       ...item,
       [field]: tpl.replace(/\{([^}]+)\}/g, (_, key: string) => String(item[key] ?? '')).trim(),
