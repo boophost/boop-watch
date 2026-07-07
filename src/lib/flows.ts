@@ -157,7 +157,7 @@ export const getFlowComponents = () =>
 
 export const getFlowInterface = (id: number) =>
   fetchAuth(`/api/flows/${id}/interface`).then((r) =>
-    json<{ interface: ComponentInterface; component: FlowComponentMeta | null }>(r),
+    json<{ interface: ComponentInterface; component: FlowComponentMeta | null; name: string }>(r),
   )
 
 export const createFlow = (name: string, description?: string) =>

@@ -268,7 +268,7 @@ flowRouter.get('/api/flows/:id/interface', (req, res) => {
   const meta = parseComponent(row.component)
   const iface = deriveInterface(id, graph, meta)
   if ('error' in iface) return res.status(400).json({ error: iface.error })
-  res.json({ interface: iface, component: meta })
+  res.json({ interface: iface, component: meta, name: row.name })
 })
 
 flowRouter.get('/api/flows/:id', (req, res) => {
