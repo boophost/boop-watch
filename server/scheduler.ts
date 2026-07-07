@@ -10,6 +10,7 @@ import {
   releaseFlowLock,
   runFlowAndRecord,
   getLastRecordedRunId,
+  fireTrigger,
 } from './flowRoutes.js'
 import { buildSpecResolver } from './flowComponents.js'
 import {
@@ -171,14 +172,35 @@ export async function runScheduleNow(sched: FlowSchedule): Promise<RunReport> {
   return report
 }
 
+// Roll a schedule's cadence forward without recording a specific run id (used
+// for name-based fires, which may fan out to several flows).
+function rollSchedule(sched: FlowSchedule, now: Date): void {
+  markScheduleFired(sched.id, {
+    last_run: now.toISOString(),
+    last_run_id: null,
+    next_run: sched.kind === 'once' ? null : computeNextRun(sched.kind, sched.spec, now),
+    enabled: sched.kind === 'once' ? false : sched.enabled,
+  })
+}
+
 async function tick(): Promise<void> {
   const due = dueSchedules(new Date().toISOString())
   if (due.length === 0) return
-  // Only one flow runs at a time; take the soonest-due and let the rest wait for
-  // the next tick. If a run is already in progress, back off entirely.
+  // Take the soonest-due; the rest wait for the next tick.
+  const sched = due[0]
+  if (sched.trigger_name) {
+    // Name-based: roll the cadence now, then publish — fireTrigger takes the
+    // flow lock per subscribing run itself (so the tick must NOT hold it).
+    rollSchedule(sched, new Date())
+    await fireTrigger(sched.trigger_name, []).catch((e) =>
+      console.error(`scheduler: fireTrigger("${sched.trigger_name}") threw`, e),
+    )
+    return
+  }
+  // Legacy flow-id schedule — one flow at a time; back off if a run is in progress.
   if (!acquireFlowLock()) return
   try {
-    await fireScheduled(due[0])
+    await fireScheduled(sched)
   } finally {
     releaseFlowLock()
   }

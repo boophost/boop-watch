@@ -84,6 +84,7 @@ type RFNode = Node<FlowNodeData, 'flow' | 'sticky' | 'arrow' | 'group'>
 type RFEdge = Edge
 
 const CATEGORY_DOT: Record<NodeCategory, string> = {
+  trigger: 'bg-lime-400',
   source: 'bg-violet-400',
   filter: 'bg-sky-400',
   enrich: 'bg-amber-400',
@@ -94,6 +95,7 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
 }
 
 const CATEGORY_LABEL: Record<NodeCategory, string> = {
+  trigger: 'Trigger',
   source: 'Source',
   filter: 'Filter',
   enrich: 'Enrich',
@@ -103,7 +105,7 @@ const CATEGORY_LABEL: Record<NodeCategory, string> = {
   boundary: 'Boundary',
 }
 
-const NODE_CATEGORIES: NodeCategory[] = ['source', 'filter', 'enrich', 'combine', 'sink', 'value', 'boundary']
+const NODE_CATEGORIES: NodeCategory[] = ['trigger', 'source', 'filter', 'enrich', 'combine', 'sink', 'value', 'boundary']
 
 /** Handle/wire color per port data type. Base 'items' keeps the neutral gray
  * the editor always had (it's genuinely "any record"); the record subtypes get

@@ -191,7 +191,7 @@ export function propagateRecordTypes(
   return eff
 }
 
-export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
+export type NodeCategory = 'trigger' | 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
 
 export interface NodeSpec {
   type: string
@@ -495,6 +495,7 @@ export type ScheduleSpec =
 export interface FlowSchedule {
   id: number
   flow_id: number
+  trigger_name: string | null // when set, fires this trigger name (not flow_id)
   flow_name: string | null
   name: string | null
   kind: ScheduleKind
@@ -509,16 +510,22 @@ export interface FlowSchedule {
   updated_at: string
 }
 
-// Shape sent to POST/PUT /api/schedules. flowId + kind + spec are required on
-// create; every field is optional on update.
+// Shape sent to POST/PUT /api/schedules. A target (triggerName preferred, or the
+// legacy flowId) + kind + spec are required on create; every field is optional on
+// update.
 export interface ScheduleInput {
-  flowId: number
+  flowId?: number
+  triggerName?: string | null
   name?: string | null
   kind: ScheduleKind
   spec: ScheduleSpec
   dryRun?: boolean
   enabled?: boolean
 }
+
+// Distinct trigger.start names across all flows (schedule target picker).
+export const getTriggers = () =>
+  fetchAuth('/api/flows/triggers').then((r) => json<{ triggers: string[] }>(r).then((d) => d.triggers))
 
 export const listSchedules = () =>
   fetchAuth('/api/schedules').then((r) => json<{ schedules: FlowSchedule[] }>(r))
