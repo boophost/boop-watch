@@ -462,8 +462,8 @@ const httpSink: NodeImpl = {
     label: 'Send web request',
     category: 'sink',
     description:
-      'Delivers each item to a URL (webhook-style) — or all items as one JSON array request.',
-    inputs: [{ id: 'in', label: 'in' }],
+      'Sends one HTTP request per incoming item (webhook-style) — or all items batched into one JSON array request.',
+    inputs: [{ id: 'in', label: 'items to send' }],
     outputs: [
       { id: 'sent', label: 'sent' },
       { id: 'failed', label: 'failed' },
