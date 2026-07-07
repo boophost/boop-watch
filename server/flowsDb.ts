@@ -70,6 +70,21 @@ function db() {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      -- Event-trigger watermark: which events (item ids / airing keys) an event
+      -- trigger has already fired for, so the watcher (server/scheduler.ts)
+      -- doesn't re-fire. See triggerStateHas/Add.
+      CREATE TABLE IF NOT EXISTS trigger_state (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (kind, key)
+      );
+      -- Marks that an event-trigger kind's first watcher pass has seeded current
+      -- state (so a deploy doesn't fire for the whole existing library at once).
+      CREATE TABLE IF NOT EXISTS trigger_seeded (
+        kind TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `)
     const cols = instance.prepare(`PRAGMA table_info(flows)`).all() as { name: string }[]
     if (!cols.some((c) => c.name === 'component')) {
@@ -377,6 +392,55 @@ export function listTriggerNames(): string[] {
   const names = new Set<string>()
   for (const f of listFlowGraphs()) for (const n of triggerNamesOf(f.graph)) names.add(n)
   return [...names].sort()
+}
+
+// Does a graph contain a node of the given type? (event-trigger subscriber check)
+function graphHasNodeType(graphJson: string, type: string): boolean {
+  try {
+    const g = JSON.parse(graphJson) as { nodes?: { type?: string }[] }
+    return (g.nodes ?? []).some((n) => n.type === type)
+  } catch {
+    return false
+  }
+}
+
+// Flows whose graph contains a node of the given type — the subscribers an event
+// trigger (trigger.new-item / trigger.release) fires (server/flowRoutes.ts).
+export function flowsWithTriggerType(type: string): { id: number; name: string; graph: string }[] {
+  return listFlowGraphs().filter((f) => graphHasNodeType(f.graph, type))
+}
+
+// --- Event-trigger watermark state ---------------------------------------
+// Records which events an event trigger has already fired for, so a watcher
+// tick doesn't re-fire (see server/scheduler.ts). `kind` is the trigger kind
+// ('new-item' | 'release'); `key` identifies the event (item id / airing key).
+
+export function triggerStateHas(kind: string, key: string): boolean {
+  return (
+    db().prepare('SELECT 1 FROM trigger_state WHERE kind = ? AND key = ?').get(kind, key) !== undefined
+  )
+}
+
+export function triggerStateAdd(kind: string, keys: string[]): void {
+  if (keys.length === 0) return
+  const stmt = db().prepare('INSERT OR IGNORE INTO trigger_state (kind, key) VALUES (?, ?)')
+  const tx = db().transaction((ks: string[]) => {
+    for (const k of ks) stmt.run(kind, k)
+  })
+  tx(keys)
+}
+
+// True once a kind has been seeded — the first watcher pass records current
+// state without firing (so a deploy doesn't fire for the whole existing library
+// / everything already aired this week).
+export function triggerStateSeeded(kind: string): boolean {
+  return (
+    db().prepare('SELECT 1 FROM trigger_seeded WHERE kind = ?').get(kind) !== undefined
+  )
+}
+
+export function markTriggerSeeded(kind: string): void {
+  db().prepare('INSERT OR IGNORE INTO trigger_seeded (kind) VALUES (?)').run(kind)
 }
 
 export function parseComponent(raw: string | null): FlowComponentMeta | null {
