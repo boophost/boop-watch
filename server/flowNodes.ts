@@ -279,11 +279,17 @@ const CONTENT_TYPE_OPTIONS = [
   { value: 'text', label: 'Plain text' },
 ]
 
+// Placeholder lookup: a literal key wins, otherwise a dot path digs into
+// nested values ({response.data.title}) so JSON built by one node is
+// addressable by the next.
+const fieldValue = (item: FlowItem, key: string): unknown =>
+  key in item ? item[key] : key.includes('.') ? digPath(item, key) : undefined
+
 // Placeholders are restricted to word characters ({title}, {mal_id}) so JSON
 // braces in a body/headers template are never mistaken for one.
 function fillTemplate(tpl: string, item: FlowItem, escape: 'none' | 'url' | 'json'): string {
   return tpl.replace(/\{([\w.]+)\}/g, (_, key: string) => {
-    const raw = item[key]
+    const raw = fieldValue(item, key)
     const v = raw == null ? '' : typeof raw === 'object' ? JSON.stringify(raw) : String(raw)
     if (escape === 'url') return encodeURIComponent(v)
     if (escape === 'json') return JSON.stringify(v).slice(1, -1)
@@ -313,7 +319,7 @@ function templateHeaders(raw: string, item: FlowItem): Record<string, string> {
 function fillJsonTemplate(node: unknown, item: FlowItem): unknown {
   if (typeof node === 'string') {
     const exact = node.match(/^\{([\w.]+)\}$/)
-    if (exact) return item[exact[1]] ?? null
+    if (exact) return fieldValue(item, exact[1]) ?? null
     return fillTemplate(node, item, 'none')
   }
   if (Array.isArray(node)) return node.map((v) => fillJsonTemplate(v, item))
@@ -696,17 +702,334 @@ const template: NodeImpl = {
         label: 'Template',
         kind: 'text',
         default: '{title}',
-        help: '{name} placeholders are replaced with the item’s field values.',
+        help: '{name} placeholders are replaced with the item’s field values. Empty = set the field to an empty value.',
       },
     ],
   },
   async run(inputs, config) {
     const field = str(config, 'field', 'query')
-    const tpl = str(config, 'template', '{title}')
+    // An explicitly empty template means "set the field to ''" (so optional
+    // component params can be left blank) — only a missing key falls back.
+    const tplRaw = config['template']
+    const tpl = typeof tplRaw === 'string' ? tplRaw : '{title}'
     const items = allInputs(inputs).map((item) => ({
       ...item,
       [field]: tpl.replace(/\{([^}]+)\}/g, (_, key: string) => String(item[key] ?? '')).trim(),
     }))
+    return { items }
+  },
+}
+
+// ---------------------------------------------------------------------------
+// JSON-builder nodes: transform.json shapes a typed JSON value onto each item,
+// combine.collect folds a field from many items into one array field, and
+// transform.discord-embed emits a Discord-format embed object. Together they
+// compose webhook payloads (a Discord message carries up to 10 embeds).
+// ---------------------------------------------------------------------------
+
+const isEmptyValue = (v: unknown): boolean => {
+  if (v == null || v === '') return true
+  if (Array.isArray(v)) return v.length === 0
+  if (typeof v === 'object') return Object.keys(v).length === 0
+  return false
+}
+
+/** Recursively drops empty values (null, "", empty objects/arrays) so optional
+ * JSON keys disappear instead of being sent as null. 0 and false survive. */
+function pruneEmpty(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(pruneEmpty).filter((v) => !isEmptyValue(v))
+  if (node && typeof node === 'object') {
+    return Object.fromEntries(
+      Object.entries(node)
+        .map(([k, v]) => [k, pruneEmpty(v)] as const)
+        .filter(([, v]) => !isEmptyValue(v)),
+    )
+  }
+  return node
+}
+
+const setJson: NodeImpl = {
+  spec: {
+    type: 'transform.json',
+    label: 'Set field from JSON',
+    category: 'enrich',
+    description:
+      'Builds a JSON value from a typed template and stores it in a field — the JSON companion to "Set field from template". Use it to shape webhook payloads.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'field', label: 'Set field', kind: 'text', default: 'payload' },
+      {
+        key: 'template',
+        label: 'JSON template',
+        kind: 'json',
+        default: '{}',
+        help: 'JSON mixing literal defaults with item fields: a value that is exactly "{field}" takes the item’s raw value (objects/arrays/numbers keep their type, dot paths reach into nested values); other strings can mix text and {field}.',
+      },
+      {
+        key: 'dropEmpty',
+        label: 'Drop empty values',
+        kind: 'boolean',
+        default: true,
+        help: 'Remove null / "" / empty object-or-array values after filling, so optional keys vanish instead of being sent as null.',
+      },
+    ],
+  },
+  async run(inputs, config) {
+    const field = str(config, 'field', 'payload')
+    const raw = str(config, 'template', '')
+    if (!raw) throw new Error('JSON template is required')
+    let tpl: unknown
+    try {
+      tpl = JSON.parse(raw)
+    } catch {
+      throw new Error(
+        'Template must be valid JSON — placeholders live inside strings, e.g. {"content": "{title}"}',
+      )
+    }
+    const drop = bool(config, 'dropEmpty', true)
+    const items = allInputs(inputs).map((item) => {
+      const value = fillJsonTemplate(tpl, item)
+      return { ...item, [field]: drop ? pruneEmpty(value) : value }
+    })
+    return { items }
+  },
+}
+
+const collect: NodeImpl = {
+  spec: {
+    type: 'combine.collect',
+    label: 'Collect into list',
+    category: 'combine',
+    description:
+      'Folds many items into few: gathers a field’s value from every incoming item into one array field, optionally grouped by a key and chunked (e.g. 10 embeds per Discord message). The emitted item keeps the chunk’s first item’s other fields.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'items', label: 'items' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      {
+        key: 'field',
+        label: 'Collect field',
+        kind: 'text',
+        default: 'embed',
+        help: 'Field taken from each item; items without it exit "skipped". Empty = collect whole items.',
+      },
+      { key: 'into', label: 'Into list field', kind: 'text', default: 'embeds' },
+      {
+        key: 'groupBy',
+        label: 'Group by',
+        kind: 'text',
+        default: '',
+        help: 'Key field: one output item per distinct value. Empty = everything into one.',
+      },
+      {
+        key: 'max',
+        label: 'Max per item',
+        kind: 'number',
+        default: 10,
+        help: 'A group with more values than this emits multiple chunked items (Discord allows 10 embeds per message). 0 = unlimited.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', '')
+    const into = str(config, 'into', 'embeds')
+    const groupBy = str(config, 'groupBy', '')
+    const max = Math.max(0, Math.floor(num(config, 'max', 10)))
+
+    const skipped: FlowItem[] = []
+    const groups = new Map<string, FlowItem[]>()
+    for (const item of allInputs(inputs)) {
+      if (field && item[field] == null) {
+        skipped.push(item)
+        continue
+      }
+      const key = groupBy ? String(item[groupBy] ?? '') : ''
+      const group = groups.get(key) ?? []
+      group.push(item)
+      groups.set(key, group)
+    }
+
+    const out: FlowItem[] = []
+    for (const members of groups.values()) {
+      const size = max > 0 ? max : members.length
+      for (let i = 0; i < members.length; i += size) {
+        const chunk = members.slice(i, i + size)
+        const base = { ...chunk[0] }
+        if (field) delete base[field]
+        out.push({ ...base, [into]: chunk.map((it) => (field ? it[field] : { ...it })) })
+      }
+    }
+    ctx.notes.push(
+      `${out.length} item(s) from ${groups.size} group(s)` +
+        (skipped.length ? `, ${skipped.length} skipped (no "${field}")` : ''),
+    )
+    return { items: out, skipped }
+  },
+}
+
+// Discord embed hard limits — values are truncated and field lists capped so a
+// long overview can't 400 the whole webhook.
+const EMBED_LIMITS = {
+  title: 256,
+  description: 4096,
+  footer: 2048,
+  author: 256,
+  fieldName: 256,
+  fieldValue: 1024,
+  fields: 25,
+  total: 6000,
+}
+
+const truncate = (s: string, max: number): string =>
+  s.length <= max ? s : s.slice(0, max - 1) + '…'
+
+/** Discord wants colors as a decimal int; accept "#7c5cff", "7c5cff", or a number. */
+function parseEmbedColor(s: string): number | undefined {
+  const hex = s.match(/^#?([0-9a-f]{6})$/i)
+  if (hex) return parseInt(hex[1], 16)
+  const n = Number(s)
+  return Number.isFinite(n) && n >= 0 && n <= 0xffffff ? Math.floor(n) : undefined
+}
+
+const asHttpUrl = (s: string): string => {
+  try {
+    const u = new URL(s)
+    return u.protocol === 'http:' || u.protocol === 'https:' ? s : ''
+  } catch {
+    return ''
+  }
+}
+
+const discordEmbed: NodeImpl = {
+  spec: {
+    type: 'transform.discord-embed',
+    label: 'Discord embed',
+    category: 'enrich',
+    description:
+      'Builds a Discord-format embed object from the item’s fields and stores it in a field. Every value is a {field} template; empty values are omitted and Discord’s size limits are enforced. Collect embeds into a list and send via "Send web request".',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'field', label: 'Store in field', kind: 'text', default: 'embed' },
+      { key: 'title', label: 'Title', kind: 'text', default: '{title}' },
+      { key: 'description', label: 'Description', kind: 'text', default: '' },
+      { key: 'url', label: 'Title link URL', kind: 'text', default: '' },
+      {
+        key: 'color',
+        label: 'Color',
+        kind: 'text',
+        default: '',
+        help: 'Hex like #7c5cff (or a {field}); left bar of the embed.',
+      },
+      { key: 'imageUrl', label: 'Image URL', kind: 'text', default: '', help: 'Large image below the text.' },
+      { key: 'thumbnailUrl', label: 'Thumbnail URL', kind: 'text', default: '', help: 'Small image top-right.' },
+      { key: 'authorName', label: 'Author name', kind: 'text', default: '' },
+      { key: 'authorUrl', label: 'Author link URL', kind: 'text', default: '' },
+      { key: 'authorIconUrl', label: 'Author icon URL', kind: 'text', default: '' },
+      { key: 'footerText', label: 'Footer text', kind: 'text', default: '' },
+      { key: 'footerIconUrl', label: 'Footer icon URL', kind: 'text', default: '' },
+      {
+        key: 'timestamp',
+        label: 'Timestamp',
+        kind: 'text',
+        default: '',
+        help: '"now", a {field} holding a date, or empty for none.',
+      },
+      {
+        key: 'embedFields',
+        label: 'Fields (JSON)',
+        kind: 'json',
+        default: '',
+        help: 'JSON array of {"name", "value", "inline"} rows; name/value are templates. Rows whose name or value fills empty are dropped. Max 25.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const outField = str(config, 'field', 'embed')
+    const fieldsRaw = str(config, 'embedFields', '')
+    let fieldRows: unknown[] = []
+    if (fieldsRaw) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(fieldsRaw)
+      } catch {
+        throw new Error('Fields must be a JSON array, e.g. [{"name": "Episode", "value": "{episode}"}]')
+      }
+      if (!Array.isArray(parsed)) throw new Error('Fields must be a JSON array of {name, value} rows')
+      fieldRows = parsed
+    }
+
+    let empty = 0
+    const items = allInputs(inputs).map((item) => {
+      const fill = (key: string): string => fillTemplate(str(config, key, ''), item, 'none').trim()
+
+      const embed: Record<string, unknown> = {}
+      const title = truncate(fill('title'), EMBED_LIMITS.title)
+      if (title) embed.title = title
+      let description = truncate(fill('description'), EMBED_LIMITS.description)
+      if (description) embed.description = description
+      const url = asHttpUrl(fill('url'))
+      if (url && title) embed.url = url // Discord ignores a url without a title
+      const color = fill('color')
+      if (color) {
+        const parsed = parseEmbedColor(color)
+        if (parsed !== undefined) embed.color = parsed
+      }
+      const imageUrl = asHttpUrl(fill('imageUrl'))
+      if (imageUrl) embed.image = { url: imageUrl }
+      const thumbnailUrl = asHttpUrl(fill('thumbnailUrl'))
+      if (thumbnailUrl) embed.thumbnail = { url: thumbnailUrl }
+      const authorName = truncate(fill('authorName'), EMBED_LIMITS.author)
+      if (authorName) {
+        embed.author = pruneEmpty({
+          name: authorName,
+          url: asHttpUrl(fill('authorUrl')),
+          icon_url: asHttpUrl(fill('authorIconUrl')),
+        })
+      }
+      const footerText = truncate(fill('footerText'), EMBED_LIMITS.footer)
+      if (footerText) {
+        embed.footer = pruneEmpty({ text: footerText, icon_url: asHttpUrl(fill('footerIconUrl')) })
+      }
+      const tsRaw = fill('timestamp')
+      if (tsRaw) {
+        const date = tsRaw.toLowerCase() === 'now' ? new Date() : new Date(tsRaw)
+        if (!Number.isNaN(date.getTime())) embed.timestamp = date.toISOString()
+      }
+      const rows = fieldRows
+        .map((row) => fillJsonTemplate(row, item))
+        .filter((row): row is Record<string, unknown> => !!row && typeof row === 'object' && !Array.isArray(row))
+        .map((row) => ({
+          name: truncate(String(row.name ?? '').trim(), EMBED_LIMITS.fieldName),
+          value: truncate(String(row.value ?? '').trim(), EMBED_LIMITS.fieldValue),
+          inline: row.inline === true || row.inline === 'true',
+        }))
+        .filter((row) => row.name && row.value)
+        .slice(0, EMBED_LIMITS.fields)
+      if (rows.length > 0) embed.fields = rows
+
+      // Discord also caps the *combined* text of an embed; shrink the
+      // description first since it's the usual offender.
+      const textSize = () =>
+        [title, description, footerText, authorName].join('').length +
+        rows.reduce((n, row) => n + row.name.length + row.value.length, 0)
+      if (embed.description && textSize() > EMBED_LIMITS.total) {
+        const excess = textSize() - EMBED_LIMITS.total
+        description = truncate(description, Math.max(0, description.length - excess - 1))
+        if (description) embed.description = description
+        else delete embed.description
+      }
+
+      if (Object.keys(embed).length === 0) {
+        empty++
+        return item
+      }
+      return { ...item, [outField]: embed }
+    })
+    if (empty > 0) ctx.notes.push(`${empty} item(s) produced an empty embed — field not set`)
     return { items }
   },
 }
@@ -3187,6 +3510,9 @@ const IMPLS: NodeImpl[] = [
   indexerMatch,
   jikanEnrich,
   template,
+  setJson,
+  discordEmbed,
+  collect,
   animeStatus,
   torrentSearch,
   diff,
