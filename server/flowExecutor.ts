@@ -3,7 +3,7 @@
 // editor renders after a run. Items are loose JSON records; nodes decide what
 // fields mean.
 
-import { NODE_REGISTRY, FlowItem, RunContext } from './flowNodes.js'
+import { NODE_REGISTRY, FlowItem, RunContext, portCompatible, type PortDataType } from './flowNodes.js'
 
 export interface FlowNode {
   id: string
@@ -47,7 +47,7 @@ export interface RunReport {
 
 const SAMPLE_SIZE = 3
 
-export type NodePortSpec = { id: string }
+export type NodePortSpec = { id: string; dataType?: PortDataType }
 export type ResolvedNodeSpec = { inputs: NodePortSpec[]; outputs: NodePortSpec[] }
 
 /**
@@ -78,10 +78,12 @@ export function validateGraph(graph: FlowGraph, resolveSpec?: SpecResolver): str
     const sourceSpec = resolveSpec?.(source) ?? NODE_REGISTRY.get(source.type)?.spec
     const targetSpec = resolveSpec?.(target) ?? NODE_REGISTRY.get(target.type)?.spec
     if (!sourceSpec || !targetSpec) return `Unknown node type on edge ${edge.id}`
-    if (!sourceSpec.outputs.some((o) => o.id === edge.sourceHandle))
-      return `Edge ${edge.id}: ${source.type} has no output "${edge.sourceHandle}"`
-    if (!targetSpec.inputs.some((i) => i.id === edge.targetHandle))
-      return `Edge ${edge.id}: ${target.type} has no input "${edge.targetHandle}"`
+    const out = sourceSpec.outputs.find((o) => o.id === edge.sourceHandle)
+    if (!out) return `Edge ${edge.id}: ${source.type} has no output "${edge.sourceHandle}"`
+    const inp = targetSpec.inputs.find((i) => i.id === edge.targetHandle)
+    if (!inp) return `Edge ${edge.id}: ${target.type} has no input "${edge.targetHandle}"`
+    if (!portCompatible(out.dataType, inp.dataType))
+      return `Edge ${edge.id}: can't connect ${out.dataType ?? 'items'} output "${edge.sourceHandle}" to ${inp.dataType ?? 'items'} input "${edge.targetHandle}"`
   }
   if (topoOrder(graph) === null) return 'Graph has a cycle'
   return null

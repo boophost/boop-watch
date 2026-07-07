@@ -24,19 +24,65 @@ export type FlowItem = Record<string, unknown>
 export interface ConfigField {
   key: string
   label: string
-  /** 'json' renders as a multi-line editor in the flow editor. */
-  kind: 'text' | 'number' | 'select' | 'boolean' | 'password' | 'json'
+  /** 'json' renders as a multi-line editor in the flow editor; 'color' as a color picker. */
+  kind: 'text' | 'number' | 'select' | 'boolean' | 'password' | 'json' | 'color'
   options?: { value: string; label: string }[]
   default?: string | number | boolean
   help?: string
 }
 
+/**
+ * What travels over a port. 'items' is the classic stream of loose records;
+ * every other type is a *value* port — its items are `{ value: <raw> }`
+ * wrappers so the executor can move them like any other stream. Edges only
+ * connect compatible types (see portCompatible), and the editor color-codes
+ * handles and wires by type.
+ */
+export type PortDataType = 'items' | 'text' | 'number' | 'color' | 'url' | 'json' | 'embed'
+
 export interface NodePort {
   id: string
   label: string
+  /** Omitted = 'items'. */
+  dataType?: PortDataType
 }
 
-export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'boundary'
+/** Extra source types a target port accepts besides its own. 'items' never
+ * mixes with value types; 'json' is the wide value type; text-ish values
+ * cross-connect where a runtime parse/stringify is safe. */
+const PORT_ACCEPTS: Record<PortDataType, PortDataType[]> = {
+  items: [],
+  text: ['number', 'url', 'color'],
+  number: [],
+  color: ['text'],
+  url: ['text'],
+  json: ['text', 'number', 'color', 'url', 'embed'],
+  embed: ['json'],
+}
+
+export function portCompatible(
+  source: PortDataType | undefined,
+  target: PortDataType | undefined,
+): boolean {
+  const s = source ?? 'items'
+  const t = target ?? 'items'
+  return s === t || PORT_ACCEPTS[t].includes(s)
+}
+
+/** Unwraps a value port's items back to raw values ({ value: x } -> x). */
+const socketValues = (items: FlowItem[] | undefined): unknown[] =>
+  (items ?? []).map((it) =>
+    it && typeof it === 'object' && 'value' in it ? (it as { value: unknown }).value : it,
+  )
+
+/** Pairing rule for value inputs: one value broadcasts to every item, N values
+ * zip by index (clamped to the last, so a short wire doesn't drop items). */
+const pickValue = (vals: unknown[], idx: number): unknown =>
+  vals.length === 0 ? undefined : vals[Math.min(idx, vals.length - 1)]
+
+const asValueItems = (vals: unknown[]): FlowItem[] => vals.map((value) => ({ value }))
+
+export type NodeCategory = 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
 
 export interface NodeSpec {
   type: string
@@ -694,7 +740,10 @@ const template: NodeImpl = {
     description:
       'Sets a field by filling a template with the item’s own values, e.g. "{title} 1080p".',
     inputs: [{ id: 'in', label: 'in' }],
-    outputs: [{ id: 'items', label: 'items' }],
+    outputs: [
+      { id: 'items', label: 'items' },
+      { id: 'text', label: 'text', dataType: 'text' },
+    ],
     config: [
       { key: 'field', label: 'Set field', kind: 'text', default: 'query' },
       {
@@ -702,7 +751,7 @@ const template: NodeImpl = {
         label: 'Template',
         kind: 'text',
         default: '{title}',
-        help: '{name} placeholders are replaced with the item’s field values. Empty = set the field to an empty value.',
+        help: '{name} placeholders are replaced with the item’s field values. Empty = set the field to an empty value. The "text" output emits each filled string as a text value.',
       },
     ],
   },
@@ -712,19 +761,105 @@ const template: NodeImpl = {
     // component params can be left blank) — only a missing key falls back.
     const tplRaw = config['template']
     const tpl = typeof tplRaw === 'string' ? tplRaw : '{title}'
-    const items = allInputs(inputs).map((item) => ({
-      ...item,
-      [field]: tpl.replace(/\{([^}]+)\}/g, (_, key: string) => String(item[key] ?? '')).trim(),
-    }))
-    return { items }
+    const filled = allInputs(inputs).map(
+      (item) => tpl.replace(/\{([^}]+)\}/g, (_, key: string) => String(item[key] ?? '')).trim(),
+    )
+    const items = allInputs(inputs).map((item, i) => ({ ...item, [field]: filled[i] }))
+    return { items, text: asValueItems(filled) }
   },
 }
 
 // ---------------------------------------------------------------------------
+// Value literal nodes: each emits a single constant on a typed value port, so
+// graphs can wire "the color", "the bot name", … into a socket instead of
+// burying it in another node's config. One value broadcasts to every item on
+// the receiving side (see pickValue).
+// ---------------------------------------------------------------------------
+
+const valueLiteral = (
+  type: string,
+  label: string,
+  dataType: PortDataType,
+  field: ConfigField,
+  parse: (raw: string) => unknown,
+): NodeImpl => ({
+  spec: {
+    type,
+    label,
+    category: 'value',
+    description: `A constant ${dataType} value, emitted on a typed port. Wire it into a matching (${dataType}) input socket.`,
+    inputs: [],
+    outputs: [{ id: 'value', label: dataType, dataType }],
+    config: [field],
+  },
+  async run(_inputs, config) {
+    const raw = str(config, 'value', String(field.default ?? ''))
+    return { value: asValueItems([parse(raw)]) }
+  },
+})
+
+const textValue = valueLiteral(
+  'value.text',
+  'Text',
+  'text',
+  { key: 'value', label: 'Text', kind: 'text', default: '' },
+  (raw) => raw,
+)
+
+const numberValue = valueLiteral(
+  'value.number',
+  'Number',
+  'number',
+  { key: 'value', label: 'Number', kind: 'number', default: 0 },
+  (raw) => {
+    const n = Number(raw)
+    if (!Number.isFinite(n)) throw new Error(`Not a number: ${raw}`)
+    return n
+  },
+)
+
+const colorValue = valueLiteral(
+  'value.color',
+  'Color',
+  'color',
+  { key: 'value', label: 'Color', kind: 'color', default: '#7c5cff' },
+  (raw) => {
+    if (!/^#?[0-9a-f]{6}$/i.test(raw)) throw new Error(`Not a hex color: ${raw}`)
+    return raw.startsWith('#') ? raw : `#${raw}`
+  },
+)
+
+const jsonValue = valueLiteral(
+  'value.json',
+  'JSON',
+  'json',
+  { key: 'value', label: 'JSON', kind: 'json', default: '{}' },
+  (raw) => {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      throw new Error('Not valid JSON')
+    }
+  },
+)
+
+const urlValue = valueLiteral(
+  'value.url',
+  'URL',
+  'url',
+  { key: 'value', label: 'URL', kind: 'text', default: '' },
+  (raw) => {
+    if (raw && !asHttpUrl(raw)) throw new Error(`Not an http(s) URL: ${raw}`)
+    return raw
+  },
+)
+
+// ---------------------------------------------------------------------------
 // JSON-builder nodes: transform.json shapes a typed JSON value onto each item,
 // combine.collect folds a field from many items into one array field, and
-// transform.discord-embed emits a Discord-format embed object. Together they
-// compose webhook payloads (a Discord message carries up to 10 embeds).
+// transform.discord-embed emits a Discord-format embed object (with typed
+// value sockets for its parts). combine.discord-message assembles embeds +
+// content into webhook payloads (a Discord message carries up to 10 embeds).
 // ---------------------------------------------------------------------------
 
 const isEmptyValue = (v: unknown): boolean => {
@@ -909,9 +1044,21 @@ const discordEmbed: NodeImpl = {
     label: 'Discord embed',
     category: 'enrich',
     description:
-      'Builds a Discord-format embed object from the item’s fields and stores it in a field. Every value is a {field} template; empty values are omitted and Discord’s size limits are enforced. Collect embeds into a list and send via "Send web request".',
-    inputs: [{ id: 'in', label: 'in' }],
-    outputs: [{ id: 'items', label: 'items' }],
+      'Builds a Discord-format embed object per item. Each part is a {field} template in config, or wired into its typed socket (a wired value overrides config; one value applies to every item). Empty values are omitted and Discord’s size limits are enforced. Feed "embeds" into a Discord message node.',
+    inputs: [
+      { id: 'in', label: 'in' },
+      { id: 'title', label: 'title', dataType: 'text' },
+      { id: 'description', label: 'description', dataType: 'text' },
+      { id: 'url', label: 'link', dataType: 'url' },
+      { id: 'color', label: 'color', dataType: 'color' },
+      { id: 'imageUrl', label: 'image', dataType: 'url' },
+      { id: 'thumbnailUrl', label: 'thumbnail', dataType: 'url' },
+      { id: 'footerText', label: 'footer', dataType: 'text' },
+    ],
+    outputs: [
+      { id: 'items', label: 'items' },
+      { id: 'embeds', label: 'embeds', dataType: 'embed' },
+    ],
     config: [
       { key: 'field', label: 'Store in field', kind: 'text', default: 'embed' },
       { key: 'title', label: 'Title', kind: 'text', default: '{title}' },
@@ -962,9 +1109,18 @@ const discordEmbed: NodeImpl = {
       fieldRows = parsed
     }
 
+    // Typed value sockets — a wired value beats the config template.
+    const SOCKETS = ['title', 'description', 'url', 'color', 'imageUrl', 'thumbnailUrl', 'footerText'] as const
+    const wired = Object.fromEntries(SOCKETS.map((id) => [id, socketValues(inputs[id])]))
+
     let empty = 0
-    const items = allInputs(inputs).map((item) => {
-      const fill = (key: string): string => fillTemplate(str(config, key, ''), item, 'none').trim()
+    const embeds: FlowItem[] = []
+    const items = (inputs.in ?? []).map((item, idx) => {
+      const fill = (key: string): string => {
+        const socket = pickValue(wired[key] ?? [], idx)
+        if (socket !== undefined && socket !== null && socket !== '') return String(socket).trim()
+        return fillTemplate(str(config, key, ''), item, 'none').trim()
+      }
 
       const embed: Record<string, unknown> = {}
       const title = truncate(fill('title'), EMBED_LIMITS.title)
@@ -1027,10 +1183,78 @@ const discordEmbed: NodeImpl = {
         empty++
         return item
       }
+      embeds.push(embed)
       return { ...item, [outField]: embed }
     })
     if (empty > 0) ctx.notes.push(`${empty} item(s) produced an empty embed — field not set`)
-    return { items }
+    return { items, embeds: asValueItems(embeds) }
+  },
+}
+
+const discordMessage: NodeImpl = {
+  spec: {
+    type: 'combine.discord-message',
+    label: 'Discord message',
+    category: 'combine',
+    description:
+      'Assembles Discord webhook payloads from typed sockets: embeds in batches (up to 10 per message), with message text, bot name, and avatar wired in or set in config. Emits one item per message carrying the payload — send with "Send web request" (body: "{payload}").',
+    inputs: [
+      { id: 'embeds', label: 'embeds', dataType: 'embed' },
+      { id: 'content', label: 'content', dataType: 'text' },
+      { id: 'username', label: 'bot name', dataType: 'text' },
+      { id: 'avatar_url', label: 'avatar', dataType: 'url' },
+    ],
+    outputs: [{ id: 'messages', label: 'messages' }],
+    config: [
+      { key: 'field', label: 'Store in field', kind: 'text', default: 'payload' },
+      {
+        key: 'content',
+        label: 'Message text',
+        kind: 'text',
+        default: '',
+        help: 'Plain text above the embeds (used when the content socket is not wired). Max 2000 chars.',
+      },
+      { key: 'username', label: 'Bot name', kind: 'text', default: '', help: 'Overrides the webhook’s default name.' },
+      { key: 'avatarUrl', label: 'Bot avatar URL', kind: 'text', default: '' },
+      {
+        key: 'maxEmbeds',
+        label: 'Embeds per message',
+        kind: 'number',
+        default: 10,
+        help: 'Discord’s cap is 10; more embeds become additional messages.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'payload')
+    const maxEmbeds = Math.min(10, Math.max(1, Math.floor(num(config, 'maxEmbeds', 10))))
+
+    const socketFirst = (id: string, fallback: string): string => {
+      const v = socketValues(inputs[id])[0]
+      return v !== undefined && v !== null && v !== '' ? String(v) : fallback
+    }
+    const content = truncate(socketFirst('content', str(config, 'content', '')), 2000)
+    const username = socketFirst('username', str(config, 'username', ''))
+    const avatarUrl = asHttpUrl(socketFirst('avatar_url', str(config, 'avatarUrl', '')))
+
+    const embeds = socketValues(inputs.embeds).filter(
+      (e): e is Record<string, unknown> => !!e && typeof e === 'object' && !Array.isArray(e),
+    )
+    if (embeds.length === 0 && !content) {
+      ctx.notes.push('nothing to send — no embeds wired and no message text')
+      return { messages: [] }
+    }
+
+    const messages: FlowItem[] = []
+    const chunks: Record<string, unknown>[][] = []
+    if (embeds.length === 0) chunks.push([])
+    for (let i = 0; i < embeds.length; i += maxEmbeds) chunks.push(embeds.slice(i, i + maxEmbeds))
+    for (const chunk of chunks) {
+      const payload = pruneEmpty({ content, username, avatar_url: avatarUrl, embeds: chunk })
+      messages.push({ [field]: payload, embed_count: chunk.length })
+    }
+    ctx.notes.push(`${messages.length} message(s) from ${embeds.length} embed(s)`)
+    return { messages }
   },
 }
 
@@ -3512,7 +3736,13 @@ const IMPLS: NodeImpl[] = [
   template,
   setJson,
   discordEmbed,
+  discordMessage,
   collect,
+  textValue,
+  numberValue,
+  colorValue,
+  urlValue,
+  jsonValue,
   animeStatus,
   torrentSearch,
   diff,
