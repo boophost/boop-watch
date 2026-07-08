@@ -12,6 +12,7 @@ export interface SeriesEntry {
   image_url: string | null
   url: string | null
   added_at: string
+  episodes?: number | null
 }
 
 interface SeriesListProps {
