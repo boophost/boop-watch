@@ -80,39 +80,38 @@ export interface SeriesDownloadStatus {
   siteEpisodes: Record<string, string>
 }
 
-export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesDownloadStatus> {
-  const series = getSeriesById(seriesId)
-  // Token sets for every title variant we know, so releases named in English or
-  // romaji both match (kanji variants normalize to empty and drop out).
-  const variantTokens = series
-    ? [series.title, series.title_english, series.title_japanese]
-        .filter((t): t is string => !!t)
-        .map(tokens)
-        .filter((t) => t.length > 0)
-    : []
+function variantTokensForSeries(series: {
+  title: string
+  title_english?: string | null
+  title_japanese?: string | null
+}): string[][] {
+  return [series.title, series.title_english, series.title_japanese]
+    .filter((t): t is string => !!t)
+    .map(tokens)
+    .filter((t) => t.length > 0)
+}
 
-  // Episodes already on the public portal, matched to this series by name.
+/** Match site episodes + torrents for one series against shared portal/qBit snapshots. */
+export function matchSeriesDownloads(
+  series: { title: string; title_english?: string | null; title_japanese?: string | null },
+  portalItems: ReturnType<typeof getAllPortalItems>,
+  rawTorrents: QbitTorrent[] | null,
+  qbit: { configured: boolean; error: string | null },
+): SeriesDownloadStatus {
+  const variantTokens = variantTokensForSeries(series)
   const siteEpisodes: Record<string, string> = {}
-  for (const it of getAllPortalItems()) {
+  for (const it of portalItems) {
     if (it.type !== 'Episode' || it.index_number == null) continue
     if (bestOverlap(it.series_name ?? it.name, variantTokens) >= 0.5) {
       siteEpisodes[String(it.index_number)] = it.id
     }
   }
 
-  if (!qbitConfigured()) {
-    return { qbitConfigured: false, qbitError: null, torrents: [], siteEpisodes }
+  if (!qbit.configured || rawTorrents == null) {
+    return { qbitConfigured: qbit.configured, qbitError: qbit.error, torrents: [], siteEpisodes }
   }
 
-  let raw: QbitTorrent[] = []
-  let qbitError: string | null = null
-  try {
-    raw = await qbitList()
-  } catch (e) {
-    qbitError = e instanceof Error ? e.message : 'qBittorrent unavailable'
-  }
-
-  const torrents: SeriesDownload[] = raw
+  const torrents: SeriesDownload[] = rawTorrents
     .filter((t) => bestOverlap(t.name, variantTokens) >= 0.6)
     .map((t) => ({
       hash: t.hash,
@@ -128,7 +127,57 @@ export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesD
     }))
     .sort((a, b) => b.progress - a.progress)
 
-  return { qbitConfigured: true, qbitError, torrents, siteEpisodes }
+  return { qbitConfigured: true, qbitError: qbit.error, torrents, siteEpisodes }
+}
+
+export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesDownloadStatus> {
+  const series = getSeriesById(seriesId)
+  const portalItems = getAllPortalItems()
+  if (!series) {
+    return { qbitConfigured: qbitConfigured(), qbitError: null, torrents: [], siteEpisodes: {} }
+  }
+
+  if (!qbitConfigured()) {
+    return matchSeriesDownloads(series, portalItems, null, { configured: false, error: null })
+  }
+
+  let raw: QbitTorrent[] = []
+  let qbitError: string | null = null
+  try {
+    raw = await qbitList()
+  } catch (e) {
+    qbitError = e instanceof Error ? e.message : 'qBittorrent unavailable'
+  }
+
+  return matchSeriesDownloads(series, portalItems, raw, { configured: true, error: qbitError })
+}
+
+/** One portal scan + one qBit list, then per-series matches (for list chase chips). */
+export async function getSeriesDownloadStatusBatch(
+  seriesList: Array<{ id: number; title: string; title_english?: string | null; title_japanese?: string | null }>,
+): Promise<Map<number, SeriesDownloadStatus>> {
+  const portalItems = getAllPortalItems()
+  const out = new Map<number, SeriesDownloadStatus>()
+
+  let raw: QbitTorrent[] | null = null
+  let qbitError: string | null = null
+  const configured = qbitConfigured()
+  if (configured) {
+    try {
+      raw = await qbitList()
+    } catch (e) {
+      qbitError = e instanceof Error ? e.message : 'qBittorrent unavailable'
+      raw = []
+    }
+  }
+
+  for (const series of seriesList) {
+    out.set(
+      series.id,
+      matchSeriesDownloads(series, portalItems, raw, { configured, error: qbitError }),
+    )
+  }
+  return out
 }
 
 // ── Per-episode library media facts (what's actually on the server) ──────────

@@ -1,8 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
+import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
 import { getTitle, imgUrl, backdropUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
+import type { ChaseState } from '@/lib/chase'
 import { useAuth } from '@/lib/AuthContext'
 import { track } from '@/lib/analytics'
 
@@ -115,10 +117,16 @@ export default function Title() {
   const sub = subParts.join('  ·  ')
 
   if (data.type === 'series') {
+    const playableCount = data.episodes.filter((ep) => ep.id).length
     const badges = (
       <>
         <span className="badge"><span className="dot dot-info" />Series</span>
-        <span className="badge badge-mono badge-square">{data.episodes.length} eps</span>
+        <span className="badge badge-mono badge-square">{playableCount} eps</span>
+        {data.nextEpisode ? (
+          <span className="badge ep-chase">
+            <EpisodeStatus chase={data.nextEpisode} prefix />
+          </span>
+        ) : null}
       </>
     )
     return (
@@ -126,7 +134,7 @@ export default function Title() {
         <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview} manageId={data.manageId}>
           <div className="ep-head">
             <h2 className="k-h3">Episodes</h2>
-            <span className="badge badge-mono">{data.episodes.length}</span>
+            <span className="badge badge-mono">{playableCount}</span>
             <div className="spacer" />
           </div>
           <div className="panel" style={{ overflow: 'hidden' }}>
@@ -134,11 +142,27 @@ export default function Title() {
               {data.episodes.length === 0
                 ? <p className="empty">No episodes found.</p>
                 : data.episodes.map((ep) => (
-                  <Link key={ep.id} className="eprow" to={`/watch/${ep.id}`}>
-                    <span className="num">{ep.num}</span>
-                    <span className="et">{ep.name}</span>
-                    <span className="go"><Icon name="play" size={13} fill="currentColor" /></span>
-                  </Link>
+                  ep.id ? (
+                    <Link key={ep.id} className="eprow" to={`/watch/${ep.id}`}>
+                      <span className="num">{ep.num}</span>
+                      <span className="et">{ep.name}</span>
+                      <span className="go"><Icon name="play" size={13} fill="currentColor" /></span>
+                    </Link>
+                  ) : (
+                    <div key={`chase-${ep.num}`} className="eprow chasing">
+                      <span className="num">{ep.num}</span>
+                      <span className="et">{ep.name}</span>
+                      <span className="go">
+                        <EpisodeStatus
+                          chase={{
+                            episode: data.nextEpisode?.episode ?? 0,
+                            state: (ep.status as ChaseState) ?? data.nextEpisode?.state ?? 'waiting',
+                            airsAt: ep.airsAt ?? data.nextEpisode?.airsAt ?? null,
+                          }}
+                        />
+                      </span>
+                    </div>
+                  )
                 ))}
             </div>
           </div>
