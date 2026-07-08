@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { RefreshCw, Shield, Users as UsersIcon } from 'lucide-react'
+import { RefreshCw, Shield, ShieldOff, Trash2, Users as UsersIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { useAuth } from '@/lib/AuthContext'
 import { cn } from '@/lib/utils'
-import { listUsers, type AdminUserRow } from '@/lib/users'
+import { deleteUser, listUsers, setUserAdmin, type AdminUserRow } from '@/lib/users'
 
 function formatWhen(iso: string | null): string {
   if (!iso) return '—'
@@ -47,9 +48,11 @@ function UserCell({ user }: { user: AdminUserRow }) {
 }
 
 export default function Users() {
+  const { user: currentUser } = useAuth()
   const [users, setUsers] = useState<AdminUserRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [busyId, setBusyId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -67,6 +70,46 @@ export default function Users() {
   useEffect(() => {
     void load()
   }, [load])
+
+  const toggleAdmin = async (user: AdminUserRow) => {
+    const next = !user.isAdmin
+    const label = user.email ?? user.id
+    if (next) {
+      if (!window.confirm(`Grant admin access to ${label}?`)) return
+    } else if (user.adminViaEnv) {
+      setError('This user is admin via the server allowlist and cannot be demoted here.')
+      return
+    } else if (!window.confirm(`Remove admin access from ${label}?`)) {
+      return
+    }
+
+    setBusyId(user.id)
+    setError('')
+    try {
+      const updated = await setUserAdmin(user.id, next)
+      setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update user')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const remove = async (user: AdminUserRow) => {
+    const label = user.email ?? user.id
+    if (!window.confirm(`Permanently delete ${label}? This cannot be undone.`)) return
+
+    setBusyId(user.id)
+    setError('')
+    try {
+      await deleteUser(user.id)
+      setUsers((prev) => prev.filter((u) => u.id !== user.id))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to delete user')
+    } finally {
+      setBusyId(null)
+    }
+  }
 
   return (
     <div className="min-h-screen">
@@ -98,45 +141,93 @@ export default function Users() {
           </div>
         ) : (
           <div className="overflow-x-auto rounded-lg border border-border bg-card shadow-sm">
-            <table className="w-full min-w-[720px] text-sm">
+            <table className="w-full min-w-[820px] text-sm">
               <thead>
                 <tr className="border-b border-border text-left text-xs text-muted-foreground">
                   <th className="px-4 py-3 font-medium">User</th>
                   <th className="px-4 py-3 font-medium">Providers</th>
                   <th className="px-4 py-3 font-medium">Joined</th>
                   <th className="px-4 py-3 font-medium">Last sign-in</th>
+                  <th className="px-4 py-3 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {users.map((user) => (
-                  <tr key={user.id} className="border-b border-border last:border-0">
-                    <td className="px-4 py-3">
-                      <UserCell user={user} />
-                    </td>
-                    <td className="px-4 py-3">
-                      {user.providers.length > 0 ? (
-                        <div className="flex flex-wrap gap-1.5">
-                          {user.providers.map((p) => (
-                            <span
-                              key={p}
-                              className="rounded bg-muted px-2 py-0.5 text-xs text-foreground"
-                            >
-                              {providerLabel(p)}
-                            </span>
-                          ))}
+                {users.map((user) => {
+                  const isSelf = user.id === currentUser?.id
+                  const busy = busyId === user.id
+                  const canToggleAdmin = !isSelf && !(user.isAdmin && user.adminViaEnv)
+                  return (
+                    <tr key={user.id} className="border-b border-border last:border-0">
+                      <td className="px-4 py-3">
+                        <UserCell user={user} />
+                      </td>
+                      <td className="px-4 py-3">
+                        {user.providers.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {user.providers.map((p) => (
+                              <span
+                                key={p}
+                                className="rounded bg-muted px-2 py-0.5 text-xs text-foreground"
+                              >
+                                {providerLabel(p)}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap text-muted-foreground">
+                        {formatWhen(user.createdAt)}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap text-muted-foreground">
+                        {formatWhen(user.lastSignInAt)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2"
+                            disabled={busy || !canToggleAdmin}
+                            title={
+                              isSelf
+                                ? 'Cannot change your own admin access'
+                                : user.adminViaEnv
+                                  ? 'Admin via server allowlist'
+                                  : user.isAdmin
+                                    ? 'Remove admin'
+                                    : 'Make admin'
+                            }
+                            aria-label={
+                              user.isAdmin ? `Remove admin from ${user.email ?? user.id}` : `Make ${user.email ?? user.id} admin`
+                            }
+                            onClick={() => void toggleAdmin(user)}
+                          >
+                            {user.isAdmin ? (
+                              <ShieldOff className="size-3.5" />
+                            ) : (
+                              <Shield className="size-3.5" />
+                            )}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-destructive hover:text-destructive"
+                            disabled={busy || isSelf}
+                            title={isSelf ? 'Cannot delete your own account' : 'Delete user'}
+                            aria-label={`Delete ${user.email ?? user.id}`}
+                            onClick={() => void remove(user)}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
                         </div>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap text-muted-foreground">
-                      {formatWhen(user.createdAt)}
-                    </td>
-                    <td className="px-4 py-3 whitespace-nowrap text-muted-foreground">
-                      {formatWhen(user.lastSignInAt)}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
