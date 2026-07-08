@@ -152,7 +152,7 @@ export default function Title() {
                     <div key={`chase-${ep.num}`} className="eprow chasing">
                       <span className="num">{ep.num}</span>
                       <span className="et">{ep.name}</span>
-                      <span className="go">
+                      <span className="ep-status-slot">
                         <EpisodeStatus
                           chase={{
                             episode: data.nextEpisode?.episode ?? 0,
