@@ -220,17 +220,19 @@
   & .cal-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); min-width: 1085px; }
   & .cal-day { border-right: 1px solid var(--border); min-height: 360px; display: flex; flex-direction: column; }
   & .cal-day:last-child { border-right: none; }
+  & .cal-day.today { background: var(--accent-soft); border-top: 2px solid var(--accent); }
   & .cal-day-head { padding: 14px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-  & .cal-day.today .cal-day-head { background: var(--bg-elev-2); }
-  & .cal-day.today .cal-date { color: var(--accent); }
+  & .cal-day.today .cal-day-head { background: oklch(0.72 0.18 310 / 18%); border-bottom-color: oklch(0.72 0.18 310 / 22%); }
+  & .cal-day.today .cal-dow { color: var(--accent-soft-fg); }
+  & .cal-day.today .cal-date { color: var(--accent-soft-fg); font-weight: 600; }
   & .cal-dow { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-subtle); }
   & .cal-date { font-family: var(--font-mono); font-size: 13px; font-weight: 500; margin-top: 2px; }
   & .cal-events { padding: 10px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
   & .cal-empty { margin: auto; font-size: 11px; color: var(--fg-subtle); }
   & .evt { position: relative; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); overflow: hidden; }
-  & .evt.now { border-color: var(--accent); }
-  & .evt.now::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--accent); z-index: 1; }
   & .evt.aired { opacity: 0.62; }
+  & .evt.break { border-color: oklch(0.78 0.12 75 / 35%); }
+  & .evt.break .evt-thumb { filter: saturate(0.55); }
   & .evt-main { display: block; }
   & .evt-thumb { position: relative; width: 100%; height: 84px; overflow: hidden;
     background: linear-gradient(135deg, oklch(0.26 0.06 310), oklch(0.16 0.03 285)); }
@@ -242,6 +244,7 @@
   & .evt-time { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); }
   & .evt-label { font-size: 10px; color: var(--fg-subtle); }
   & .evt-label.up { color: var(--info); }
+  & .evt-label.break { color: oklch(0.82 0.12 75); }
   & .lang { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 4px;
     font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 0.06em; border: 1px solid transparent; }
   & .lang-sub { background: oklch(0.75 0.14 240 / 16%); color: oklch(0.82 0.13 240); }
@@ -256,7 +259,9 @@
   & .cal-tab .d { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-subtle); }
   & .cal-tab .n { font-family: var(--font-mono); font-size: 15px; font-weight: 600; color: var(--fg); }
   & .cal-tab .c { font-size: 9px; color: var(--fg-subtle); }
-  & .cal-tab.today .n { color: var(--accent); }
+  & .cal-tab.today { border-color: oklch(0.72 0.18 310 / 40%); background: var(--accent-soft); }
+  & .cal-tab.today .n { color: var(--accent-soft-fg); font-weight: 700; }
+  & .cal-tab.today .d { color: var(--accent-soft-fg); }
   & .cal-tab[data-active="true"] { border-color: var(--accent); background: var(--accent-soft); }
   & .cal-tab[data-active="true"] .n, & .cal-tab[data-active="true"] .d { color: var(--accent-soft-fg); }
 
@@ -267,6 +272,7 @@
     & .cal-week { display: block; min-width: 0; }
     & .cal-day { display: none; }
     & .cal-day[data-active="true"] { display: flex; min-height: 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    & .cal-day[data-active="true"].today { border-color: var(--accent); box-shadow: 0 0 0 1px oklch(0.72 0.18 310 / 25%); }
     & .cal-day-head { background: var(--bg-elev); }
   }
 
@@ -642,7 +648,7 @@
 body.theater { overflow: hidden; }
 body.theater .app-version { display: none; } /* fixed badge, z-index above the overlay */
 body.theater .player .topbar, body.theater .player .subbar { display: none; }
-body.theater .player .wrap { display: block; max-width: none; margin: 0; padding: 0; height: 100vh; }
+body.theater .player .wrap { display: block; max-width: none; margin: 0; padding: 0; height: 100vh; height: 100dvh; }
 body.theater .player .col-eps { display: none; }
 body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
 /* Keep .vid in block flow (not flex): JASSUB inserts a 0-width anchor div right
@@ -662,10 +668,10 @@ body.theater .player .vds-player[data-controls] .vds-overlay-btns { bottom: 96px
 body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
   background: oklch(0.145 0.008 285 / 94%); border-top: 1px solid var(--border); }
 
-/* Pseudo-fullscreen (iPhone): element fullscreen doesn't exist there and native
-   video fullscreen drops the JASSUB subtitle overlay, so the Watch page toggles
-   body.fs *with* body.theater — the theater layout does the filling, and this
-   hides the control bar so only the player remains. Exit via the player's own
+/* Pseudo-fullscreen: last-resort fallback when neither element fullscreen nor
+   native video fullscreen is available. The Watch page toggles body.fs *with*
+   body.theater — the theater layout does the filling, and this hides the
+   control bar so only the player remains. Exit via the player's own
    fullscreen button. */
 body.fs .player .pbar { display: none; }
 body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }

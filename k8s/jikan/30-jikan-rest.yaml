@@ -1,0 +1,85 @@
+# jikan-rest — our own MyAnimeList API proxy, so we no longer depend on the
+# overloaded public api.jikan.moe (which 504s constantly). Scrapes MAL on demand
+# and caches into MongoDB. Typesense/Scout is intentionally left unset — it only
+# powers the indexed /anime search; /anime/{id}/full and /anime/{id}/episodes
+# (all we consume) run on MongoDB + Redis alone.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jikan-rest-env
+  namespace: jikan
+data:
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+  # Throwaway Laravel key — this instance stores only public MAL data. Not secret.
+  APP_KEY: "base64:wiTztBtkO7PmtVFwUhJSLZaNH5VCYa75YUeSkfd0oaA="
+  APP_URL: "http://localhost"
+  APP_TIMEZONE: "UTC"
+  DB_CONNECTION: "mongodb"
+  DB_HOST: "mongodb"
+  DB_PORT: "27017"
+  DB_DATABASE: "jikan"
+  DB_USERNAME: ""
+  DB_PASSWORD: ""
+  DB_CACHING: "true"
+  CACHING: "false"
+  CACHE_DRIVER: "array"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  QUEUE_CONNECTION: "database"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jikan-rest
+  namespace: jikan
+  labels: { app: jikan-rest }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: jikan-rest }
+  template:
+    metadata:
+      labels: { app: jikan-rest }
+    spec:
+      initContainers:
+        # Don't boot the app until Mongo + Redis answer, or Laravel crashloops
+        # on its first artisan bootstrap.
+        - name: wait-for-datastores
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z mongodb 27017; do echo "waiting for mongodb"; sleep 2; done
+              until nc -z redis 6379; do echo "waiting for redis"; sleep 2; done
+      containers:
+        - name: jikan-rest
+          image: jikanme/jikan-rest:latest
+          envFrom:
+            - configMapRef:
+                name: jikan-rest-env
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "50m", memory: "256Mi" }
+            limits: { memory: "768Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jikan-rest
+  namespace: jikan
+spec:
+  selector: { app: jikan-rest }
+  ports:
+    - port: 8080
+      targetPort: 8080

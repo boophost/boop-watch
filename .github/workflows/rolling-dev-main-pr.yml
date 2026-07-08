@@ -1,0 +1,32 @@
+name: Rolling dev → main PR
+
+# Keeps one open promotion PR (dev → main) updated whenever dev advances.
+# Merging that PR ships to production (watch.boopurno.es). The body aggregates
+# staging test plans from merged feature PRs plus a prod promotion checklist.
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: rolling-dev-main-pr
+  cancel-in-progress: true
+
+jobs:
+  update-promotion-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update rolling promotion PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/update-promotion-pr.mjs

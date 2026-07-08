@@ -8,7 +8,7 @@ const SCHEDULE_TZ = process.env.SCHEDULE_TZ || process.env.TZ || 'America/New_Yo
 const SCHEDULE_TTL_MS = 30 * 60 * 1000
 
 interface WeekRef { year: number; week: number }
-interface Airing { title: string; ep: string; when: Date; localDate: string; img: string | null; type: string }
+interface Airing { title: string; ep: string; when: Date; localDate: string; img: string | null; type: string; onBreak: boolean }
 interface ParsedWeek { airings: Airing[]; prev: WeekRef | null; next: WeekRef | null }
 
 const scheduleCache = new Map<string, { result?: ParsedWeek; at: number; loading: Promise<ParsedWeek> | null }>()
@@ -46,34 +46,47 @@ const TITLE_ALIASES: [string, string][] = [
   ['classroom of the elite', 'youkoso jitsuryoku shijou shugi no kyoushitsu e'],
 ]
 
-// Keep only airings whose show is in the library. animeschedule uses romaji; the
-// library often stores English (TheTVDB), so fall back to a shared distinctive
-// token (e.g. "slime", "zero"), restricted to library *series*.
-function libraryMatcher(items: JfItem[]): (title: string) => boolean {
-  const exact = new Set<string>()
-  const seriesSig: Set<string>[] = []
+// Resolve an animeschedule romaji title to the library's English display name.
+// animeschedule uses romaji; the library often stores English (TheTVDB), so fall
+// back to a shared distinctive token (e.g. "slime", "zero"), restricted to
+// library *series*.
+function libraryResolver(items: JfItem[]): (title: string) => string | null {
+  const exact = new Map<string, string>()
+  const seriesSig: { sig: Set<string>; display: string }[] = []
   for (const it of items) {
+    const display = it.Name || it.OriginalTitle || ''
+    if (!display) continue
     for (const name of [it.Name, it.OriginalTitle].filter(Boolean) as string[]) {
-      exact.add(normTitle(name))
+      exact.set(normTitle(name), display)
       const b = baseTitle(name)
-      if (b) exact.add(b)
+      if (b) exact.set(b, display)
     }
     if (it.Type === 'Series') {
       const names = [it.Name, it.OriginalTitle].filter(Boolean) as string[]
       const sig = new Set(names.flatMap(sigTokens))
       const bases = names.map(baseTitle)
       for (const [en, romaji] of TITLE_ALIASES) {
-        if (bases.includes(en)) for (const t of sigTokens(romaji)) sig.add(t)
+        if (bases.includes(en)) {
+          exact.set(normTitle(romaji), display)
+          const rb = baseTitle(romaji)
+          if (rb) exact.set(rb, display)
+          for (const t of sigTokens(romaji)) sig.add(t)
+        }
       }
-      if (sig.size) seriesSig.push(sig)
+      if (sig.size) seriesSig.push({ sig, display })
     }
   }
   return (title: string) => {
     const n = normTitle(title)
     const b = baseTitle(title)
-    if (exact.has(n) || exact.has(b)) return true
+    if (exact.has(n)) return exact.get(n)!
+    if (exact.has(b)) return exact.get(b)!
     const ts = sigTokens(title)
-    return ts.length > 0 && seriesSig.some((set) => ts.some((t) => set.has(t)))
+    if (!ts.length) return null
+    for (const { sig, display } of seriesSig) {
+      if (ts.some((t) => sig.has(t))) return display
+    }
+    return null
   }
 }
 
@@ -124,11 +137,14 @@ function parseTimetable(html: string): ParsedWeek {
     const key = `${normTitle(title)}|${ep}|${iso}|${type}`
     if (seen.has(key)) continue
     seen.add(key)
+    const blockStart = body.lastIndexOf('timetable-column-show', m.index)
+    const blockPre = blockStart >= 0 ? body.slice(blockStart, m.index) : ''
+    const onBreak = /show-delay-bar delayed-show">Break<\/span>/.test(blockPre)
     const pre = body.slice(Math.max(0, m.index - 2600), m.index)
     const imgs = pre.match(/https:\/\/img\.animeschedule\.net\/[^\s"']+?\.jpg/g)
     let img = imgs ? imgs[imgs.length - 1] : null
     if (img) img = img.replace(/&amp;/g, '&') + '?w=120&q=85'
-    airings.push({ title, ep, when, localDate, img, type })
+    airings.push({ title, ep, when, localDate, img, type, onBreak })
   }
   return { airings, prev, next }
 }
@@ -164,7 +180,7 @@ const MON_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep'
 
 export interface ScheduleEvent {
   title: string; ep: string; img: string | null; type: string
-  time: string; aired: boolean; now: boolean
+  time: string; aired: boolean; onBreak: boolean
 }
 export interface ScheduleDay {
   iso: string; dow: string; label: string; today: boolean
@@ -189,7 +205,7 @@ function buildDays(items: Airing[], allAirings: Airing[], now: Date): ScheduleDa
   const mondayMs = ref.getTime() - ((ref.getUTCDay() + 6) % 7) * 86400000
   const todayKey = fmtKey.format(now)
 
-  interface DayBuild { iso: string; dow: string; label: string; today: boolean; events: (Airing & { aired: boolean; now: boolean })[] }
+  interface DayBuild { iso: string; dow: string; label: string; today: boolean; events: (Airing & { aired: boolean })[] }
   const days: DayBuild[] = []
   for (let i = 0; i < 7; i++) {
     const dt = new Date(mondayMs + i * 86400000)
@@ -203,22 +219,17 @@ function buildDays(items: Airing[], allAirings: Airing[], now: Date): ScheduleDa
   const byIso = Object.fromEntries(days.map((dd) => [dd.iso, dd]))
   for (const a of items) {
     const b = byIso[a.localDate]
-    if (b) b.events.push({ ...a, aired: false, now: false })
+    if (b) b.events.push({ ...a, aired: false })
   }
-  let next: (Airing & { aired: boolean; now: boolean }) | null = null
   for (const dd of days) {
     dd.events.sort((a, b) => a.when.getTime() - b.when.getTime())
-    for (const e of dd.events) {
-      e.aired = e.when < now
-      if (!e.aired && (!next || e.when < next.when)) next = e
-    }
+    for (const e of dd.events) e.aired = e.when < now
   }
-  if (next) next.now = true
   return days.map((dd) => ({
     iso: dd.iso, dow: dd.dow, label: dd.label, today: dd.today, count: dd.events.length,
     events: dd.events.map((e) => ({
       title: e.title, ep: e.ep, img: e.img, type: e.type,
-      time: fmtTime.format(e.when), aired: e.aired, now: e.now,
+      time: fmtTime.format(e.when), aired: e.aired, onBreak: e.onBreak,
     })),
   }))
 }
@@ -236,8 +247,13 @@ function watchlistItems(): JfItem[] {
 
 export async function getSchedule(weekParam: string): Promise<SchedulePayload> {
   const week = await getWeek(weekParam)
-  const inLibrary = libraryMatcher([...getCollectionItems(), ...watchlistItems()])
-  const items = latestPerShow(week.airings.filter((it) => inLibrary(it.title)))
+  const resolveTitle = libraryResolver([...getCollectionItems(), ...watchlistItems()])
+  const items = latestPerShow(
+    week.airings.flatMap((it) => {
+      const display = resolveTitle(it.title)
+      return display ? [{ ...it, title: display }] : []
+    }),
+  )
   const now = new Date()
   const days = buildDays(items, week.airings, now)
 
@@ -253,6 +269,31 @@ export async function getSchedule(weekParam: string): Promise<SchedulePayload> {
     next: week.next,
     stats: { total, today: today ? today.count : 0, aired, upcoming: total - aired },
   }
+}
+
+// A single library airing flattened for the release trigger: a stable dedupe
+// key (title|ep|date), a flow-item payload, and whether its air time has passed.
+// Shared by the scheduler's release watcher and the trigger.release node's
+// manual sample. Library-filtered like the schedule itself.
+export interface LibraryAiring {
+  key: string
+  aired: boolean
+  item: { title: string; ep: string; air_date: string; air_time: string; type: string; img: string | null }
+}
+
+export async function libraryAirings(): Promise<LibraryAiring[]> {
+  const payload = await getSchedule('')
+  const out: LibraryAiring[] = []
+  for (const day of payload.days) {
+    for (const e of day.events) {
+      out.push({
+        key: `${e.title}|${e.ep}|${day.iso}`,
+        aired: e.aired,
+        item: { title: e.title, ep: e.ep, air_date: day.iso, air_time: e.time, type: e.type, img: e.img },
+      })
+    }
+  }
+  return out
 }
 
 export { SCHEDULE_TZ }

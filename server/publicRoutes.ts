@@ -384,14 +384,22 @@ publicRouter.get('/api/play/:id/master.m3u8', async (req, res) => {
     PlaySessionId: crypto.randomUUID(),
   }
   // Audio / quality selection, validated as ints so nothing arbitrary reaches JF.
-  // Subtitles are NOT burned in here — they're delivered separately via /api/sub
-  // and rendered client-side (JASSUB), so toggling subs never restarts ffmpeg.
+  // Subtitles are normally NOT burned in — they're delivered separately via
+  // /api/sub and rendered client-side (JASSUB), so toggling subs never restarts
+  // ffmpeg. The exception is ?sub=: devices whose native fullscreen/PiP player
+  // can't show a DOM overlay (iPhone) request the track burned into the video
+  // (Jellyfin encodes with libass, so styling matches JASSUB).
   const audio = parseInt(qStr(req.query.audio), 10)
   if (Number.isInteger(audio)) params.AudioStreamIndex = audio
   const h = parseInt(qStr(req.query.h), 10)
   if (Number.isInteger(h) && h > 0) params.maxHeight = h
   const vb = parseInt(qStr(req.query.vb), 10)
   if (Number.isInteger(vb) && vb > 0) params.videoBitRate = vb
+  const sub = parseInt(qStr(req.query.sub), 10)
+  if (Number.isInteger(sub) && sub >= 0) {
+    params.SubtitleStreamIndex = sub
+    params.SubtitleMethod = 'Encode'
+  }
 
   await proxy(req, res, jfUrl(`/Videos/${id}/master.m3u8`, params), { isPlaylist: true })
 })

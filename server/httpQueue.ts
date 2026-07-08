@@ -1,0 +1,245 @@
+// Unified outbound-request limiter. Every external API we call (Jikan, TsukiHime,
+// AniList, Kitsu, Jimaku, AniSkip, …) is rate-limited per *service key*: a minimum
+// gap between request starts, a max concurrency, a per-request timeout, and a
+// Retry-After-aware retry on 429/503. This replaces a scatter of per-module gates
+// and ad-hoc setTimeout sleeps that didn't coordinate (two separate gates hit
+// Jikan and could race past its ~3 req/s → a Cloudflare 502 the SPA can't parse).
+//
+// Deliberately in-process and single-pod: this is a single-admin server whose
+// flows already run one-at-a-time behind a lock, so there's no scheduling /
+// persistence problem to solve. Cross-pod coordination (Redis) is out of scope;
+// the Retry-After retry absorbs the rare collision when dev+prod share an egress IP.
+//
+// DEADLOCK GOTCHA: never enqueue() a composite operation that itself enqueues on
+// the *same* key — with concurrency 1 the outer job holds the only slot while
+// awaiting the inner one, and both wedge forever. Enqueue leaf fetches only.
+
+export interface QueueConfig {
+  minGapMs: number
+  concurrency: number
+  timeoutMs: number
+  retries: number
+}
+
+export interface QueueStat {
+  inFlight: number
+  queued: number
+  minGapMs: number
+  concurrency: number
+  total: number
+  retried: number
+  lastStartAt: number | null
+  lastError: { at: number; message: string } | null
+}
+
+interface QueueState {
+  cfg: QueueConfig
+  pending: Array<() => void>
+  inFlight: number
+  lastStartAt: number | null
+  total: number
+  retried: number
+  lastError: { at: number; message: string } | null
+}
+
+type ServiceKey =
+  | 'jikan'
+  | 'tsukihime'
+  | 'tosho'
+  | 'anilist'
+  | 'kitsu'
+  | 'jimaku'
+  | 'aniskip'
+  | 'other'
+
+// Starting values; each key is overridable via env HTTPQ_<KEY> as partial JSON,
+// e.g. HTTPQ_JIKAN={"minGapMs":500}.
+const DEFAULTS: Record<ServiceKey, QueueConfig> = {
+  jikan: { minGapMs: 400, concurrency: 1, timeoutMs: 10_000, retries: 3 },
+  tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 20_000, retries: 3 },
+  tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
+  anilist: { minGapMs: 350, concurrency: 1, timeoutMs: 15_000, retries: 2 },
+  kitsu: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
+  jimaku: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 2 },
+  aniskip: { minGapMs: 350, concurrency: 2, timeoutMs: 5_000, retries: 1 },
+  other: { minGapMs: 250, concurrency: 2, timeoutMs: 20_000, retries: 1 },
+}
+
+function loadConfig(key: ServiceKey): QueueConfig {
+  const base = DEFAULTS[key]
+  const raw = process.env[`HTTPQ_${key.toUpperCase()}`]
+  if (!raw) return base
+  try {
+    const patch = JSON.parse(raw) as Partial<QueueConfig>
+    return { ...base, ...patch }
+  } catch {
+    console.error(`httpQueue: ignoring invalid HTTPQ_${key.toUpperCase()} env`)
+    return base
+  }
+}
+
+const queues = new Map<string, QueueState>()
+
+function stateFor(key: string): QueueState {
+  let q = queues.get(key)
+  if (!q) {
+    q = {
+      cfg: loadConfig(key as ServiceKey),
+      pending: [],
+      inFlight: 0,
+      lastStartAt: null,
+      total: 0,
+      retried: 0,
+      lastError: null,
+    }
+    queues.set(key, q)
+  }
+  return q
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+/**
+ * Acquire a slot on `key`: waits until concurrency has room AND at least
+ * `minGapMs` has elapsed since the last start. Returns once the caller may run.
+ */
+async function acquire(q: QueueState): Promise<void> {
+  if (q.inFlight >= q.cfg.concurrency) {
+    await new Promise<void>((resolve) => q.pending.push(resolve))
+  }
+  q.inFlight++
+  if (q.lastStartAt != null) {
+    const wait = q.cfg.minGapMs - (Date.now() - q.lastStartAt)
+    if (wait > 0) await sleep(wait)
+  }
+  q.lastStartAt = Date.now()
+}
+
+/** Release the slot and wake the next waiter. Always runs, even on error. */
+function release(q: QueueState): void {
+  q.inFlight--
+  const next = q.pending.shift()
+  if (next) next()
+}
+
+/**
+ * Run `fn` under `key`'s limiter (min-gap + concurrency). The slot is released
+ * (and the min-gap timer has already advanced) even if `fn` throws, so a failing
+ * job never wedges the queue.
+ */
+export async function enqueue<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const q = stateFor(key)
+  await acquire(q)
+  q.total++
+  try {
+    return await fn()
+  } finally {
+    release(q)
+  }
+}
+
+/** Parse a Retry-After header (delta-seconds or HTTP-date) to a millisecond wait. */
+function retryAfterMs(res: Response): number | null {
+  const h = res.headers.get('retry-after')
+  if (!h) return null
+  const secs = Number(h)
+  if (Number.isFinite(secs) && secs >= 0) return secs * 1000
+  const date = Date.parse(h)
+  if (Number.isFinite(date)) return Math.max(0, date - Date.now())
+  return null
+}
+
+function hostOf(url: string | URL): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * fetch through the limiter, with a per-request timeout and Retry-After-aware
+ * retry on 429/503. Returns the raw Response (the caller decides what !ok means);
+ * a non-retryable error status is NOT thrown. Honours a caller-supplied
+ * `init.signal` in place of the default timeout.
+ */
+export function limitedFetch(
+  key: string,
+  url: string | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const q = stateFor(key)
+  return enqueue(key, async () => {
+    for (let attempt = 0; ; attempt++) {
+      const signal = init.signal ?? AbortSignal.timeout(q.cfg.timeoutMs)
+      let res: Response
+      try {
+        res = await fetch(url, { ...init, signal })
+      } catch (e) {
+        q.lastError = { at: Date.now(), message: e instanceof Error ? e.message : String(e) }
+        throw e
+      }
+      if ((res.status === 429 || res.status === 503) && attempt < q.cfg.retries) {
+        const wait = retryAfterMs(res) ?? 2000 * (attempt + 1)
+        q.retried++
+        q.lastError = { at: Date.now(), message: `${res.status} from ${hostOf(url)}, retrying` }
+        await sleep(Math.min(wait, 30_000))
+        continue
+      }
+      return res
+    }
+  })
+}
+
+/** limitedFetch + ok check + JSON parse. Throws `"<status> <text> from <host>"` on !ok. */
+export async function limitedJson(
+  key: string,
+  url: string | URL,
+  init?: RequestInit,
+): Promise<unknown> {
+  const res = await limitedFetch(key, url, init)
+  if (!res.ok) {
+    const err = new Error(`${res.status} ${res.statusText} from ${hostOf(url)}`)
+    stateFor(key).lastError = { at: Date.now(), message: err.message }
+    throw err
+  }
+  return res.json()
+}
+
+// Map a URL's host to its service key, so generic callers (e.g. the source.http
+// flow node) get keyed limiting without naming a service.
+const HOST_KEYS: Array<[RegExp, ServiceKey]> = [
+  [/(^|\.)jikan\.moe$/i, 'jikan'],
+  [/(^|\.)tsukihime\.org$/i, 'tsukihime'],
+  [/(^|\.)animetosho\.\w+$/i, 'tosho'],
+  [/(^|\.)anilist\.co$/i, 'anilist'],
+  [/(^|\.)kitsu\.(io|app)$/i, 'kitsu'],
+  [/(^|\.)jimaku\.cc$/i, 'jimaku'],
+  [/(^|\.)aniskip\.com$/i, 'aniskip'],
+]
+
+export function hostKey(url: string | URL): ServiceKey | 'other' {
+  const host = hostOf(url)
+  for (const [re, key] of HOST_KEYS) {
+    if (re.test(host)) return key
+  }
+  return 'other'
+}
+
+/** Live snapshot of every queue that has been touched this process. */
+export function queueStats(): Record<string, QueueStat> {
+  const out: Record<string, QueueStat> = {}
+  for (const [key, q] of queues) {
+    out[key] = {
+      inFlight: q.inFlight,
+      queued: q.pending.length,
+      minGapMs: q.cfg.minGapMs,
+      concurrency: q.cfg.concurrency,
+      total: q.total,
+      retried: q.retried,
+      lastStartAt: q.lastStartAt,
+      lastError: q.lastError,
+    }
+  }
+  return out
+}

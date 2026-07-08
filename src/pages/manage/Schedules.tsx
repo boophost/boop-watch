@@ -19,6 +19,7 @@ import {
   deleteSchedule,
   runScheduleNow,
   listFlows,
+  getTriggers,
   type FlowSchedule,
   type FlowSummary,
   type ScheduleKind,
@@ -72,7 +73,7 @@ function cadenceText(s: FlowSchedule): string {
 
 interface FormState {
   id: number | null // null = create
-  flowId: number | ''
+  triggerName: string // the trigger.start name this schedule fires
   name: string
   kind: ScheduleKind
   every: number
@@ -84,10 +85,10 @@ interface FormState {
   enabled: boolean
 }
 
-function blankForm(flowId: number | ''): FormState {
+function blankForm(triggerName: string): FormState {
   return {
     id: null,
-    flowId,
+    triggerName,
     name: '',
     kind: 'interval',
     every: 30,
@@ -109,12 +110,12 @@ function isoToLocalInput(iso: string): string {
 }
 
 function formFromSchedule(s: FlowSchedule): FormState {
-  const base = blankForm(s.flow_id)
+  const base = blankForm(s.trigger_name ?? '')
   const spec = s.spec as Record<string, unknown>
   return {
     ...base,
     id: s.id,
-    flowId: s.flow_id,
+    triggerName: s.trigger_name ?? '',
     name: s.name ?? '',
     kind: s.kind,
     every: s.kind === 'interval' ? (spec.every as number) : base.every,
@@ -139,14 +140,14 @@ const selectClass =
 
 function ScheduleForm({
   form,
-  flows,
+  triggers,
   onChange,
   onSubmit,
   onCancel,
   saving,
 }: {
   form: FormState
-  flows: FlowSummary[]
+  triggers: string[]
   onChange: (f: FormState) => void
   onSubmit: () => void
   onCancel: () => void
@@ -154,7 +155,11 @@ function ScheduleForm({
 }) {
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => onChange({ ...form, [k]: v })
   const validRunAt = form.kind !== 'once' || form.runAt !== ''
-  const canSave = form.flowId !== '' && validRunAt && !saving
+  const canSave = form.triggerName !== '' && validRunAt && !saving
+  // A schedule editing a legacy/removed trigger still needs it in the list.
+  const triggerOptions = form.triggerName && !triggers.includes(form.triggerName)
+    ? [form.triggerName, ...triggers]
+    : triggers
 
   return (
     <form
@@ -166,16 +171,16 @@ function ScheduleForm({
     >
       <div className="flex flex-wrap items-center gap-3">
         <label className="flex items-center gap-2 text-sm">
-          <span className="text-muted-foreground">Flow</span>
+          <span className="text-muted-foreground">Trigger</span>
           <select
             className={cn(selectClass, 'min-w-44')}
-            value={form.flowId}
-            onChange={(e) => set('flowId', e.target.value === '' ? '' : Number(e.target.value))}
+            value={form.triggerName}
+            onChange={(e) => set('triggerName', e.target.value)}
           >
-            <option value="">Select a flow…</option>
-            {flows.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.name}
+            <option value="">Select a trigger…</option>
+            {triggerOptions.map((t) => (
+              <option key={t} value={t}>
+                {t}
               </option>
             ))}
           </select>
@@ -290,6 +295,7 @@ function ScheduleForm({
 export default function Schedules() {
   const [schedules, setSchedules] = useState<FlowSchedule[]>([])
   const [flows, setFlows] = useState<FlowSummary[]>([])
+  const [triggers, setTriggers] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [form, setForm] = useState<FormState | null>(null)
@@ -299,9 +305,10 @@ export default function Schedules() {
   const load = async () => {
     setError('')
     try {
-      const [s, f] = await Promise.all([listSchedules(), listFlows()])
+      const [s, f, t] = await Promise.all([listSchedules(), listFlows(), getTriggers()])
       setSchedules(s.schedules)
       setFlows(f.flows)
+      setTriggers(t)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load schedules')
     } finally {
@@ -316,13 +323,13 @@ export default function Schedules() {
   const flowName = useMemo(() => new Map(flows.map((f) => [f.id, f.name])), [flows])
 
   const submitForm = async () => {
-    if (!form || form.flowId === '') return
+    if (!form || form.triggerName === '') return
     setSaving(true)
     setError('')
     try {
       const spec = specFromForm(form)
       const payload = {
-        flowId: form.flowId,
+        triggerName: form.triggerName,
         name: form.name.trim() || null,
         kind: form.kind,
         spec,
@@ -385,8 +392,8 @@ export default function Schedules() {
           <Button
             size="sm"
             className="gap-1"
-            disabled={flows.length === 0}
-            onClick={() => setForm(blankForm(flows[0]?.id ?? ''))}
+            disabled={triggers.length === 0}
+            onClick={() => setForm(blankForm(triggers[0] ?? ''))}
           >
             <Plus className="size-4" />
             New schedule
@@ -400,7 +407,7 @@ export default function Schedules() {
         {form && (
           <ScheduleForm
             form={form}
-            flows={flows}
+            triggers={triggers}
             onChange={setForm}
             onSubmit={submitForm}
             onCancel={() => setForm(null)}
@@ -416,8 +423,9 @@ export default function Schedules() {
             <div>
               <p className="font-medium">No schedules yet</p>
               <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-                Schedule a flow to run on a repeat (interval / daily / weekly) or once at a
-                set time. Runs land in the Activity feed.
+                A schedule fires a <span className="font-medium">Trigger</span> name on a repeat
+                (interval / daily / weekly) or once at a set time — every flow with that trigger
+                runs. Add a Trigger node to a flow first. Runs land in the Activity feed.
               </p>
             </div>
           </div>
@@ -425,7 +433,8 @@ export default function Schedules() {
           <ul className="grid gap-3">
             {schedules.map((s) => {
               const busy = busyId === s.id
-              const name = s.name || flowName.get(s.flow_id) || s.flow_name || `Flow #${s.flow_id}`
+              const target = s.trigger_name ?? flowName.get(s.flow_id) ?? s.flow_name ?? `Flow #${s.flow_id}`
+              const name = s.name || target
               return (
                 <li
                   key={s.id}

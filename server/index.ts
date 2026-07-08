@@ -18,12 +18,14 @@ import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from '
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
+import { searchAnimeAniList } from './anilist.js'
 import { warmScope } from './jellyfin.js'
 import { getSeriesDownloadStatus, getSeriesLibraryMedia } from './downloads.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
 import { posthogUiHost } from './posthogConfig.js'
+import { deleteUser, listAllUsers, setUserAdmin } from './users.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -33,6 +35,12 @@ const PORT = parseInt(process.env.PORT ?? '3001')
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
 const AUTH_USERNAME = process.env.AUTH_USERNAME ?? 'admin'
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD ?? 'changeme'
+// .trim() guards against stray whitespace in the env value — untrimmed, a
+// trailing space survives string interpolation and makes fetch() throw
+// "Failed to parse URL" on every Supabase Bearer-token check, silently
+// falling back to (always-failing) local JWT verification.
+const SUPABASE_URL = process.env.SUPABASE_URL?.trim() || ''
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY?.trim() || ''
 const COOKIE_NAME = 'ai_session'
 const IS_PROD = process.env.NODE_ENV === 'production'
 
@@ -55,8 +63,8 @@ async function requireAuth(
   if (authHeader?.startsWith('Bearer ')) {
     token = authHeader.split(' ')[1]
     try {
-      const resp = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {
-        headers: { Authorization: `Bearer ${token}`, apikey: process.env.SUPABASE_ANON_KEY || '' }
+      const resp = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+        headers: { Authorization: `Bearer ${token}`, apikey: SUPABASE_ANON_KEY }
       })
       if (resp.ok) {
         const user = await resp.json()
@@ -109,6 +117,55 @@ app.use('/api/flows', requireAuth, requireAdmin)
 app.use('/api/schedules', requireAuth, requireAdmin)
 app.use(flowRouter)
 
+app.get('/api/users', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const users = await listAllUsers()
+    res.json({ users })
+  } catch (e) {
+    console.error(e)
+    const msg = e instanceof Error ? e.message : 'Failed to list users'
+    res.status(502).json({ error: msg })
+  }
+})
+
+app.patch('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const id = String(req.params.id)
+  const { isAdmin } = req.body as { isAdmin?: unknown }
+  if (typeof isAdmin !== 'boolean') {
+    res.status(400).json({ error: 'isAdmin (boolean) required' })
+    return
+  }
+  if (id === res.locals.username && !isAdmin) {
+    res.status(400).json({ error: 'Cannot remove your own admin access' })
+    return
+  }
+  try {
+    const user = await setUserAdmin(id, isAdmin)
+    res.json({ user })
+  } catch (e) {
+    console.error(e)
+    const msg = e instanceof Error ? e.message : 'Failed to update user'
+    const status = msg === 'User not found' ? 404 : 502
+    res.status(status).json({ error: msg })
+  }
+})
+
+app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const id = String(req.params.id)
+  if (id === res.locals.username) {
+    res.status(400).json({ error: 'Cannot delete your own account' })
+    return
+  }
+  try {
+    await deleteUser(id)
+    res.json({ ok: true })
+  } catch (e) {
+    console.error(e)
+    const msg = e instanceof Error ? e.message : 'Failed to delete user'
+    res.status(502).json({ error: msg })
+  }
+})
+
 // Discord watch-status presence (opt-in OAuth link + playback heartbeats).
 app.use(discordPresenceRouter(requireAuth))
 
@@ -123,21 +180,31 @@ app.get('/api/search/anime', requireAuth, async (req, res) => {
     res.json({ results: [] })
     return
   }
+  // AniList is the primary search source: it needs no auth, carries idMal (so
+  // hits stay addable to our MAL-id catalog), and is reliable. We self-host
+  // Jikan only for the MAL-specific data AniList lacks (per-episode titles,
+  // detail) — its search endpoint needs a Typesense index we don't run, so it's
+  // the fallback here, used only if AniList is down.
   try {
-    const data = await searchAnime(q)
-    res.json({
-      results: data.map((a) => ({
-        mal_id: a.mal_id,
-        title: a.title,
-        synopsis: a.synopsis ?? '',
-        image_url: pickPosterUrl(a),
-        url: a.url,
-      })),
-    })
-  } catch (e) {
-    console.error(e)
-    const msg = e instanceof Error ? e.message : 'Search failed'
-    res.status(502).json({ error: msg })
+    const results = await searchAnimeAniList(q)
+    res.json({ results })
+  } catch (anilistErr) {
+    console.error('search: AniList failed, trying Jikan —', anilistErr)
+    try {
+      const data = await searchAnime(q)
+      res.json({
+        results: data.map((a) => ({
+          mal_id: a.mal_id,
+          title: a.title,
+          synopsis: a.synopsis ?? '',
+          image_url: pickPosterUrl(a),
+          url: a.url,
+        })),
+      })
+    } catch (jikanErr) {
+      console.error('search: Jikan fallback also failed —', jikanErr)
+      res.status(502).json({ error: 'Anime metadata lookup is temporarily unavailable — try again shortly' })
+    }
   }
 })
 
@@ -159,6 +226,19 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
   }
   try {
     const mal = await fetchAnimeFull(series.mal_id)
+    // Persist the episode count so the episodes API's synthesized fallback can
+    // still render a full 1..N grid (with library/download status) if the
+    // episodes scrape is ever unavailable — otherwise a null count dead-ends.
+    if (typeof mal.episodes === 'number' && mal.episodes > 0 && mal.episodes !== series.episodes) {
+      try {
+        seriesDb.upsertSeriesMetadata(
+          { mal_id: series.mal_id, title: series.title },
+          { episodes: mal.episodes },
+        )
+      } catch (persistErr) {
+        console.error('detail: failed to persist episode count —', persistErr)
+      }
+    }
     res.json({ series, mal })
   } catch (e) {
     console.error(e)
@@ -186,25 +266,89 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
     typeof pageRaw === 'string' && Number.isFinite(Number(pageRaw))
       ? Math.max(1, Math.floor(Number(pageRaw)))
       : 1
+  const malUrl = series.url ?? `https://myanimelist.net/anime/${series.mal_id}`
   try {
     const { episodes, pagination } = await fetchAnimeEpisodesPage(series.mal_id, p)
-    res.json({
-      episodes: episodes.map((e) => ({
-        mal_id: e.mal_id,
-        url: e.url,
-        title: e.title,
-        title_japanese: e.title_japanese ?? null,
-        aired: e.aired ?? null,
-        filler: e.filler,
-        recap: e.recap,
-        episode: episodeNumberFromUrl(e.url),
+    // The episode number drives every per-episode cell (library file, download,
+    // watch link). MAL episode URLs don't always carry `/episode/N`, so fall back
+    // to the episode's own mal_id (Jikan numbers episodes there) then its page
+    // position — never leave it null, or the whole row goes blank.
+    const rows = episodes.map((e, i) => ({
+      mal_id: e.mal_id,
+      url: e.url,
+      title: e.title,
+      title_japanese: e.title_japanese ?? null,
+      aired: e.aired ?? null,
+      filler: e.filler,
+      recap: e.recap,
+      episode: episodeNumberFromUrl(e.url) ?? e.mal_id ?? (p - 1) * 100 + i + 1,
+    }))
+    // Cache what we got so the fallback below can serve it next time Jikan is down.
+    seriesDb.upsertEpisodes(
+      series.mal_id,
+      rows.map((r) => ({
+        number: r.episode,
+        title: r.title,
+        title_japanese: r.title_japanese,
+        aired: r.aired,
       })),
-      pagination,
-    })
+    )
+    res.json({ episodes: rows, pagination, source: 'jikan' })
   } catch (e) {
+    // Jikan (MAL proxy) flakes constantly. Rather than an empty page, serve a
+    // fallback so the per-episode library/watch status is still visible: cached
+    // rows if we ever fetched them, else a synthesized 1..N from the known count.
     console.error(e)
-    res.status(502).json({
-      error: e instanceof Error ? e.message : 'Could not load episodes',
+    if (p > 1) {
+      // Fallbacks are a single page; deeper paging has nothing more to give.
+      res.json({ episodes: [], pagination: { has_next_page: false, current_page: p }, source: 'none' })
+      return
+    }
+    const cached = seriesDb.getCachedEpisodes(series.mal_id)
+    let rows: {
+      mal_id: number
+      url: string
+      title: string
+      title_japanese: string | null
+      aired: string | null
+      filler: boolean
+      recap: boolean
+      episode: number
+    }[] = []
+    let source = ''
+    if (cached.length > 0) {
+      rows = cached.map((c) => ({
+        mal_id: series.mal_id,
+        url: malUrl,
+        title: c.title ?? `Episode ${c.number}`,
+        title_japanese: c.title_japanese ?? null,
+        aired: c.aired ?? null,
+        filler: false,
+        recap: false,
+        episode: c.number,
+      }))
+      source = 'cache'
+    } else if (series.episodes && series.episodes > 0) {
+      rows = Array.from({ length: series.episodes }, (_, i) => ({
+        mal_id: series.mal_id,
+        url: malUrl,
+        title: `Episode ${i + 1}`,
+        title_japanese: null,
+        aired: null,
+        filler: false,
+        recap: false,
+        episode: i + 1,
+      }))
+      source = 'synthesized'
+    }
+    if (rows.length === 0) {
+      res.status(502).json({ error: e instanceof Error ? e.message : 'Could not load episodes' })
+      return
+    }
+    res.json({
+      episodes: rows,
+      pagination: { has_next_page: false, current_page: 1, last_visible_page: 1 },
+      source,
     })
   }
 })
@@ -523,8 +667,8 @@ app.get('/config.js', (req, res) => {
   res.setHeader('Content-Type', 'application/javascript')
   res.setHeader('Cache-Control', 'no-store')
   res.send(`window.ENV = {
-    SUPABASE_URL: ${JSON.stringify(process.env.SUPABASE_URL)},
-    SUPABASE_ANON_KEY: ${JSON.stringify(process.env.SUPABASE_ANON_KEY)},
+    SUPABASE_URL: ${JSON.stringify(SUPABASE_URL)},
+    SUPABASE_ANON_KEY: ${JSON.stringify(SUPABASE_ANON_KEY)},
     POSTHOG_KEY: ${JSON.stringify(process.env.POSTHOG_KEY || '')},
     POSTHOG_UI_HOST: ${JSON.stringify(process.env.POSTHOG_UI_HOST || posthogUiHost())}
   };`)

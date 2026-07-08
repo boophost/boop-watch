@@ -3,6 +3,7 @@
 // editor opens onto something real instead of a blank canvas.
 
 import { getDb } from './db.js'
+import type { FlowComponentMeta } from './flowComponents.js'
 import type { FlowGraph } from './flowExecutor.js'
 
 export interface FlowRow {
@@ -10,6 +11,7 @@ export interface FlowRow {
   name: string
   description: string | null
   graph: string // JSON FlowGraph
+  component: string | null
   created_at: string
   updated_at: string
 }
@@ -19,6 +21,7 @@ export interface FlowSummary {
   name: string
   description: string | null
   node_count: number
+  published: boolean
   updated_at: string
 }
 
@@ -67,7 +70,32 @@ function db() {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      -- Event-trigger watermark: which events (item ids / airing keys) an event
+      -- trigger has already fired for, so the watcher (server/scheduler.ts)
+      -- doesn't re-fire. See triggerStateHas/Add.
+      CREATE TABLE IF NOT EXISTS trigger_state (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (kind, key)
+      );
+      -- Marks that an event-trigger kind's first watcher pass has seeded current
+      -- state (so a deploy doesn't fire for the whole existing library at once).
+      CREATE TABLE IF NOT EXISTS trigger_seeded (
+        kind TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `)
+    const cols = instance.prepare(`PRAGMA table_info(flows)`).all() as { name: string }[]
+    if (!cols.some((c) => c.name === 'component')) {
+      instance.exec(`ALTER TABLE flows ADD COLUMN component TEXT`)
+    }
+    // A schedule can target a trigger name (fires every flow with that trigger)
+    // instead of a single flow_id; legacy flow_id rows keep working.
+    const schedCols = instance.prepare(`PRAGMA table_info(flow_schedules)`).all() as { name: string }[]
+    if (!schedCols.some((c) => c.name === 'trigger_name')) {
+      instance.exec(`ALTER TABLE flow_schedules ADD COLUMN trigger_name TEXT`)
+    }
     ready = true
     seedFlows(instance)
   }
@@ -275,7 +303,7 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
 
 // Seeds are versioned via SQLite's user_version so later releases can add
 // flows to existing databases without re-creating deleted ones.
-const SEED_VERSION = 3
+const SEED_VERSION = 4
 
 function seedFlows(instance: ReturnType<typeof getDb>) {
   const insert = instance.prepare('INSERT INTO flows (name, description, graph) VALUES (?, ?, ?)')
@@ -314,18 +342,129 @@ export function listFlows(): FlowSummary[] {
     } catch {
       /* corrupt graph JSON — surfaced as 0 nodes */
     }
+    const meta = parseComponent(r.component)
     return {
       id: r.id,
       name: r.name,
       description: r.description,
       node_count: nodeCount,
+      published: !!meta?.published,
       updated_at: r.updated_at,
     }
   })
 }
 
+export function listFlowGraphs(): { id: number; name: string; graph: string }[] {
+  return db().prepare('SELECT id, name, graph FROM flows').all() as {
+    id: number
+    name: string
+    graph: string
+  }[]
+}
+
 export function getFlow(id: number): FlowRow | undefined {
   return db().prepare('SELECT * FROM flows WHERE id = ?').get(id) as FlowRow | undefined
+}
+
+// The trigger.start names declared in a flow graph (deduped, non-empty).
+function triggerNamesOf(graphJson: string): string[] {
+  try {
+    const g = JSON.parse(graphJson) as { nodes?: { type?: string; config?: Record<string, unknown> }[] }
+    const names = (g.nodes ?? [])
+      .filter((n) => n.type === 'trigger.start')
+      .map((n) => String(n.config?.name ?? '').trim())
+      .filter(Boolean)
+    return [...new Set(names)]
+  } catch {
+    return []
+  }
+}
+
+// Flows whose graph contains a trigger.start with the given name — the
+// subscribers a fireTrigger(name) publish fans out to (server/flowRoutes.ts).
+export function flowsWithTrigger(name: string): { id: number; name: string; graph: string }[] {
+  return listFlowGraphs().filter((f) => triggerNamesOf(f.graph).includes(name))
+}
+
+// Distinct trigger names across all flows, sorted — for the schedule target
+// picker (GET /api/flows/triggers).
+export function listTriggerNames(): string[] {
+  const names = new Set<string>()
+  for (const f of listFlowGraphs()) for (const n of triggerNamesOf(f.graph)) names.add(n)
+  return [...names].sort()
+}
+
+// Does a graph contain a node of the given type? (event-trigger subscriber check)
+function graphHasNodeType(graphJson: string, type: string): boolean {
+  try {
+    const g = JSON.parse(graphJson) as { nodes?: { type?: string }[] }
+    return (g.nodes ?? []).some((n) => n.type === type)
+  } catch {
+    return false
+  }
+}
+
+// Flows whose graph contains a node of the given type — the subscribers an event
+// trigger (trigger.new-item / trigger.release) fires (server/flowRoutes.ts).
+export function flowsWithTriggerType(type: string): { id: number; name: string; graph: string }[] {
+  return listFlowGraphs().filter((f) => graphHasNodeType(f.graph, type))
+}
+
+// --- Event-trigger watermark state ---------------------------------------
+// Records which events an event trigger has already fired for, so a watcher
+// tick doesn't re-fire (see server/scheduler.ts). `kind` is the trigger kind
+// ('new-item' | 'release'); `key` identifies the event (item id / airing key).
+
+export function triggerStateHas(kind: string, key: string): boolean {
+  return (
+    db().prepare('SELECT 1 FROM trigger_state WHERE kind = ? AND key = ?').get(kind, key) !== undefined
+  )
+}
+
+export function triggerStateAdd(kind: string, keys: string[]): void {
+  if (keys.length === 0) return
+  const stmt = db().prepare('INSERT OR IGNORE INTO trigger_state (kind, key) VALUES (?, ?)')
+  const tx = db().transaction((ks: string[]) => {
+    for (const k of ks) stmt.run(kind, k)
+  })
+  tx(keys)
+}
+
+// True once a kind has been seeded — the first watcher pass records current
+// state without firing (so a deploy doesn't fire for the whole existing library
+// / everything already aired this week).
+export function triggerStateSeeded(kind: string): boolean {
+  return (
+    db().prepare('SELECT 1 FROM trigger_seeded WHERE kind = ?').get(kind) !== undefined
+  )
+}
+
+export function markTriggerSeeded(kind: string): void {
+  db().prepare('INSERT OR IGNORE INTO trigger_seeded (kind) VALUES (?)').run(kind)
+}
+
+export function parseComponent(raw: string | null): FlowComponentMeta | null {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as FlowComponentMeta
+  } catch {
+    return null
+  }
+}
+
+export function listPublishedComponents(): { row: FlowRow; graph: FlowGraph; meta: FlowComponentMeta }[] {
+  const rows = db().prepare(`SELECT * FROM flows WHERE component IS NOT NULL`).all() as FlowRow[]
+  return rows
+    .map((row) => {
+      const meta = parseComponent(row.component)
+      if (!meta?.published) return null
+      try {
+        return { row, graph: JSON.parse(row.graph) as FlowGraph, meta }
+      } catch {
+        return null
+      }
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
 }
 
 export function createFlow(name: string, description: string | null): FlowRow {
@@ -338,18 +477,23 @@ export function createFlow(name: string, description: string | null): FlowRow {
 
 export function updateFlow(
   id: number,
-  patch: { name?: string; description?: string | null; graph?: FlowGraph },
+  patch: { name?: string; description?: string | null; graph?: FlowGraph; component?: FlowComponentMeta | null },
 ): FlowRow | undefined {
   const existing = getFlow(id)
   if (!existing) return undefined
   db()
     .prepare(
-      `UPDATE flows SET name = ?, description = ?, graph = ?, updated_at = datetime('now') WHERE id = ?`,
+      `UPDATE flows SET name = ?, description = ?, graph = ?, component = ?, updated_at = datetime('now') WHERE id = ?`,
     )
     .run(
       patch.name ?? existing.name,
       patch.description === undefined ? existing.description : patch.description,
       patch.graph ? JSON.stringify(patch.graph) : existing.graph,
+      patch.component === undefined
+        ? existing.component
+        : patch.component
+          ? JSON.stringify(patch.component)
+          : null,
       id,
     )
   return getFlow(id)
@@ -458,7 +602,10 @@ export type ScheduleSpec =
   | { runAt: string } // once, ISO instant
 
 export interface ScheduleInput {
+  // Legacy target: a single flow. 0 when the schedule fires a trigger name.
   flow_id: number
+  // Preferred target: fire this trigger name across every subscribing flow.
+  trigger_name: string | null
   name: string | null
   kind: ScheduleKind
   spec: ScheduleSpec
@@ -470,6 +617,7 @@ export interface ScheduleInput {
 export interface FlowSchedule {
   id: number
   flow_id: number
+  trigger_name: string | null // when set, fires this trigger name (not flow_id)
   flow_name: string | null // joined from flows; null if the flow was deleted
   name: string | null
   kind: ScheduleKind
@@ -488,6 +636,7 @@ export interface FlowSchedule {
 interface ScheduleRaw {
   id: number
   flow_id: number
+  trigger_name: string | null
   flow_name: string | null
   name: string | null
   kind: ScheduleKind
@@ -519,6 +668,7 @@ function decodeSchedule(r: ScheduleRaw): FlowSchedule {
   return {
     id: r.id,
     flow_id: r.flow_id,
+    trigger_name: r.trigger_name,
     flow_name: r.flow_name,
     name: r.name,
     kind: r.kind,
@@ -560,11 +710,12 @@ export function dueSchedules(nowIso: string): FlowSchedule[] {
 export function createSchedule(input: ScheduleInput): FlowSchedule {
   const info = db()
     .prepare(
-      `INSERT INTO flow_schedules (flow_id, name, kind, spec, dry_run, enabled, next_run)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO flow_schedules (flow_id, trigger_name, name, kind, spec, dry_run, enabled, next_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.flow_id,
+      input.trigger_name,
       input.name,
       input.kind,
       JSON.stringify(input.spec),
@@ -584,12 +735,13 @@ export function updateSchedule(
   db()
     .prepare(
       `UPDATE flow_schedules
-       SET flow_id = ?, name = ?, kind = ?, spec = ?, dry_run = ?, enabled = ?, next_run = ?,
+       SET flow_id = ?, trigger_name = ?, name = ?, kind = ?, spec = ?, dry_run = ?, enabled = ?, next_run = ?,
            updated_at = datetime('now')
        WHERE id = ?`,
     )
     .run(
       patch.flow_id ?? existing.flow_id,
+      patch.trigger_name === undefined ? existing.trigger_name : patch.trigger_name,
       patch.name === undefined ? existing.name : patch.name,
       patch.kind ?? existing.kind,
       JSON.stringify(patch.spec ?? existing.spec),
