@@ -33,7 +33,6 @@ export function initAnalytics(): void {
       ],
     },
     persistence: 'localStorage',
-    disable_session_recording: true,
   })
 }
 
