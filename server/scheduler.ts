@@ -237,10 +237,15 @@ async function watchNewItems(): Promise<void> {
   }
   const fresh = series.filter((s) => !triggerStateHas('catalog-item', key(s)))
   if (fresh.length === 0) return
-  triggerStateAdd('catalog-item', fresh.map(key))
-  await fireEvent('new-item', fresh as unknown as FlowItem[]).catch((e) =>
-    console.error('scheduler: fireEvent(new-item) threw', e),
-  )
+  // Advance the watermark only once the event was actually dispatched — if a
+  // subscriber was lock-skipped this tick, leave it un-seen so we retry next
+  // tick (a flow that ran-and-errored still counts as dispatched). Otherwise a
+  // one-off lock collision would silently drop the item forever.
+  const dispatched = await fireEvent('new-item', fresh as unknown as FlowItem[]).catch((e) => {
+    console.error('scheduler: fireEvent(new-item) threw', e)
+    return true
+  })
+  if (dispatched) triggerStateAdd('catalog-item', fresh.map(key))
 }
 
 // New public-portal titles (Series/Movie in the Jellyfin collection) since last
@@ -255,10 +260,11 @@ async function watchNewPortalItems(): Promise<void> {
   }
   const fresh = titles.filter((t) => !triggerStateHas('portal-item', t.id))
   if (fresh.length === 0) return
-  triggerStateAdd('portal-item', fresh.map((t) => t.id))
-  await fireEvent('new-portal', fresh as unknown as FlowItem[]).catch((e) =>
-    console.error('scheduler: fireEvent(new-portal) threw', e),
-  )
+  const dispatched = await fireEvent('new-portal', fresh as unknown as FlowItem[]).catch((e) => {
+    console.error('scheduler: fireEvent(new-portal) threw', e)
+    return true
+  })
+  if (dispatched) triggerStateAdd('portal-item', fresh.map((t) => t.id))
 }
 
 // qBittorrent torrents that have finished downloading since last seen. Keyed by
@@ -273,10 +279,14 @@ async function watchQbitComplete(): Promise<void> {
   }
   const fresh = done.filter((t) => !triggerStateHas('qbit-done', t.hash))
   if (fresh.length === 0) return
-  triggerStateAdd('qbit-done', fresh.map((t) => t.hash))
-  await fireEvent('qbit-complete', fresh.map(qbitToItem) as unknown as FlowItem[]).catch((e) =>
-    console.error('scheduler: fireEvent(qbit-complete) threw', e),
-  )
+  const dispatched = await fireEvent(
+    'qbit-complete',
+    fresh.map(qbitToItem) as unknown as FlowItem[],
+  ).catch((e) => {
+    console.error('scheduler: fireEvent(qbit-complete) threw', e)
+    return true
+  })
+  if (dispatched) triggerStateAdd('qbit-done', fresh.map((t) => t.hash))
 }
 
 // Library airings whose air time has passed since last seen.
@@ -291,22 +301,35 @@ async function watchReleases(): Promise<void> {
   }
   const fresh = aired.filter((a) => !triggerStateHas('release', a.key))
   if (fresh.length === 0) return
-  triggerStateAdd('release', fresh.map((a) => a.key))
-  // One fire per newly-aired episode so downstream sees a single airing.
+  // One fire per newly-aired episode so downstream sees a single airing. Mark
+  // each key seen only once its fire was dispatched, so a lock-skip retries it.
   for (const a of fresh) {
-    await fireEvent('release', [a.item as unknown as FlowItem]).catch((e) =>
-      console.error('scheduler: fireEvent(release) threw', e),
-    )
+    const dispatched = await fireEvent('release', [a.item as unknown as FlowItem]).catch((e) => {
+      console.error('scheduler: fireEvent(release) threw', e)
+      return true
+    })
+    if (dispatched) triggerStateAdd('release', [a.key])
   }
 }
 
+// Watchers advance their watermark only after a fire is dispatched, so ticks
+// must not overlap — a slow flow (a tick can outlast TICK_MS) would otherwise
+// let the next tick re-detect an in-flight item. This guard drops any tick that
+// starts while one is still running; the interval will catch up on the next beat.
+let ticking = false
 async function tick(): Promise<void> {
-  await fireDueSchedule()
-  // Watchers run after the schedule pass (they take the flow lock per run).
-  await watchNewItems().catch((e) => console.error('scheduler: watchNewItems threw', e))
-  await watchNewPortalItems().catch((e) => console.error('scheduler: watchNewPortalItems threw', e))
-  await watchQbitComplete().catch((e) => console.error('scheduler: watchQbitComplete threw', e))
-  await watchReleases().catch((e) => console.error('scheduler: watchReleases threw', e))
+  if (ticking) return
+  ticking = true
+  try {
+    await fireDueSchedule()
+    // Watchers run after the schedule pass (they take the flow lock per run).
+    await watchNewItems().catch((e) => console.error('scheduler: watchNewItems threw', e))
+    await watchNewPortalItems().catch((e) => console.error('scheduler: watchNewPortalItems threw', e))
+    await watchQbitComplete().catch((e) => console.error('scheduler: watchQbitComplete threw', e))
+    await watchReleases().catch((e) => console.error('scheduler: watchReleases threw', e))
+  } finally {
+    ticking = false
+  }
 }
 
 let timer: ReturnType<typeof setInterval> | null = null
