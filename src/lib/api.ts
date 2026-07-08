@@ -140,14 +140,25 @@ export interface SchedulePayload {
   stats: { total: number; today: number; aired: number; upcoming: number }
 }
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url)
-  if (!res.ok) {
-    let msg = `Request failed (${res.status})`
-    try { msg = ((await res.json()) as { error?: string }).error || msg } catch { /* non-JSON */ }
-    throw new Error(msg)
+async function getJSON<T>(url: string, attempt = 0): Promise<T> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) {
+      let msg = `Request failed (${res.status})`
+      try { msg = ((await res.json()) as { error?: string }).error || msg } catch { /* non-JSON */ }
+      throw new Error(msg)
+    }
+    return (await res.json()) as T
+  } catch (e) {
+    // Deploy cutovers / brief ingress blips surface as TypeError("NetworkError…")
+    // in Firefox. Retry once before failing the page.
+    const msg = e instanceof Error ? e.message : String(e)
+    if (attempt < 1 && /networkerror|failed to fetch|load failed/i.test(msg)) {
+      await new Promise((r) => setTimeout(r, 400))
+      return getJSON<T>(url, attempt + 1)
+    }
+    throw e instanceof Error ? e : new Error(msg)
   }
-  return (await res.json()) as T
 }
 
 export const getCatalog = () => getJSON<Catalog>('/api/catalog')
