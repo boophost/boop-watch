@@ -89,6 +89,12 @@ export type JikanAnimeFull = {
   aired?: { string?: string | null }
   season?: string | null
   year?: number | null
+  broadcast?: {
+    day?: string | null
+    time?: string | null
+    timezone?: string | null
+    string?: string | null
+  } | null
   images: JikanAnimeBrief['images']
   studios?: { name: string }[]
   genres?: { name: string }[]

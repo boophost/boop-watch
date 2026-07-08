@@ -23,6 +23,138 @@ export interface ChaseTorrent {
   isBatch?: boolean
 }
 
+/** MAL broadcast block (from Jikan `/anime/{id}/full`). */
+export interface MalBroadcast {
+  day?: string | null
+  time?: string | null
+  timezone?: string | null
+  string?: string | null
+}
+
+const WEEKDAY: Record<string, number> = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+}
+
+function parseBroadcastDay(day: string | null | undefined): number | null {
+  if (!day) return null
+  const key = day.toLowerCase().replace(/s$/, '') // Fridays → friday
+  return WEEKDAY[key] ?? null
+}
+
+function parseBroadcastTime(time: string | null | undefined): { hh: number; mm: number } | null {
+  if (!time) return null
+  const m = /^(\d{1,2}):(\d{2})$/.exec(time.trim())
+  if (!m) return null
+  const hh = Number(m[1])
+  const mm = Number(m[2])
+  if (hh > 23 || mm > 59) return null
+  return { hh, mm }
+}
+
+function zonedParts(ms: number, timeZone: string): { y: number; m: number; d: number; hh: number; mm: number; wd: number } {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+    weekday: 'short',
+  })
+  const map: Record<string, string> = {}
+  for (const p of fmt.formatToParts(new Date(ms))) {
+    if (p.type !== 'literal') map[p.type] = p.value
+  }
+  const wdName = (map.weekday || '').toLowerCase().slice(0, 3)
+  const wdLookup: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+  return {
+    y: Number(map.year),
+    m: Number(map.month),
+    d: Number(map.day),
+    hh: Number(map.hour),
+    mm: Number(map.minute),
+    wd: wdLookup[wdName] ?? 0,
+  }
+}
+
+/** Convert a civil datetime in `timeZone` to a UTC epoch ms. */
+export function zonedLocalToUtcMs(
+  y: number,
+  m: number,
+  d: number,
+  hh: number,
+  mm: number,
+  timeZone: string,
+): number {
+  let utc = Date.UTC(y, m - 1, d, hh, mm, 0)
+  for (let i = 0; i < 4; i++) {
+    const p = zonedParts(utc, timeZone)
+    const asLocal = Date.UTC(p.y, p.m - 1, p.d, p.hh, p.mm)
+    const desired = Date.UTC(y, m - 1, d, hh, mm)
+    const delta = desired - asLocal
+    if (delta === 0) break
+    utc += delta
+  }
+  return utc
+}
+
+/**
+ * Estimate when `nextEpisode` airs from MAL weekly broadcast + last known aired ep.
+ * Returns an ISO string, or null when broadcast/anchor data is insufficient.
+ */
+export function estimateNextAir(args: {
+  nextEpisode: number
+  episodes: EpisodeAirInfo[]
+  broadcast?: MalBroadcast | null
+  now?: number
+}): string | null {
+  const bc = args.broadcast
+  if (!bc) return null
+  const wd = parseBroadcastDay(bc.day)
+  const tm = parseBroadcastTime(bc.time)
+  if (wd == null || !tm) return null
+  const timeZone = (bc.timezone && bc.timezone.trim()) || 'Asia/Tokyo'
+
+  const dated = args.episodes
+    .filter((e) => e.aired && Number.isFinite(Date.parse(e.aired!)) && e.episode < args.nextEpisode)
+    .sort((a, b) => b.episode - a.episode)
+  const anchor = dated[0]
+  if (!anchor?.aired) return null
+
+  const anchorMs = Date.parse(anchor.aired)
+  const weeksAhead = args.nextEpisode - anchor.episode
+  if (weeksAhead < 1) return null
+
+  // Prefer the broadcast wall-clock on the anchor's calendar day in the show's TZ
+  // (MAL episode dates are often midnight UTC / date-only).
+  const ap = zonedParts(anchorMs, timeZone)
+  let y = ap.y
+  let m = ap.m
+  let d = ap.d
+  // Snap to the broadcast weekday if the stored date drifted (rare).
+  const probe = zonedLocalToUtcMs(y, m, d, tm.hh, tm.mm, timeZone)
+  const probeWd = zonedParts(probe, timeZone).wd
+  if (probeWd !== wd) {
+    const delta = (wd - probeWd + 7) % 7
+    const snapped = new Date(probe + delta * 86_400_000)
+    const sp = zonedParts(snapped.getTime(), timeZone)
+    y = sp.y
+    m = sp.m
+    d = sp.d
+  }
+
+  const base = zonedLocalToUtcMs(y, m, d, tm.hh, tm.mm, timeZone)
+  const estimated = base + weeksAhead * 7 * 86_400_000
+  return new Date(estimated).toISOString()
+}
+
 /** Catch-up denominator: prefer aired-so-far, else MAL total. */
 export function resolveExpected(
   malEpisodes: number | null | undefined,
@@ -90,6 +222,7 @@ export function resolveNextChase(args: {
   libraryEpisodes: Set<number>
   torrents: ChaseTorrent[]
   malEpisodes?: number | null
+  broadcast?: MalBroadcast | null
   now?: number
 }): EpisodeChase | null {
   const now = args.now ?? Date.now()
@@ -103,7 +236,16 @@ export function resolveNextChase(args: {
   )
   if (!next || onSite(next.episode)) return null
 
-  const airsAt = next.aired ?? null
+  let airsAt = next.aired ?? null
+  if (!airsAt) {
+    airsAt = estimateNextAir({
+      nextEpisode: next.episode,
+      episodes: args.episodes,
+      broadcast: args.broadcast,
+      now,
+    })
+  }
+
   const airMs = airsAt ? Date.parse(airsAt) : NaN
   const future = Number.isFinite(airMs) && airMs > now
   const knownPast = Number.isFinite(airMs) && airMs <= now

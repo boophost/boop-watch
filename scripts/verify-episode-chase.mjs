@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Smoke tests for server/episodeChase.ts (no vitest in this repo).
 import {
+  estimateNextAir,
   resolveExpected,
   resolveNextChase,
   toPublicChase,
@@ -69,12 +70,10 @@ const eps = [
 
   const pub = toPublicChase(downloading)
   assert(pub && !('progress' in pub && pub.progress != null) || pub?.progress === undefined, 'public omits progress')
-  // toPublicChase returns object without progress field set
   assert(pub?.state === 'downloading', 'public state')
 }
 
 {
-  // Finished cour: MAL total known and met → no chase.
   const done = resolveNextChase({
     episodes: [{ episode: 1, aired: '2026-07-01T15:00:00Z' }],
     siteEpisodes: { '1': 'jf-1' },
@@ -87,18 +86,30 @@ const eps = [
 }
 
 {
-  // Airing: only ep 1 cached + on site, no MAL total → synthesize ep 2 as upcoming.
+  // Chainsmoker Cat: ep1 only, Fridays 00:30 JST → ep2 estimated Jul 10 00:30 JST.
+  const broadcast = { day: 'Fridays', time: '00:30', timezone: 'Asia/Tokyo' }
+  const estimated = estimateNextAir({
+    nextEpisode: 2,
+    episodes: [{ episode: 1, title: 'Ep 1', aired: '2026-07-03T00:00:00+00:00' }],
+    broadcast,
+    now,
+  })
+  assert(estimated != null, 'estimate returned')
+  // 2026-07-10 00:30 JST = 2026-07-09 15:30 UTC
+  assert(estimated === '2026-07-09T15:30:00.000Z', `estimated=${estimated}`)
+
   const synth = resolveNextChase({
-    episodes: [{ episode: 1, title: 'Ep 1', aired: '2026-07-03T00:00:00Z' }],
+    episodes: [{ episode: 1, title: 'Ep 1', aired: '2026-07-03T00:00:00+00:00' }],
     siteEpisodes: { '1': 'jf-1' },
     libraryEpisodes: new Set([1]),
     torrents: [],
     malEpisodes: null,
+    broadcast,
     now,
   })
   assert(synth?.episode === 2, `synth ep=${synth?.episode}`)
   assert(synth?.state === 'waiting', `synth state=${synth?.state}`)
-  assert(synth?.airsAt == null, 'synth has no air date yet')
+  assert(synth?.airsAt === '2026-07-09T15:30:00.000Z', `synth airsAt=${synth?.airsAt}`)
 }
 
 console.log('verify-episode-chase: ok')
