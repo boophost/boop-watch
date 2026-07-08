@@ -48,6 +48,7 @@ function chaseFromStatus(
     siteEpisodes: status.siteEpisodes,
     libraryEpisodes,
     torrents: status.torrents,
+    malEpisodes: series.episodes,
   })
   return { airedCount, expectedForPipeline: expected, nextChase }
 }
