@@ -105,7 +105,7 @@ export function AnimeSearch({ className, onAdded }: AnimeSearchProps) {
     <div ref={wrapRef} className={cn('relative', className)}>
       <Input
         type="search"
-        placeholder="Search anime (MyAnimeList via Jikan)…"
+        placeholder="Search anime (MyAnimeList)…"
         value={q}
         onChange={(e) => {
           setQ(e.target.value)

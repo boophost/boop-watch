@@ -11,7 +11,9 @@
 import type { Segment } from './watch.js'
 import { limitedFetch } from './httpQueue.js'
 
-const JIKAN = 'https://api.jikan.moe/v4'
+// Same self-hosted-jikan override as server/jikan.ts (JIKAN_URL); defaults to
+// the public instance.
+const JIKAN = process.env.JIKAN_URL || 'https://api.jikan.moe/v4'
 const ANISKIP = 'https://api.aniskip.com/v2'
 const CHAIN_TTL = 24 * 60 * 60 * 1000
 const SKIP_TTL = 24 * 60 * 60 * 1000
