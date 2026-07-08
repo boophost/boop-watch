@@ -207,7 +207,12 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
       let nextEpisode: ReturnType<typeof toPublicChase> = null
       if (manageId != null) {
         try {
-          const chase = await buildSeriesChase(manageId)
+          // Public path: skip Jellyfin library probe + budget Jikan so a cold
+          // broadcast fetch can't stall / drop the title page (NetworkError).
+          const chase = await buildSeriesChase(manageId, {
+            includeLibrary: false,
+            budgetMs: 2500,
+          })
           nextEpisode = toPublicChase(chase.nextChase)
           if (nextEpisode) {
             const stubNum =
@@ -329,7 +334,10 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
   let nextEpisode: ReturnType<typeof toPublicChase> = null
   if (manageId != null && item.Type === 'Episode') {
     try {
-      const chase = await buildSeriesChase(manageId)
+      const chase = await buildSeriesChase(manageId, {
+        includeLibrary: false,
+        budgetMs: 2500,
+      })
       nextEpisode = toPublicChase(chase.nextChase)
     } catch (e) {
       console.error('watch chase failed —', e)
