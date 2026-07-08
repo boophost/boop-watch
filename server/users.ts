@@ -8,6 +8,8 @@ export interface AdminUserRow {
   createdAt: string
   lastSignInAt: string | null
   isAdmin: boolean
+  /** True when admin access comes from ADMIN_EMAILS (cannot be revoked here). */
+  adminViaEnv: boolean
 }
 
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? 'ethanwhi@gmail.com')
@@ -39,6 +41,11 @@ function providers(user: User): string[] {
   return typeof fallback === 'string' && fallback ? [fallback] : []
 }
 
+function isAdminViaEnv(email: string | null): boolean {
+  const normalized = (email ?? '').toLowerCase()
+  return normalized.length > 0 && ADMIN_EMAILS.includes(normalized)
+}
+
 function isAdminUser(user: User): boolean {
   const email = (user.email ?? '').toLowerCase()
   const meta = user.user_metadata ?? {}
@@ -50,14 +57,16 @@ function isAdminUser(user: User): boolean {
 }
 
 function toRow(user: User): AdminUserRow {
+  const email = user.email ?? null
   return {
     id: user.id,
-    email: user.email ?? null,
+    email,
     avatarUrl: avatarUrl(user),
     providers: providers(user),
     createdAt: user.created_at,
     lastSignInAt: user.last_sign_in_at ?? null,
     isAdmin: isAdminUser(user),
+    adminViaEnv: isAdminViaEnv(email),
   }
 }
 
@@ -86,4 +95,36 @@ export async function listAllUsers(): Promise<AdminUserRow[]> {
     return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0)
   })
   return rows
+}
+
+export async function deleteUser(id: string): Promise<void> {
+  const client = adminClient()
+  if (!client) {
+    throw new Error('User management is not configured (SUPABASE_SERVICE_ROLE_KEY)')
+  }
+  const { error } = await client.auth.admin.deleteUser(id)
+  if (error) throw error
+}
+
+export async function setUserAdmin(id: string, isAdmin: boolean): Promise<AdminUserRow> {
+  const client = adminClient()
+  if (!client) {
+    throw new Error('User management is not configured (SUPABASE_SERVICE_ROLE_KEY)')
+  }
+
+  const { data: existing, error: fetchError } = await client.auth.admin.getUserById(id)
+  if (fetchError) throw fetchError
+  if (!existing.user) throw new Error('User not found')
+
+  if (!isAdmin && isAdminViaEnv(existing.user.email ?? null)) {
+    throw new Error('Cannot revoke admin for an allowlisted email')
+  }
+
+  const { data, error } = await client.auth.admin.updateUserById(id, {
+    app_metadata: { ...existing.user.app_metadata, role: isAdmin ? 'admin' : null },
+    user_metadata: { ...existing.user.user_metadata, admin: isAdmin },
+  })
+  if (error) throw error
+  if (!data.user) throw new Error('User not found')
+  return toRow(data.user)
 }
