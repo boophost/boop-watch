@@ -5,6 +5,7 @@ import {
   getCachedEpisodes,
   getSeriesById,
   listSeries,
+  upsertSeriesMetadata,
   type SeriesRow,
 } from './db.js'
 import {
@@ -19,7 +20,9 @@ import {
   toPublicChase,
   type EpisodeAirInfo,
   type EpisodeChase,
+  type MalBroadcast,
 } from './episodeChase.js'
+import { fetchAnimeFull } from './jikan.js'
 
 export type { EpisodeChase }
 export { toPublicChase }
@@ -32,10 +35,33 @@ function airInfosForSeries(series: SeriesRow): EpisodeAirInfo[] {
   }))
 }
 
+export function parseStoredBroadcast(raw: string | null | undefined): MalBroadcast | null {
+  if (!raw) return null
+  try {
+    const j = JSON.parse(raw) as MalBroadcast
+    if (!j || typeof j !== 'object') return null
+    return j
+  } catch {
+    return null
+  }
+}
+
+export function serializeBroadcast(bc: MalBroadcast | null | undefined): string | null {
+  if (!bc) return null
+  if (!bc.day && !bc.time && !bc.string) return null
+  return JSON.stringify({
+    day: bc.day ?? null,
+    time: bc.time ?? null,
+    timezone: bc.timezone ?? null,
+    string: bc.string ?? null,
+  })
+}
+
 function chaseFromStatus(
   series: SeriesRow,
   status: SeriesDownloadStatus,
   libraryEpisodes: Set<number>,
+  broadcast?: MalBroadcast | null,
 ): {
   airedCount: number
   expectedForPipeline: number | null
@@ -49,8 +75,47 @@ function chaseFromStatus(
     libraryEpisodes,
     torrents: status.torrents,
     malEpisodes: series.episodes,
+    broadcast: broadcast ?? parseStoredBroadcast(series.broadcast),
   })
   return { airedCount, expectedForPipeline: expected, nextChase }
+}
+
+/** Ensure we have a broadcast blob for airing seasons that need an estimate. */
+async function ensureBroadcast(series: SeriesRow): Promise<MalBroadcast | null> {
+  const existing = parseStoredBroadcast(series.broadcast)
+  if (existing?.day && existing?.time) return existing
+
+  // Only hit Jikan when we might need an estimate (airing / unknown total).
+  const status = (series.status || '').toLowerCase()
+  const maybeAiring =
+    status.includes('air') || !series.episodes || series.episodes <= 0 || !existing
+  if (!maybeAiring && existing) return existing
+
+  try {
+    const mal = await fetchAnimeFull(series.mal_id)
+    const bc = mal.broadcast ?? null
+    const serialized = serializeBroadcast(bc)
+    if (serialized && serialized !== series.broadcast) {
+      try {
+        upsertSeriesMetadata(
+          { mal_id: series.mal_id, title: series.title },
+          {
+            broadcast: serialized,
+            ...(typeof mal.episodes === 'number' && mal.episodes > 0
+              ? { episodes: mal.episodes }
+              : {}),
+            ...(mal.status ? { status: mal.status } : {}),
+          },
+        )
+      } catch (e) {
+        console.error('chase: failed to persist broadcast —', e)
+      }
+    }
+    return bc
+  } catch (e) {
+    console.error('chase: broadcast fetch failed —', e)
+    return existing
+  }
 }
 
 export async function buildSeriesChase(
@@ -91,10 +156,18 @@ export async function buildSeriesChase(
     }
   }
 
+  // Fetch broadcast when the next chase would otherwise lack an air date.
+  let broadcast = parseStoredBroadcast(series.broadcast)
+  const prelim = chaseFromStatus(series, status, libraryEpisodes, broadcast)
+  if (prelim.nextChase && !prelim.nextChase.airsAt) {
+    broadcast = await ensureBroadcast(series)
+  }
+
   const { airedCount, expectedForPipeline, nextChase } = chaseFromStatus(
     series,
     status,
     libraryEpisodes,
+    broadcast,
   )
 
   return {
@@ -121,6 +194,7 @@ export async function buildSeriesListChases(
       continue
     }
     const status = statuses.get(s.id)!
+    // List path uses stored broadcast only (no per-row Jikan fetch).
     out.set(s.id, chaseFromStatus(s, status, new Set()).nextChase)
   }
   return out

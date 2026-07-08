@@ -42,6 +42,9 @@ export interface SeriesRow {
   tvdb_season: number | null
   episode_offset: number | null
   mapping_source: string | null // 'auto' | 'manual' | null
+  // MAL weekly broadcast (JSON: { day, time, timezone, string }) for estimating
+  // next-episode air times when Jikan hasn't listed the episode yet.
+  broadcast: string | null
 }
 
 // Columns added after the original 5-field schema. Applied as additive ALTERs so
@@ -64,6 +67,7 @@ const SERIES_EXTRA_COLUMNS: [string, string][] = [
   ['tvdb_season', 'INTEGER'],
   ['episode_offset', 'INTEGER'],
   ['mapping_source', 'TEXT'],
+  ['broadcast', 'TEXT'],
 ]
 
 export interface SeriesMetadata {
@@ -78,6 +82,7 @@ export interface SeriesMetadata {
   aired?: string | null
   studios?: string | null
   genres?: string | null
+  broadcast?: string | null
 }
 
 let db: Database.Database | null = null

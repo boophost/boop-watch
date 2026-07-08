@@ -240,20 +240,30 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
   }
   try {
     const mal = await fetchAnimeFull(series.mal_id)
-    // Persist the episode count so the episodes API's synthesized fallback can
-    // still render a full 1..N grid (with library/download status) if the
-    // episodes scrape is ever unavailable — otherwise a null count dead-ends.
-    if (typeof mal.episodes === 'number' && mal.episodes > 0 && mal.episodes !== series.episodes) {
-      try {
-        seriesDb.upsertSeriesMetadata(
-          { mal_id: series.mal_id, title: series.title },
-          { episodes: mal.episodes },
-        )
-      } catch (persistErr) {
-        console.error('detail: failed to persist episode count —', persistErr)
+    // Persist episode count + weekly broadcast so chase can estimate next air
+    // times when Jikan hasn't listed the next episode yet.
+    try {
+      const patch: Parameters<typeof seriesDb.upsertSeriesMetadata>[1] = {}
+      if (typeof mal.episodes === 'number' && mal.episodes > 0 && mal.episodes !== series.episodes) {
+        patch.episodes = mal.episodes
       }
+      if (mal.status && mal.status !== series.status) patch.status = mal.status
+      if (mal.broadcast) {
+        const serialized = JSON.stringify({
+          day: mal.broadcast.day ?? null,
+          time: mal.broadcast.time ?? null,
+          timezone: mal.broadcast.timezone ?? null,
+          string: mal.broadcast.string ?? null,
+        })
+        if (serialized !== series.broadcast) patch.broadcast = serialized
+      }
+      if (Object.keys(patch).length) {
+        seriesDb.upsertSeriesMetadata({ mal_id: series.mal_id, title: series.title }, patch)
+      }
+    } catch (persistErr) {
+      console.error('detail: failed to persist metadata —', persistErr)
     }
-    res.json({ series, mal })
+    res.json({ series: seriesDb.getSeriesById(id) ?? series, mal })
   } catch (e) {
     console.error(e)
     res.json({
