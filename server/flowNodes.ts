@@ -3259,6 +3259,14 @@ const metadataEnrich: NodeImpl = {
           aired: a.aired?.string ?? null,
           studios,
           genres,
+          broadcast: a.broadcast
+            ? JSON.stringify({
+                day: a.broadcast.day ?? null,
+                time: a.broadcast.time ?? null,
+                timezone: a.broadcast.timezone ?? null,
+                string: a.broadcast.string ?? null,
+              })
+            : null,
         }
         if (writeDb && !ctx.dryRun) {
           upsertSeriesMetadata(
