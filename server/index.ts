@@ -659,6 +659,60 @@ app.delete('/api/library/saved/:id', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
+// --- Suggestions (any logged-in user submits; admins review in /manage) ----
+
+const SUGGESTION_MAX = 2000
+
+app.post('/api/suggestions', requireAuth, (req, res) => {
+  const body = String((req.body as { body?: unknown })?.body ?? '').trim()
+  if (!body) {
+    res.status(400).json({ error: 'Suggestion cannot be empty' })
+    return
+  }
+  if (body.length > SUGGESTION_MAX) {
+    res.status(400).json({ error: `Suggestion is too long (max ${SUGGESTION_MAX} characters)` })
+    return
+  }
+  const row = seriesDb.addSuggestion(
+    res.locals.username as string,
+    (res.locals.email as string) || null,
+    body,
+  )
+  res.status(201).json({ suggestion: row })
+})
+
+app.get('/api/suggestions', requireAuth, requireAdmin, (_req, res) => {
+  res.json({ suggestions: seriesDb.listSuggestions() })
+})
+
+app.patch('/api/suggestions/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  const { status } = req.body as { status?: unknown }
+  if (
+    !Number.isFinite(id) ||
+    typeof status !== 'string' ||
+    !seriesDb.SUGGESTION_STATUSES.includes(status as seriesDb.SuggestionStatus)
+  ) {
+    res.status(400).json({ error: `status must be one of: ${seriesDb.SUGGESTION_STATUSES.join(', ')}` })
+    return
+  }
+  const row = seriesDb.setSuggestionStatus(id, status as seriesDb.SuggestionStatus)
+  if (!row) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  res.json({ suggestion: row })
+})
+
+app.delete('/api/suggestions/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id) || !seriesDb.deleteSuggestion(id)) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  res.json({ ok: true })
+})
+
 
 app.get('/config.js', (req, res) => {
   // Dynamic per-request env dump — a CDN in front of this (e.g. Cloudflare)

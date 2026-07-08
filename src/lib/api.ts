@@ -169,3 +169,13 @@ export async function unsaveAnime(id: string): Promise<void> {
   })
   if (!r.ok) throw new Error('failed to unsave anime')
 }
+
+export async function submitSuggestion(body: string): Promise<void> {
+  const r = await fetchAuth('/api/suggestions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body }),
+  })
+  const data = await parseAuthJson<{ error?: string }>(r)
+  if (!r.ok) throw new Error(data.error || 'Failed to submit suggestion')
+}

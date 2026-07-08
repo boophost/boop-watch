@@ -6,13 +6,16 @@ import './kagura.css'
 import App from './App.tsx'
 import { AuthProvider } from './lib/AuthContext.tsx'
 import { RouteAnalytics } from './components/RouteAnalytics.tsx'
+import { SuggestProvider } from './components/SuggestModal.tsx'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
       <AuthProvider>
-        <RouteAnalytics />
-        <App />
+        <SuggestProvider>
+          <RouteAnalytics />
+          <App />
+        </SuggestProvider>
       </AuthProvider>
     </BrowserRouter>
   </StrictMode>,

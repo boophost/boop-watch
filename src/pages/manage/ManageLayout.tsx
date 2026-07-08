@@ -1,5 +1,5 @@
 import { Link, NavLink, Outlet } from 'react-router-dom'
-import { Activity, CalendarClock, ExternalLink, Library, LogOut, Users, Workflow } from 'lucide-react'
+import { Activity, CalendarClock, ExternalLink, Library, Lightbulb, LogOut, Users, Workflow } from 'lucide-react'
 import { useAuth } from '@/lib/AuthContext'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { to: '/manage/schedules', label: 'Schedules', icon: CalendarClock, end: false },
   { to: '/manage/activity', label: 'Activity', icon: Activity, end: false },
   { to: '/manage/users', label: 'Users', icon: Users, end: false },
+  { to: '/manage/suggestions', label: 'Suggestions', icon: Lightbulb, end: false },
 ]
 
 export default function ManageLayout() {
