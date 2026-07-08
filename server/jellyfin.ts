@@ -116,12 +116,41 @@ async function refreshScope(): Promise<void> {
   scopeLoadedAt = Date.now()
 }
 
+// Throttles background refresh attempts when the sync keeps failing (a cold
+// start always retries; see below).
+let lastRefreshAttempt = 0
+
+// Stale-while-revalidate. The scope (Public collection + playable ids) lives in
+// memory and changes rarely, so once we have it we serve it immediately and
+// refresh in the background when it goes stale — only the very first cold load
+// blocks. Previously every request awaited refreshScope() once the 5-min cache
+// expired, so a page's catalog call and its ~20 poster (/img) requests would
+// all stall on one slow sync (Jellyfin + per-item Jikan/AniList calls) — and
+// 502 together if it threw. Serving stale keeps the portal responsive.
 export async function ensureScope(): Promise<void> {
-  if (scopeLoadedAt && Date.now() - scopeLoadedAt < SCOPE_TTL_MS) return
-  if (!scopeLoading) {
-    scopeLoading = refreshScope().finally(() => { scopeLoading = null })
+  const now = Date.now()
+  const haveData = scopeLoadedAt > 0
+  if (haveData && now - scopeLoadedAt < SCOPE_TTL_MS) return
+
+  if (!haveData) {
+    // Cold start: nothing to serve, so block on a load and let failures surface
+    // (routes turn that into a 502 "library unavailable"). Concurrent cold
+    // requests share the one in-flight load.
+    if (!scopeLoading) scopeLoading = refreshScope().finally(() => { scopeLoading = null })
+    await scopeLoading
+    return
   }
-  await scopeLoading
+
+  // Warm but stale: refresh in the background and keep serving the current
+  // scope — a slow or flaky sync never stalls (or 502s) the catalog/poster
+  // requests. Throttled to once per TTL so a persistently failing sync doesn't
+  // hammer upstreams.
+  if (!scopeLoading && now - lastRefreshAttempt >= SCOPE_TTL_MS) {
+    lastRefreshAttempt = now
+    scopeLoading = refreshScope()
+      .catch((e) => console.error('scope refresh failed (serving stale):', e instanceof Error ? e.message : e))
+      .finally(() => { scopeLoading = null })
+  }
 }
 
 /** Best-effort initial load at boot (no-op if Jellyfin isn't configured). */
