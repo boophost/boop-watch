@@ -22,6 +22,7 @@ import { discordPresenceRouter } from './discordPresence.js'
 import { searchAnimeAniList } from './anilist.js'
 import { warmScope } from './jellyfin.js'
 import { getSeriesDownloadStatus, getSeriesLibraryMedia } from './downloads.js'
+import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
@@ -209,9 +210,21 @@ app.get('/api/search/anime', requireAuth, async (req, res) => {
   }
 })
 
-app.get('/api/series', requireAuth, (_req, res) => {
+app.get('/api/series', requireAuth, async (_req, res) => {
   seriesDb.getDb()
-  res.json({ series: seriesDb.listSeries() })
+  const series = seriesDb.listSeries()
+  try {
+    const chases = await buildSeriesListChases(series)
+    res.json({
+      series: series.map((s) => ({
+        ...s,
+        nextChase: chases.get(s.id) ?? null,
+      })),
+    })
+  } catch (e) {
+    console.error('series list chase enrich failed —', e)
+    res.json({ series })
+  }
 })
 
 app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
@@ -460,7 +473,14 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
   }
   try {
     const status = await getSeriesDownloadStatus(id)
-    res.json({ ...status, blacklist: blacklist.listBlacklist(id) })
+    const chase = await buildSeriesChase(id)
+    res.json({
+      ...status,
+      blacklist: blacklist.listBlacklist(id),
+      airedCount: chase.airedCount,
+      expectedForPipeline: chase.expectedForPipeline,
+      nextChase: chase.nextChase,
+    })
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to load downloads' })

@@ -1,5 +1,10 @@
 // Typed client for the public portal JSON APIs (server/publicRoutes.ts).
 
+import type { ChaseState, EpisodeChase } from '@/lib/chase'
+import { supabase } from './supabase'
+
+export type { ChaseState, EpisodeChase }
+
 export interface CatalogItem {
   id: string
   type?: string
@@ -11,8 +16,6 @@ export interface Catalog {
   items: CatalogItem[]
   genres: string[]
 }
-
-import { supabase } from './supabase'
 
 export async function fetchAuth(url: string, options: RequestInit = {}) {
   const { data: { session } } = await supabase.auth.getSession()
@@ -67,7 +70,13 @@ export interface FeaturedItem {
   watchId: string
 }
 
-export interface SeriesEpisode { id: string; name: string; num: string }
+export interface SeriesEpisode {
+  id: string | null
+  name: string
+  num: string
+  status?: ChaseState
+  airsAt?: string | null
+}
 export interface SeriesDetail {
   type: 'series'
   id: string
@@ -79,6 +88,7 @@ export interface SeriesDetail {
   // Catalog series id for the admin-only "Library settings" shortcut; null when
   // the title isn't in the catalog.
   manageId?: number | null
+  nextEpisode?: EpisodeChase | null
 }
 export interface MovieDetail {
   type: 'movie'
@@ -110,6 +120,7 @@ export interface WatchData {
   segments: Segment[]
   // Catalog series id for the admin-only "Library settings" shortcut.
   manageId?: number | null
+  nextEpisode?: EpisodeChase | null
 }
 
 export interface ScheduleEvent {
