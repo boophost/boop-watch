@@ -2287,6 +2287,7 @@ interface SearchOpts {
   requireDualAudio: boolean
   minSeeders: number
   excludeCodecs: string[] // video codecs to drop outright, e.g. ['av1']
+  maxSizeBytes: number // per-torrent size cap; 0 = no cap
 }
 
 function passesFilters(c: Candidate, o: SearchOpts): boolean {
@@ -2296,6 +2297,9 @@ function passesFilters(c: Candidate, o: SearchOpts): boolean {
   if (o.requireDualAudio && !c.dualAudio) return false
   // Drop unplayable codecs (only when detected — an untagged release is kept).
   if (c.videoCodec && o.excludeCodecs.includes(c.videoCodec)) return false
+  // Size cap (only when the release reports a size) — keeps a season-pack search
+  // from picking an 80GB+ Blu-ray remux over a reasonable WEB-DL.
+  if (o.maxSizeBytes > 0 && c.size != null && c.size > o.maxSizeBytes) return false
   return true
 }
 
@@ -2380,6 +2384,7 @@ const torrentSearch: NodeImpl = {
       { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho only — TsukiHime reports no seeders).' },
       { key: 'minTitleMatch', label: 'Title match (0-1)', kind: 'number', default: 0.5, help: 'Min fraction of the show’s title words a result must contain. Guards against the index returning a different show.' },
       { key: 'maxEpisodes', label: 'Max episodes', kind: 'number', default: 26, help: 'Episode mode: cap on how many recent episodes to queue per show.' },
+      { key: 'maxSizeGB', label: 'Max torrent size (GB)', kind: 'number', default: 0, help: 'Drop releases larger than this (per torrent). Keeps season-pack searches from grabbing 80GB+ Blu-ray remuxes over a ~20GB WEB-DL. 0 = no cap.' },
       { key: 'maxItems', label: 'Max shows', kind: 'number', default: 10, help: 'Safety cap of searches per run. 0 = unlimited.' },
     ],
   },
@@ -2400,6 +2405,7 @@ const torrentSearch: NodeImpl = {
         .split(',')
         .map((c) => c.trim().toLowerCase())
         .filter(Boolean),
+      maxSizeBytes: Math.max(0, num(config, 'maxSizeGB', 0)) * 1e9,
     }
     const maxEpisodes = Math.max(1, num(config, 'maxEpisodes', 26))
     const minTitleMatch = num(config, 'minTitleMatch', 0.5)
@@ -2480,6 +2486,13 @@ const torrentSearch: NodeImpl = {
           .filter((c) => passesFilters(c, opts))
         const blacklistedOut = relevant.length - relevant.filter((c) => !c.hash || !blocked.has(c.hash.toLowerCase())).length
         if (blacklistedOut > 0) ctx.notes.push(`skipped ${blacklistedOut} blacklisted release(s) for "${q}"`)
+        if (opts.maxSizeBytes > 0) {
+          const tooBig = relevant.filter((c) => c.size != null && c.size > opts.maxSizeBytes)
+          if (tooBig.length > 0) {
+            const biggest = Math.max(...tooBig.map((c) => c.size ?? 0)) / 1e9
+            ctx.notes.push(`dropped ${tooBig.length} over-size release(s) for "${q}" (largest ${biggest.toFixed(0)}GB > ${(opts.maxSizeBytes / 1e9).toFixed(0)}GB cap)`)
+          }
+        }
 
         if (cands.length === 0) {
           missed.push(item)
