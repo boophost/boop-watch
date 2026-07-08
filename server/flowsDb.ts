@@ -187,7 +187,11 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
   nodes: [
     { id: 'qb', type: 'source.qbittorrent', position: { x: 0, y: 300 }, config: { category: 'anime', completedOnly: true, pathFrom: '', pathTo: '' } },
     { id: 'exp', type: 'transform.expand-files', position: { x: 260, y: 300 }, config: { pathField: 'content_path', extensions: 'mkv,mp4' } },
-    { id: 'match', type: 'enrich.indexer-match', position: { x: 520, y: 300 }, config: { setField: 'mal_id', fromField: 'mal_id', queryField: 'name', matchMode: 'tokens', threshold: 0.6 } },
+    // Parse the season from the torrent name so match can route a file to the
+    // right cour of a franchise whose per-season titles are identical (e.g.
+    // Mushoku Tensei S1/S2/S3 all share "Mushoku Tensei").
+    { id: 'pseason', type: 'transform.parse-season', position: { x: 390, y: 300 }, config: { sourceField: 'name', targetField: 'release_season' } },
+    { id: 'match', type: 'enrich.indexer-match', position: { x: 520, y: 300 }, config: { setField: 'mal_id', fromField: 'mal_id', queryField: 'name', matchMode: 'tokens', threshold: 0.6, seasonField: 'release_season' } },
     { id: 'meta', type: 'enrich.metadata', position: { x: 780, y: 220 }, config: { malField: 'mal_id', writeDb: true, maxItems: 0 } },
     { id: 'probe', type: 'enrich.media-probe', position: { x: 1040, y: 300 }, config: { fileField: 'file_path' } },
     // Split identified files (scorable/upgradable) from unmatched ones (import as-is).
@@ -240,7 +244,8 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
   ],
   edges: [
     { id: 'e1', source: 'qb', sourceHandle: 'items', target: 'exp', targetHandle: 'in' },
-    { id: 'e2', source: 'exp', sourceHandle: 'files', target: 'match', targetHandle: 'in' },
+    { id: 'e2', source: 'exp', sourceHandle: 'files', target: 'pseason', targetHandle: 'in' },
+    { id: 'e2b', source: 'pseason', sourceHandle: 'out', target: 'match', targetHandle: 'in' },
     { id: 'e3', source: 'match', sourceHandle: 'matched', target: 'meta', targetHandle: 'in' },
     // Unmatched files still import (just without our metadata / clean year).
     { id: 'e4', source: 'match', sourceHandle: 'unmatched', target: 'probe', targetHandle: 'in' },

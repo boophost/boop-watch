@@ -1978,6 +1978,7 @@ const indexerMatch: NodeImpl = {
         default: 'exact',
       },
       { key: 'threshold', label: 'Min word overlap (0-1)', kind: 'number', default: 0.6, help: 'Tokens mode: fraction of a catalog title’s distinctive words the release must contain.' },
+      { key: 'seasonField', label: 'Season field', kind: 'text', default: '', help: 'Tokens mode: item field holding a numeric season (e.g. from Parse season). When present, only catalog rows whose tvdb_season matches are considered, so a file routes to the right season of a same-title franchise. Empty = title-only matching.' },
     ],
   },
   async run(inputs, config, ctx) {
@@ -1986,7 +1987,12 @@ const indexerMatch: NodeImpl = {
     const queryField = str(config, 'queryField', 'name')
     const mode = str(config, 'matchMode', 'exact')
     const threshold = num(config, 'threshold', 0.6)
+    const seasonField = str(config, 'seasonField', '')
     const catalog = listSeries()
+    // When the release's season is known, a matching tvdb_season is strong
+    // evidence, so we accept a lower title overlap than the general threshold
+    // (the franchise name alone is enough to disambiguate within one season).
+    const SEASON_FLOOR = 0.3
 
     // Precompute each catalog row's distinctive tokens across its title variants
     // (romaji / english / japanese), for tokens mode.
@@ -2000,13 +2006,18 @@ const indexerMatch: NodeImpl = {
           (item.original_title != null && norm(s.title) === norm(item.original_title)),
       )
 
-    // Tokens mode: pick the catalog row whose distinctive words are most present
-    // in the release name, above the threshold (best overlap wins ties).
-    const matchTokens = (item: FlowItem): (typeof catalog)[number] | undefined => {
+    // Best title-token overlap of a release name against a set of candidate rows.
+    const hayOf = (item: FlowItem) => {
       const hay = norm(item[queryField])
-      const collapsed = hay.replace(/ /g, '')
+      return { hay, collapsed: hay.replace(/ /g, '') }
+    }
+    const bestByTokens = (
+      rows: (typeof catalog),
+      hay: string,
+      collapsed: string,
+    ): { row: (typeof catalog)[number] | undefined; score: number } => {
       let best: { row: (typeof catalog)[number] | undefined; score: number } = { row: undefined, score: 0 }
-      for (const s of catalog) {
+      for (const s of rows) {
         let rowScore = 0
         for (const variant of titleVariants(s)) {
           const toks = significantTokens(variant)
@@ -2016,6 +2027,25 @@ const indexerMatch: NodeImpl = {
         }
         if (rowScore > best.score) best = { row: s, score: rowScore }
       }
+      return best
+    }
+
+    // Tokens mode: pick the catalog row whose distinctive words are most present
+    // in the release name. When a season is known, first try to disambiguate
+    // within the rows of that tvdb_season (accepting a lower overlap, since the
+    // season match already narrows it); otherwise fall back to title-only.
+    const matchTokens = (item: FlowItem): (typeof catalog)[number] | undefined => {
+      const { hay, collapsed } = hayOf(item)
+      const season = seasonField ? Number(item[seasonField]) : NaN
+      if (Number.isFinite(season)) {
+        const inSeason = catalog.filter((s) => s.tvdb_season != null && Number(s.tvdb_season) === season)
+        if (inSeason.length > 0) {
+          const best = bestByTokens(inSeason, hay, collapsed)
+          if (best.row && best.score >= Math.min(threshold, SEASON_FLOOR)) return best.row
+        }
+        // No confident same-season row → fall through to title-only matching.
+      }
+      const best = bestByTokens(catalog, hay, collapsed)
       return best.score >= threshold ? best.row : undefined
     }
 
@@ -2176,6 +2206,33 @@ function parseEpisode(title: string): number | null {
   if (m) return Number(m[1])
   m = title.match(/\s(\d{2,4})\s*(?:\[|\()/)
   if (m) return Number(m[1])
+  return null
+}
+
+// Roman numerals I–XII → number, for anime sequel titles ("Mushoku Tensei II").
+const ROMAN_SEASON: Record<string, number> = {
+  i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10, xi: 11, xii: 12,
+}
+
+// Best-effort season number from a release/torrent name. Distinguishes seasons
+// of the same franchise (whose titles are otherwise near-identical) so a file
+// routes to the right catalog cour. Tries explicit "S03"/"Season 3"/"3rd Season"
+// forms first, then a trailing roman numeral ("... II"); returns null when a
+// name carries no season marker (caller then treats it as unrestricted, not S1).
+function parseSeason(title: string): number | null {
+  // "S03", "S3", "S03E02" — the season digits of an SxxEyy / Sxx tag.
+  let m = title.match(/\bS(\d{1,2})(?:\s*E\d{1,4})?\b/i)
+  if (m) return Number(m[1])
+  // "Season 3", "Season 03"
+  m = title.match(/\bSeason\s*0*(\d{1,2})\b/i)
+  if (m) return Number(m[1])
+  // "3rd Season", "2nd Season"
+  m = title.match(/\b(\d{1,2})(?:st|nd|rd|th)\s*Season\b/i)
+  if (m) return Number(m[1])
+  // Trailing roman numeral used as a sequel marker ("Mushoku Tensei II",
+  // "... III: Subtitle"). Bare "I" is too ambiguous to trust, so ignore it.
+  m = title.match(/\b(II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\b(?=\s*[:\-–]|\s|$)/)
+  if (m) return ROMAN_SEASON[m[1].toLowerCase()] ?? null
   return null
 }
 
@@ -2681,6 +2738,41 @@ const expandFiles: NodeImpl = {
     }
     ctx.notes.push(`${files.length} file(s) from ${allInputs(inputs).length} item(s), ${empty.length} with none`)
     return { files, empty }
+  },
+}
+
+const parseSeasonNode: NodeImpl = {
+  spec: {
+    type: 'transform.parse-season',
+    label: 'Parse season',
+    category: 'enrich',
+    description:
+      'Reads a season number from a release/torrent name (S03, Season 3, 3rd Season, or a roman-numeral sequel marker like "II") into a numeric field. Feed it to Match indexer title’s "Season field" so a file routes to the right season of a franchise whose per-season titles are otherwise identical.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [
+      { key: 'sourceField', label: 'Name field', kind: 'text', default: 'name', help: 'Item field holding the release/torrent name. Falls back to file_name then torrent_name if empty.' },
+      { key: 'targetField', label: 'Season field', kind: 'text', default: 'release_season', help: 'Numeric season written here (left unset when the name carries no season marker).' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const sourceField = str(config, 'sourceField', 'name')
+    const targetField = str(config, 'targetField', 'release_season')
+    const out: FlowItem[] = []
+    let parsed = 0
+    for (const item of allInputs(inputs)) {
+      const name = String(item[sourceField] ?? item.file_name ?? item.torrent_name ?? '')
+      const season = parseSeason(name)
+      if (season != null) {
+        out.push({ ...item, [targetField]: season })
+        parsed++
+      } else {
+        // No marker — leave the field unset so the matcher stays unrestricted.
+        out.push(item)
+      }
+    }
+    ctx.notes.push(`parsed a season for ${parsed}/${out.length} item(s)`)
+    return { out }
   },
 }
 
@@ -4181,6 +4273,7 @@ const IMPLS: NodeImpl[] = [
   groupPick,
   join,
   expandFiles,
+  parseSeasonNode,
   mediaProbe,
   extractSubs,
   fetchSubs,
