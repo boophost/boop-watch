@@ -25,7 +25,7 @@ import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
 import { posthogUiHost } from './posthogConfig.js'
-import { listAllUsers } from './users.js'
+import { deleteUser, listAllUsers, setUserAdmin } from './users.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -124,6 +124,44 @@ app.get('/api/users', requireAuth, requireAdmin, async (_req, res) => {
   } catch (e) {
     console.error(e)
     const msg = e instanceof Error ? e.message : 'Failed to list users'
+    res.status(502).json({ error: msg })
+  }
+})
+
+app.patch('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const id = String(req.params.id)
+  const { isAdmin } = req.body as { isAdmin?: unknown }
+  if (typeof isAdmin !== 'boolean') {
+    res.status(400).json({ error: 'isAdmin (boolean) required' })
+    return
+  }
+  if (id === res.locals.username && !isAdmin) {
+    res.status(400).json({ error: 'Cannot remove your own admin access' })
+    return
+  }
+  try {
+    const user = await setUserAdmin(id, isAdmin)
+    res.json({ user })
+  } catch (e) {
+    console.error(e)
+    const msg = e instanceof Error ? e.message : 'Failed to update user'
+    const status = msg === 'User not found' ? 404 : 502
+    res.status(status).json({ error: msg })
+  }
+})
+
+app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const id = String(req.params.id)
+  if (id === res.locals.username) {
+    res.status(400).json({ error: 'Cannot delete your own account' })
+    return
+  }
+  try {
+    await deleteUser(id)
+    res.json({ ok: true })
+  } catch (e) {
+    console.error(e)
+    const msg = e instanceof Error ? e.message : 'Failed to delete user'
     res.status(502).json({ error: msg })
   }
 })
