@@ -13,6 +13,7 @@ import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
 import { getPortalItem, getPortalEpisodes } from './portalDb.js'
 import { getBanner, getSelectedBanner, findByMalId, type BannerRow } from './db.js'
+import { buildSeriesChase, toPublicChase } from './chaseContext.js'
 
 export const publicRouter = Router()
 
@@ -188,13 +189,43 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
   try {
     if (pItem?.type === 'Series') {
       const eps = getPortalEpisodes(id)
-      const episodes = eps.map((ep) => ({
+      const episodes: Array<{
+        id: string | null
+        name: string
+        num: string
+        status?: string
+        airsAt?: string | null
+      }> = eps.map((ep) => ({
         id: ep.id,
         name: ep.name || 'Episode',
         num: (ep.parent_index_number != null && ep.index_number != null)
           ? `S${ep.parent_index_number}·E${ep.index_number}`
           : (ep.index_number != null ? `E${ep.index_number}` : '·'),
       }))
+      const manageRow = pItem.mal_id != null ? findByMalId(pItem.mal_id) : null
+      const manageId = manageRow?.id ?? null
+      let nextEpisode: ReturnType<typeof toPublicChase> = null
+      if (manageId != null) {
+        try {
+          const chase = await buildSeriesChase(manageId)
+          nextEpisode = toPublicChase(chase.nextChase)
+          if (nextEpisode) {
+            const stubNum =
+              eps[0]?.parent_index_number != null
+                ? `S${eps[0].parent_index_number}·E${nextEpisode.episode}`
+                : `E${nextEpisode.episode}`
+            episodes.push({
+              id: null,
+              name: nextEpisode.title || `Episode ${nextEpisode.episode}`,
+              num: stubNum,
+              status: nextEpisode.state,
+              airsAt: nextEpisode.airsAt,
+            })
+          }
+        } catch (e) {
+          console.error('catalog chase failed —', e)
+        }
+      }
       res.json({
         type: 'series',
         id,
@@ -203,9 +234,8 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
         genres: pItem.genres ? JSON.parse(pItem.genres) : [],
         year: pItem.production_year || null,
         episodes,
-        // Catalog id for the admin "Library settings" shortcut (harmless number;
-        // the /manage route is admin-gated). null when this title isn't catalogued.
-        manageId: pItem.mal_id != null ? (findByMalId(pItem.mal_id)?.id ?? null) : null,
+        manageId,
+        nextEpisode,
       })
     } else if (pItem) {
       res.json({
@@ -296,7 +326,16 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
   // (episodes) or the item itself (movies). null when not catalogued.
   const manageMal = (item.SeriesId ? getPortalItem(item.SeriesId) : pSelf)?.mal_id
   const manageId = manageMal != null ? (findByMalId(manageMal)?.id ?? null) : null
-  res.json({ ...buildWatchData(id, item, siblings, segments), manageId })
+  let nextEpisode: ReturnType<typeof toPublicChase> = null
+  if (manageId != null && item.Type === 'Episode') {
+    try {
+      const chase = await buildSeriesChase(manageId)
+      nextEpisode = toPublicChase(chase.nextChase)
+    } catch (e) {
+      console.error('watch chase failed —', e)
+    }
+  }
+  res.json({ ...buildWatchData(id, item, siblings, segments), manageId, nextEpisode })
 })
 
 // Weekly anime schedule, filtered to the library.

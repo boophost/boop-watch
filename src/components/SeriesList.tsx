@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { fetchAuth } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Trash2 } from 'lucide-react'
+import { adminChaseChipLabel, type EpisodeChase } from '@/lib/chase'
 
 export interface SeriesEntry {
   id: number
@@ -19,6 +20,7 @@ export interface SeriesEntry {
   tvdb_season?: number | null
   episode_offset?: number | null
   mapping_source?: string | null
+  nextChase?: EpisodeChase | null
 }
 
 interface SeriesListProps {
@@ -99,7 +101,24 @@ export function SeriesList({ refreshKey }: SeriesListProps) {
           </div>
           <div className="min-w-0 flex flex-1 flex-col gap-2">
             <div>
-              <span className="font-medium leading-snug">{s.title}</span>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <span className="font-medium leading-snug">{s.title}</span>
+                {s.nextChase && s.nextChase.state !== 'ready' ? (
+                  <span
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                      s.nextChase.state === 'waiting'
+                        ? 'bg-sky-500/15 text-sky-400'
+                        : s.nextChase.state === 'searching'
+                          ? 'bg-amber-500/15 text-amber-400'
+                          : s.nextChase.state === 'downloading'
+                            ? 'bg-sky-500/15 text-sky-400'
+                            : 'bg-violet-500/15 text-violet-300'
+                    }`}
+                  >
+                    {adminChaseChipLabel(s.nextChase)}
+                  </span>
+                ) : null}
+              </div>
               <span className="mt-0.5 block text-[10px] text-muted-foreground">
                 Open for episodes and details
               </span>

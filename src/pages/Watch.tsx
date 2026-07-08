@@ -7,6 +7,7 @@ import {
 import { DefaultVideoLayout, defaultLayoutIcons } from '@vidstack/react/player/layouts/default'
 import HLS from 'hls.js'
 import { Icon, type IconName } from '@/components/Icon'
+import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { SearchBar } from '@/components/SearchBar'
 import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
@@ -646,9 +647,30 @@ export default function Watch() {
                   </Link>
                 )
               })}
+              {data.nextEpisode ? (
+                <div className="eprow chasing">
+                  <span className="epn">E{data.nextEpisode.episode}</span>
+                  <span className="ept">{data.nextEpisode.title || `Episode ${data.nextEpisode.episode}`}</span>
+                  <span className="epnow">
+                    <EpisodeStatus chase={data.nextEpisode} />
+                  </span>
+                </div>
+              ) : null}
             </div>
           </aside>
         )}
+        {data.episodes.length === 0 && data.nextEpisode ? (
+          <aside className="col-eps panel">
+            <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span></div>
+            <div className="eps-list">
+              <div className="eprow chasing">
+                <span className="epn">E{data.nextEpisode.episode}</span>
+                <span className="ept">{data.nextEpisode.title || `Episode ${data.nextEpisode.episode}`}</span>
+                <span className="epnow"><EpisodeStatus chase={data.nextEpisode} /></span>
+              </div>
+            </div>
+          </aside>
+        ) : null}
       </div>
     </PlayerShell>
   )

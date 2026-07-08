@@ -15,6 +15,12 @@ import {
 import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
+import {
+  adminChaseChipLabel,
+  formatAirShort,
+  formatCountdown,
+  type EpisodeChase,
+} from '@/lib/chase'
 
 interface SeriesDownload {
   hash: string
@@ -43,6 +49,9 @@ interface DownloadStatus {
   torrents: SeriesDownload[]
   siteEpisodes: Record<string, string>
   blacklist: BlacklistRow[]
+  airedCount?: number
+  expectedForPipeline?: number | null
+  nextChase?: EpisodeChase | null
 }
 
 // The best torrent covering a given episode: a batch (covers all) or a
@@ -292,6 +301,92 @@ function PipelineStrip(props: {
           ) : null}
         </div>
       ))}
+    </div>
+  )
+}
+
+function chaseStepActive(
+  state: EpisodeChase['state'],
+  step: 'waiting' | 'download' | 'library' | 'onsite',
+): 'done' | 'on' | 'pending' {
+  if (step === 'waiting') {
+    if (state === 'waiting' || state === 'searching') return 'on'
+    return 'done'
+  }
+  if (step === 'download') {
+    if (state === 'downloading') return 'on'
+    if (state === 'importing' || state === 'ready') return 'done'
+    return 'pending'
+  }
+  if (step === 'library') {
+    if (state === 'importing') return 'on'
+    if (state === 'ready') return 'done'
+    return 'pending'
+  }
+  return state === 'ready' ? 'done' : 'pending'
+}
+
+function EpisodeChasePanel({ chase }: { chase: EpisodeChase }) {
+  const timing =
+    chase.state === 'waiting'
+      ? [formatAirShort(chase.airsAt), formatCountdown(chase.airsAt)].filter(Boolean).join(' · ')
+      : formatCountdown(chase.airsAt) ?? adminChaseChipLabel(chase)
+
+  const steps: Array<{ key: 'waiting' | 'download' | 'library' | 'onsite'; label: string }> = [
+    {
+      key: 'waiting',
+      label:
+        chase.state === 'waiting'
+          ? 'Waiting for release'
+          : chase.state === 'searching'
+            ? 'Searching for release'
+            : 'Released',
+    },
+    {
+      key: 'download',
+      label:
+        chase.state === 'downloading' && chase.progress != null
+          ? `Downloading ${Math.round(chase.progress * 100)}%`
+          : chase.state === 'searching'
+            ? 'Download'
+            : chase.state === 'downloading'
+              ? 'Downloading'
+              : 'Download',
+    },
+    { key: 'library', label: chase.state === 'importing' ? 'Importing' : 'Library' },
+    { key: 'onsite', label: 'On site' },
+  ]
+
+  return (
+    <div className="rounded-lg border border-border bg-card px-4 py-3">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="text-sm font-semibold">Next episode · Ep {chase.episode}</div>
+        <div className="text-xs text-muted-foreground">{timing}</div>
+      </div>
+      <div className="flex flex-wrap items-center gap-1 text-xs">
+        {steps.map((s, i) => {
+          const tone = chaseStepActive(chase.state, s.key)
+          const cls =
+            tone === 'on'
+              ? 'rounded bg-sky-500/15 px-2 py-1 text-sky-400'
+              : tone === 'done'
+                ? 'px-2 py-1 text-emerald-400'
+                : 'px-2 py-1 text-muted-foreground'
+          return (
+            <div key={s.key} className="flex items-center gap-1">
+              <span className={cls}>
+                {tone === 'on' && (chase.state === 'downloading' || chase.state === 'importing') ? (
+                  <Loader2 className="mr-1 inline size-3 animate-spin" />
+                ) : null}
+                {s.label}
+              </span>
+              {i < steps.length - 1 ? (
+                <ChevronRight className="size-3.5 text-muted-foreground/40" />
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -729,13 +824,18 @@ export default function SeriesDetail() {
           </div>
         </section>
 
-        <PipelineStrip
-          expected={mal?.episodes ?? series.episodes ?? null}
-          libCount={libMedia.size}
-          torrents={dl?.torrents ?? []}
-          onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
-          qbitConfigured={dl?.qbitConfigured ?? false}
-        />
+        <div className="space-y-2">
+          <PipelineStrip
+            expected={dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null}
+            libCount={libMedia.size}
+            torrents={dl?.torrents ?? []}
+            onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
+            qbitConfigured={dl?.qbitConfigured ?? false}
+          />
+          {dl?.nextChase && dl.nextChase.state !== 'ready' ? (
+            <EpisodeChasePanel chase={dl.nextChase} />
+          ) : null}
+        </div>
 
         <section>
           <div className="mb-4 flex flex-wrap items-center gap-3">

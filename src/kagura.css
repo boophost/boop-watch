@@ -730,3 +730,92 @@ body.fs .player .pbar { display: none; }
 body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 
 @keyframes suggest-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* Next-episode chase status (Title + Watch episode rows) */
+.kagura .ep-status,
+.player .ep-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+.kagura .ep-status.waiting,
+.player .ep-status.waiting { color: var(--fg-muted); }
+.kagura .ep-status.searching,
+.player .ep-status.searching { color: oklch(0.82 0.14 85); }
+.kagura .ep-status.downloading,
+.player .ep-status.downloading { color: var(--info); }
+.kagura .ep-status.importing,
+.player .ep-status.importing { color: var(--accent-soft-fg); }
+
+.kagura .ep-status-ico,
+.player .ep-status-ico {
+  display: inline-flex;
+  position: relative;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.kagura .ep-status.waiting .ep-status-ico,
+.player .ep-status.waiting .ep-status-ico {
+  animation: ep-status-pulse 1.4s ease-in-out infinite;
+}
+.kagura .ep-status.searching .ep-status-ico::after,
+.player .ep-status.searching .ep-status-ico::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  animation: ep-status-radar 1.6s ease-out infinite;
+}
+.kagura .ep-status.downloading .ep-status-ico,
+.player .ep-status.downloading .ep-status-ico {
+  animation: ep-status-bounce 1.1s ease-in-out infinite;
+}
+.kagura .ep-status.importing .ep-status-ico,
+.player .ep-status.importing .ep-status-ico {
+  animation: ep-status-spin 1s linear infinite;
+}
+
+.kagura .eprow.chasing,
+.player .eprow.chasing {
+  color: var(--fg-muted);
+  cursor: default;
+  pointer-events: none;
+}
+.kagura .badge.ep-chase {
+  height: auto;
+  min-height: 20px;
+  padding: 2px 8px;
+}
+
+@keyframes ep-status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes ep-status-radar {
+  0% { transform: scale(0.55); opacity: 0.85; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+@keyframes ep-status-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(1.5px); }
+}
+@keyframes ep-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kagura .ep-status-ico,
+  .player .ep-status-ico,
+  .kagura .ep-status.searching .ep-status-ico::after,
+  .player .ep-status.searching .ep-status-ico::after {
+    animation: none !important;
+  }
+}
+
