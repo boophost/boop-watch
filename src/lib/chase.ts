@@ -45,7 +45,8 @@ export function publicChaseLabel(
     case 'waiting': {
       const cd = formatCountdown(chase.airsAt, now)
       if (cd && !cd.startsWith('aired')) return cd.startsWith('airs') ? cd : `airs in ${cd}`
-      return formatAirShort(chase.airsAt) ?? 'upcoming'
+      if (chase.airsAt) return formatAirShort(chase.airsAt) ?? 'upcoming'
+      return 'upcoming'
     }
     case 'searching':
       return 'searching'
@@ -64,7 +65,8 @@ export function adminChaseChipLabel(chase: EpisodeChase, now = Date.now()): stri
   switch (chase.state) {
     case 'waiting': {
       const cd = formatCountdown(chase.airsAt, now)
-      return cd && !cd.startsWith('aired') ? `${ep} · ${cd}` : `${ep} · upcoming`
+      if (cd && !cd.startsWith('aired')) return `${ep} · ${cd}`
+      return chase.airsAt ? `${ep} · upcoming` : `${ep} · upcoming`
     }
     case 'searching':
       return `${ep} · searching`

@@ -43,6 +43,8 @@ function pickNextEpisode(
   episodes: EpisodeAirInfo[],
   onSite: (n: number) => boolean,
   now: number,
+  malEpisodes: number | null | undefined,
+  siteEpisodes: Record<string, string>,
 ): EpisodeAirInfo | null {
   const candidates = [...episodes]
     .filter((e) => Number.isFinite(e.episode) && e.episode > 0)
@@ -62,9 +64,20 @@ function pickNextEpisode(
   })
   if (future) return future
 
-  // No dated candidates: next gap after highest on-site / known ep.
+  // Known row not yet on site (undated).
   const missing = candidates.find((e) => !onSite(e.episode))
-  return missing ?? null
+  if (missing) return missing
+
+  // Airing seasons often only cache episodes that already exist on MAL —
+  // once those are on site, synthesize the next number until MAL total says stop.
+  const siteNums = Object.keys(siteEpisodes)
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0)
+  const knownMax = Math.max(0, ...candidates.map((e) => e.episode), ...siteNums)
+  if (knownMax < 1) return null
+  const guess = knownMax + 1
+  if (malEpisodes && malEpisodes > 0 && guess > malEpisodes) return null
+  return { episode: guess, title: null, aired: null }
 }
 
 function torrentsForEpisode(torrents: ChaseTorrent[], episode: number): ChaseTorrent[] {
@@ -76,16 +89,24 @@ export function resolveNextChase(args: {
   siteEpisodes: Record<string, string>
   libraryEpisodes: Set<number>
   torrents: ChaseTorrent[]
+  malEpisodes?: number | null
   now?: number
 }): EpisodeChase | null {
   const now = args.now ?? Date.now()
   const onSite = (n: number) => !!args.siteEpisodes[String(n)]
-  const next = pickNextEpisode(args.episodes, onSite, now)
+  const next = pickNextEpisode(
+    args.episodes,
+    onSite,
+    now,
+    args.malEpisodes,
+    args.siteEpisodes,
+  )
   if (!next || onSite(next.episode)) return null
 
   const airsAt = next.aired ?? null
   const airMs = airsAt ? Date.parse(airsAt) : NaN
   const future = Number.isFinite(airMs) && airMs > now
+  const knownPast = Number.isFinite(airMs) && airMs <= now
 
   const epTorrents = torrentsForEpisode(args.torrents, next.episode)
   const active = epTorrents.filter((t) => t.progress < 1)
@@ -101,9 +122,12 @@ export function resolveNextChase(args: {
     progress = Math.max(...active.map((t) => t.progress))
   } else if (complete.length || inLib) {
     state = 'importing'
-  } else {
-    // Past air (or unknown air date) with nothing in flight.
+  } else if (knownPast) {
+    // Past air with nothing in flight.
     state = 'searching'
+  } else {
+    // Synthesized / undated next ep — show as upcoming until we know it aired.
+    state = 'waiting'
   }
 
   return {
