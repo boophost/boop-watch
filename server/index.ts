@@ -12,6 +12,7 @@ import {
   episodeNumberFromUrl,
 } from './jikan.js'
 import * as seriesDb from './db.js'
+import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, BANNERS_DIR } from './publicRoutes.js'
 import { ensureSeriesBanners } from './banners.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
@@ -404,6 +405,47 @@ app.delete('/api/series/:id', requireAuth, (req, res) => {
     return
   }
   res.json({ ok: true })
+})
+
+// Multi-season placement override. A cour whose season-map dataset value is
+// wrong (public data mis-tags some split cours) gets a manual TVDB season +
+// episode offset here; the auto-enrich then leaves it alone. `source: 'auto'`
+// resets the row and re-resolves from the dataset.
+app.patch('/api/series/:id/mapping', requireAuth, requireAdmin, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  const series = seriesDb.getSeriesById(id)
+  if (!series) {
+    res.status(404).json({ error: 'Series not found' })
+    return
+  }
+  const body = req.body as { tvdb_id?: unknown; tvdb_season?: unknown; episode_offset?: unknown; source?: unknown }
+  const numOrNull = (v: unknown): number | null => {
+    if (v == null || v === '') return null
+    const n = Number(v)
+    return Number.isFinite(n) ? Math.trunc(n) : null
+  }
+  try {
+    if (body.source === 'auto') {
+      // Clear the manual flag, then re-resolve from the dataset.
+      seriesDb.setSeasonMapping(series.mal_id, { source: null })
+      await enrichSeasonMapping(series.mal_id, { write: true })
+    } else {
+      seriesDb.setSeasonMapping(series.mal_id, {
+        tvdb_id: numOrNull(body.tvdb_id),
+        tvdb_season: numOrNull(body.tvdb_season),
+        episode_offset: numOrNull(body.episode_offset) ?? 0,
+        source: 'manual',
+      })
+    }
+    res.json({ series: seriesDb.getSeriesById(id) })
+  } catch (e) {
+    console.error('mapping update failed', e)
+    res.status(500).json({ error: 'Could not update mapping' })
+  }
 })
 
 // --- Series downloads / blacklist (manage series page) --------------------

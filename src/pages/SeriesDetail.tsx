@@ -318,6 +318,11 @@ export default function SeriesDetail() {
   const [busyHash, setBusyHash] = useState<string | null>(null)
   const [researchMsg, setResearchMsg] = useState('')
 
+  // Season-mapping editor (multi-season placement override).
+  const [mapEdit, setMapEdit] = useState<{ tvdb_id: string; tvdb_season: string; episode_offset: string } | null>(null)
+  const [mapBusy, setMapBusy] = useState(false)
+  const [mapMsg, setMapMsg] = useState('')
+
   const [banners, setBanners] = useState<Banner[]>([])
   const [bannersLoading, setBannersLoading] = useState(true)
   const [bannerBusy, setBannerBusy] = useState(false)
@@ -464,6 +469,37 @@ export default function SeriesDetail() {
       setResearchMsg(e instanceof Error ? e.message : 'Re-search failed')
     } finally {
       setBusyHash(null)
+    }
+  }
+
+  // Save (or reset) the multi-season placement override. `reset` re-resolves
+  // from the season-map dataset; otherwise the edited values are pinned as a
+  // manual override the auto-enrich won't clobber.
+  const saveMapping = async (reset = false) => {
+    setMapBusy(true)
+    setMapMsg('')
+    try {
+      const body = reset
+        ? { source: 'auto' }
+        : {
+            tvdb_id: mapEdit?.tvdb_id ?? '',
+            tvdb_season: mapEdit?.tvdb_season ?? '',
+            episode_offset: mapEdit?.episode_offset ?? '',
+          }
+      const r = await fetchAuth(`/api/series/${id}/mapping`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const d = await parseAuthJson<{ series?: SeriesEntry; error?: string }>(r)
+      if (!r.ok || !d.series) throw new Error(d.error ?? 'Update failed')
+      setSeries(d.series)
+      setMapEdit(null)
+      setMapMsg(reset ? 'Reset to dataset mapping' : 'Saved manual mapping')
+    } catch (e) {
+      setMapMsg(e instanceof Error ? e.message : 'Update failed')
+    } finally {
+      setMapBusy(false)
     }
   }
 
@@ -884,6 +920,88 @@ export default function SeriesDetail() {
               {researchMsg}
             </p>
           ) : null}
+
+          {/* Multi-season placement: which Jellyfin season this cour's episodes
+              land in, and the offset added to each release's episode number. */}
+          <div className="mt-4 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-medium text-muted-foreground">Season mapping</h3>
+              {series?.mapping_source ? (
+                <span
+                  className={`rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
+                    series.mapping_source === 'manual'
+                      ? 'bg-amber-500/15 text-amber-500'
+                      : 'bg-muted text-muted-foreground'
+                  }`}
+                >
+                  {series.mapping_source}
+                </span>
+              ) : null}
+            </div>
+            {mapEdit ? (
+              <div className="mt-2 flex flex-wrap items-end gap-2">
+                {([
+                  ['TVDB id', 'tvdb_id'],
+                  ['Season', 'tvdb_season'],
+                  ['Ep offset', 'episode_offset'],
+                ] as const).map(([label, key]) => (
+                  <label key={key} className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+                    {label}
+                    <input
+                      type="number"
+                      className="w-24 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+                      value={mapEdit[key]}
+                      onChange={(e) => setMapEdit({ ...mapEdit, [key]: e.target.value })}
+                    />
+                  </label>
+                ))}
+                <Button size="sm" disabled={mapBusy} onClick={() => void saveMapping(false)}>
+                  Save
+                </Button>
+                <Button size="sm" variant="ghost" disabled={mapBusy} onClick={() => setMapEdit(null)}>
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span>
+                  TVDB <span className="text-foreground">{series?.tvdb_id ?? '—'}</span>
+                </span>
+                <span>
+                  Season <span className="text-foreground">{series?.tvdb_season ?? '—'}</span>
+                </span>
+                <span>
+                  Offset <span className="text-foreground">{series?.episode_offset ?? 0}</span>
+                </span>
+                <div className="ml-auto flex gap-2">
+                  <button
+                    type="button"
+                    className="underline-offset-2 hover:text-foreground hover:underline"
+                    onClick={() =>
+                      setMapEdit({
+                        tvdb_id: series?.tvdb_id != null ? String(series.tvdb_id) : '',
+                        tvdb_season: series?.tvdb_season != null ? String(series.tvdb_season) : '',
+                        episode_offset: series?.episode_offset != null ? String(series.episode_offset) : '',
+                      })
+                    }
+                  >
+                    Edit
+                  </button>
+                  {series?.mapping_source === 'manual' ? (
+                    <button
+                      type="button"
+                      className="underline-offset-2 hover:text-foreground hover:underline"
+                      disabled={mapBusy}
+                      onClick={() => void saveMapping(true)}
+                    >
+                      Reset to auto
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            )}
+            {mapMsg ? <p className="mt-1.5 text-[11px] text-muted-foreground">{mapMsg}</p> : null}
+          </div>
 
           {dl && dl.blacklist.length > 0 ? (
             <div className="mt-4">
