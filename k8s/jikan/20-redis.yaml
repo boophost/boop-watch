@@ -1,0 +1,40 @@
+# Redis — jikan-rest's cache/queue helper. Ephemeral: it holds only transient
+# cache/rate-limit state (the durable scrape cache lives in MongoDB), so no PVC.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: jikan
+  labels: { app: redis }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: redis }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:6-alpine
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "25m", memory: "32Mi" }
+            limits: { memory: "128Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: jikan
+spec:
+  selector: { app: redis }
+  ports:
+    - port: 6379
+      targetPort: 6379

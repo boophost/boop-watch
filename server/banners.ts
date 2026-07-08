@@ -4,13 +4,15 @@
 // auto-select a default. Admins pick among them on the series page.
 import { fetchAniListBanner } from './anilist.js'
 import { addBanner, getSelectedBanner, listBanners, selectBanner, BannerRow } from './db.js'
+import { limitedFetch } from './httpQueue.js'
 
 // Kitsu's wide coverImage, resolved from a MAL id via Kitsu's mappings table.
 async function fetchKitsuCover(malId: number): Promise<{ url: string; width: number | null; height: number | null } | null> {
   try {
-    const res = await fetch(
+    const res = await limitedFetch(
+      'kitsu',
       `https://kitsu.io/api/edge/mappings?filter[externalSite]=myanimelist/anime&filter[externalId]=${malId}&include=item`,
-      { headers: { Accept: 'application/vnd.api+json' }, signal: AbortSignal.timeout(15_000) },
+      { headers: { Accept: 'application/vnd.api+json' } },
     )
     if (!res.ok) return null
     const json = (await res.json()) as {

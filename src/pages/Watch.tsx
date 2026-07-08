@@ -81,6 +81,14 @@ function loadScript(src: string): Promise<void> {
 }
 
 // ── localStorage helpers (playback preferences) ──
+// No element-fullscreen API (iPhone): fullscreen/PiP go through the *native*
+// video player, which presents the bare <video> layer — a DOM subtitle overlay
+// (JASSUB) can never follow it there. On these devices the selected subtitle is
+// burned into the transcode instead (?sub= on the stream URL; Jellyfin encodes
+// with libass, so styling matches). Costs a transcode restart on sub toggle,
+// which the pendingSeek restore already handles.
+const BURN_IN_SUBS = !canFullscreen()
+
 const PREF_KEY = 'bw:pref'
 type Pref = { audioLang?: string; quality?: string; subGroup?: string }
 const readPref = (): Pref => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') } catch { return {} } }
@@ -99,11 +107,10 @@ export default function Watch() {
   const [error, setError] = useState('')
   const [subsReady, setSubsReady] = useState(false) // JASSUB library loaded
   const [theater, setTheater] = useState(false)
-  // Pseudo-fullscreen for iPhone: no element-fullscreen API there, so Vidstack's
-  // fullscreen button falls back to the video's *native* fullscreen — which
-  // presents the bare <video> layer and leaves the JASSUB subtitle canvas (a DOM
-  // overlay) behind. We intercept the request and fill the viewport with CSS
-  // instead (theater layout with the control bar hidden), keeping subs rendered.
+  // Pseudo-fullscreen (CSS viewport fill): last-resort fallback for devices with
+  // no element-fullscreen API where the native video fullscreen call also fails.
+  // On iPhone the fullscreen button normally goes native instead (see below) —
+  // CSS can't hide the browser URL bar or keep iOS's swipe-home pop-out working.
   const [pseudoFs, setPseudoFs] = useState(false)
   // Gate the source URL until audio/quality are initialised from the response, so
   // the player loads once with the final selection instead of reloading the
@@ -132,8 +139,10 @@ export default function Watch() {
   const epsListRef = useRef<HTMLDivElement>(null)
 
   // Load the subtitle library (JASSUB) once. A CDN hiccup is non-fatal: the
-  // player and page chrome still work; only subtitle rendering waits.
+  // player and page chrome still work; only subtitle rendering waits. Skipped
+  // where subs are burned in — JASSUB is never used there.
   useEffect(() => {
+    if (BURN_IN_SUBS) return
     let alive = true
     loadScript(JASSUB_SRC)
       .then(() => { if (alive) setSubsReady(true) })
@@ -203,17 +212,19 @@ export default function Watch() {
 
   const quality = useMemo(() => data?.quality.find((q) => q.key === qKey) || { h: 0, vb: 0, key: 'auto', label: 'Auto' }, [data, qKey])
 
-  // The HLS source. Audio + quality are muxed into the transcode, so changing
-  // them changes the URL and Vidstack reloads; position is restored on canplay.
+  // The HLS source. Audio + quality are muxed into the transcode (and on burn-in
+  // devices the subtitle track too), so changing them changes the URL and
+  // Vidstack reloads; position is restored on canplay.
   const src = useMemo(() => {
     if (!data || !selReady) return ''
     const params = new URLSearchParams()
     if (audioIndex != null && audioIndex !== '') params.set('audio', audioIndex)
     if (quality.h) params.set('h', String(quality.h))
     if (quality.vb) params.set('vb', String(quality.vb))
+    if (BURN_IN_SUBS && subIndex !== '') params.set('sub', subIndex)
     const qs = params.toString()
     return `/api/play/${encodeURIComponent(data.id)}/master.m3u8${qs ? `?${qs}` : ''}`
-  }, [data, selReady, audioIndex, quality])
+  }, [data, selReady, audioIndex, quality, subIndex])
 
   // Use our bundled hls.js (not Vidstack's CDN default) and grab the real <video>
   // element so JASSUB can render the ASS overlay onto it.
@@ -321,8 +332,9 @@ export default function Watch() {
   }
 
   // Client-side subtitles (JASSUB overlay) — independent of the transcode.
+  // Burn-in devices never reach this: their subs are in the video itself.
   useEffect(() => {
-    if (!data || !subsReady || !videoEl) return
+    if (BURN_IN_SUBS || !data || !subsReady || !videoEl) return
     if (subIndex === '') {
       if (subRef.current) { subRef.current.destroy(); subRef.current = null }
       return
@@ -439,15 +451,34 @@ export default function Watch() {
 
   // Where element fullscreen doesn't exist (iPhone), catch Vidstack's fullscreen
   // request before its own handler runs (capture phase on document; the handler
-  // bails on defaultPrevented) and toggle pseudo-fullscreen instead. Vidstack's
-  // fullscreen state never turns on, so every button press dispatches an
-  // *enter* request — hence toggle.
+  // bails on defaultPrevented) and present the *native* video fullscreen player.
+  // Only the native layer hides the browser URL bar, and it's what iOS pops into
+  // picture-in-picture when the user swipes home mid-play. It presents the bare
+  // <video> — fine here, because on these devices the subtitle track is burned
+  // into the stream (BURN_IN_SUBS). If the native call fails (metadata not
+  // ready), fall back to pseudo-fullscreen; Vidstack's fullscreen state never
+  // turns on, so every button press dispatches an *enter* request — hence toggle.
   useEffect(() => {
     if (canFullscreen()) return
-    const onRequest = (e: Event) => { e.preventDefault(); setPseudoFs((v) => !v) }
+    const onRequest = (e: Event) => {
+      e.preventDefault()
+      const v = videoEl as (HTMLVideoElement & {
+        webkitSupportsFullscreen?: boolean; webkitEnterFullscreen?: () => void
+      }) | null
+      if (v?.webkitSupportsFullscreen && v.webkitEnterFullscreen) {
+        try { v.webkitEnterFullscreen(); return } catch { /* not ready — fall through */ }
+      }
+      setPseudoFs((s) => !s)
+    }
     document.addEventListener('media-enter-fullscreen-request', onRequest, true)
     return () => document.removeEventListener('media-enter-fullscreen-request', onRequest, true)
-  }, [])
+  }, [videoEl])
+
+  // Opt the inline video into iOS auto-PiP: leaving the browser while playing
+  // pops the video out instead of pausing it (Safari honors this per element).
+  useEffect(() => {
+    if (videoEl) (videoEl as HTMLVideoElement & { autoPictureInPicture?: boolean }).autoPictureInPicture = true
+  }, [videoEl])
 
   // Keyboard: 't' toggles theater, Esc exits (ignored while typing).
   useEffect(() => {
@@ -570,11 +601,11 @@ export default function Watch() {
             {data.subs.length > 0 && (
               <Menu kind="subs" icon="captions" title="Subtitles" label={`Subtitles: ${subLabel}`}>
                 <PopItem active={subIndex === ''} label="Off"
-                  onClick={(e) => { closeMenu(e); setSubIndex(''); savePref({ subGroup: 'off' }) }} />
+                  onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(''); savePref({ subGroup: 'off' }) }} />
                 {data.subs.map((s, i) => (
                   <PopItem key={s.index} active={String(s.index) === subIndex} label="English"
                     detail={s.group || (data.subs.length > 1 ? `Track ${i + 1}` : 'Full')}
-                    onClick={(e) => { closeMenu(e); setSubIndex(String(s.index)); savePref({ subGroup: s.group || 'on' }) }} />
+                    onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(String(s.index)); savePref({ subGroup: s.group || 'on' }) }} />
                 ))}
               </Menu>
             )}

@@ -33,7 +33,6 @@ export function initAnalytics(): void {
       ],
     },
     persistence: 'localStorage',
-    disable_session_recording: true,
   })
 }
 
@@ -48,6 +47,32 @@ function pageProps(path: string): Record<string, string> {
 export function track(event: string, properties?: Record<string, unknown>): void {
   if (!initialized) return
   posthog.capture(event, properties)
+}
+
+export interface IdentifyProps {
+  email?: string
+  name?: string
+  provider?: string
+  is_admin?: boolean
+  created_at?: string
+}
+
+/**
+ * Link the current visitor to a boop-watch account (Supabase user id). Because
+ * `person_profiles: 'identified_only'`, this is what actually creates the
+ * PostHog person and folds the prior anonymous events into it — never call
+ * `reset()` on login or the merge is lost.
+ */
+export function identifyUser(distinctId: string, props: IdentifyProps): void {
+  if (!initialized || !distinctId) return
+  const set: Record<string, unknown> = {}
+  if (props.email) set.email = props.email
+  if (props.name) set.name = props.name
+  if (props.provider) set.provider = props.provider
+  if (typeof props.is_admin === 'boolean') set.is_admin = props.is_admin
+  const setOnce: Record<string, unknown> = {}
+  if (props.created_at) setOnce.created_at = props.created_at
+  posthog.identify(distinctId, set, setOnce)
 }
 
 export function trackPageView(path: string): void {

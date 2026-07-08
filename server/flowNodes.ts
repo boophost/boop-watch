@@ -10,8 +10,14 @@ import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
 import { listSeries, upsertSeriesMetadata } from './db.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
+import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
+import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
+import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
+import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
+import { getFlow, parseComponent } from './flowsDb.js'
+import { deriveInterface, buildSpecResolver } from './flowComponents.js'
 
 const execFileP = promisify(execFile)
 
@@ -20,39 +26,185 @@ export type FlowItem = Record<string, unknown>
 export interface ConfigField {
   key: string
   label: string
-  kind: 'text' | 'number' | 'select' | 'boolean' | 'password'
+  /** 'json' renders as a multi-line editor in the flow editor; 'color' as a color picker. */
+  kind: 'text' | 'number' | 'select' | 'boolean' | 'password' | 'json' | 'color'
   options?: { value: string; label: string }[]
   default?: string | number | boolean
   help?: string
 }
 
+/**
+ * What travels over a port. The *record* family — base 'items' plus its stage
+ * subtypes (torrent/release/catalog/file/probed) — is the classic stream of
+ * loose records; the subtypes form a lineage under 'items' so a wrong wire (a
+ * torrent into a file input) is caught while generic nodes still interoperate.
+ * Every other type is a *value* port — its items are `{ value: <raw> }` wrappers
+ * so the executor can move them like any other stream. Edges only connect
+ * compatible types (see portCompatible), and the editor color-codes handles and
+ * wires by type. Mirror any change in src/lib/flows.ts.
+ */
+export type PortDataType =
+  | 'items'
+  | 'torrent'
+  | 'release'
+  | 'catalog'
+  | 'file'
+  | 'probed'
+  | 'text'
+  | 'number'
+  | 'color'
+  | 'url'
+  | 'json'
+  | 'embed'
+
 export interface NodePort {
   id: string
   label: string
+  /** Omitted = base 'items'. */
+  dataType?: PortDataType
 }
+
+/** Record-family subtype lineage (child → parent). Base 'items' is the root of
+ * every record type; value types are a separate family. */
+const RECORD_PARENT: Partial<Record<PortDataType, PortDataType>> = {
+  torrent: 'items',
+  release: 'items',
+  catalog: 'items',
+  file: 'items',
+  probed: 'file',
+}
+
+const RECORD_TYPES: PortDataType[] = ['items', 'torrent', 'release', 'catalog', 'file', 'probed']
+export const isRecordType = (t: PortDataType): boolean => RECORD_TYPES.includes(t)
+
+/** Ancestor chain including self, nearest-first ('probed' → ['probed','file','items']). */
+const recordLineage = (t: PortDataType): PortDataType[] => {
+  const chain: PortDataType[] = [t]
+  let p = RECORD_PARENT[t]
+  while (p) {
+    chain.push(p)
+    p = RECORD_PARENT[p]
+  }
+  return chain
+}
+
+/** Nearest common ancestor of two record types (for propagation through merges). */
+export const recordLCA = (a: PortDataType, b: PortDataType): PortDataType => {
+  const bset = new Set(recordLineage(b))
+  for (const t of recordLineage(a)) if (bset.has(t)) return t
+  return 'items'
+}
+
+/** Extra value-source types a value target accepts besides its own; 'json' is
+ * the wide value type; text-ish values cross-connect where a runtime
+ * parse/stringify is safe. Record types are handled by lineage, not this table. */
+const PORT_ACCEPTS: Partial<Record<PortDataType, PortDataType[]>> = {
+  text: ['number', 'url', 'color'],
+  color: ['text'],
+  url: ['text'],
+  json: ['text', 'number', 'color', 'url', 'embed'],
+  embed: ['json'],
+}
+
+export function portCompatible(
+  source: PortDataType | undefined,
+  target: PortDataType | undefined,
+): boolean {
+  const s = source ?? 'items'
+  const t = target ?? 'items'
+  if (s === t) return true
+  const sRec = isRecordType(s)
+  const tRec = isRecordType(t)
+  if (sRec !== tRec) return false // record and value families never mix
+  if (sRec) return recordLineage(s).includes(t) || recordLineage(t).includes(s)
+  return (PORT_ACCEPTS[t] ?? []).includes(s)
+}
+
+/** Unwraps a value port's items back to raw values ({ value: x } -> x). */
+const socketValues = (items: FlowItem[] | undefined): unknown[] =>
+  (items ?? []).map((it) =>
+    it && typeof it === 'object' && 'value' in it ? (it as { value: unknown }).value : it,
+  )
+
+/** Pairing rule for value inputs: one value broadcasts to every item, N values
+ * zip by index (clamped to the last, so a short wire doesn't drop items). */
+const pickValue = (vals: unknown[], idx: number): unknown =>
+  vals.length === 0 ? undefined : vals[Math.min(idx, vals.length - 1)]
+
+const asValueItems = (vals: unknown[]): FlowItem[] => vals.map((value) => ({ value }))
+
+export type NodeCategory = 'trigger' | 'source' | 'filter' | 'enrich' | 'combine' | 'sink' | 'value' | 'boundary'
 
 export interface NodeSpec {
   type: string
   label: string
-  category: 'source' | 'filter' | 'enrich' | 'combine' | 'sink'
+  category: NodeCategory
   description: string
   inputs: NodePort[]
   outputs: NodePort[]
   config: ConfigField[]
 }
 
+/** The kind of trigger a run is firing: the named bus (`start`) or an event
+ * source. Each maps to a `trigger.<kind>` node type. */
+export type TriggerKind = 'start' | 'new-item' | 'new-portal' | 'release' | 'qbit-complete'
+
+/** The event firing a run. Only a trigger node matching this event's kind (and,
+ * for the named bus, its name) emits its payload; the rest stay empty. Absent =
+ * a manual whole-flow run (every trigger fires). `manual` marks an editor
+ * "run from here", so event triggers emit a representative sample instead of a
+ * real event payload. */
+export interface TriggerEvent {
+  kind: TriggerKind
+  /** Only meaningful for kind 'start' — the published trigger name. */
+  name?: string
+  items: FlowItem[]
+  manual?: boolean
+}
+
+/** A deferred publish queued by a `trigger.fire` node, drained by the dispatcher
+ * once the current run releases the flow lock (see fireTrigger in flowRoutes). */
+export interface FireRequest {
+  name: string
+  items: FlowItem[]
+}
+
 export interface RunContext {
   dryRun: boolean
   notes: string[]
+  /** Id of the node currently executing in the parent graph (for sub-flow prefixing). */
+  nodeId?: string
+  /** Live progress hooks from the outer runFlow — forwarded into nested runs. */
+  hooks?: RunHooks
+  /** Merge nested graph node reports into the parent run (keys already qualified). */
+  mergeNestedReports?: (nested: Record<string, NodeReport>) => void
+  /** The trigger event firing this run (null = manual whole-flow run). */
+  trigger?: TriggerEvent | null
+  /** Sink that `trigger.fire` pushes deferred publishes onto. */
+  fireQueue?: FireRequest[]
 }
 
 export interface NodeImpl {
   spec: NodeSpec
+  /** Ports that depend on the node's config — boundary nodes take their
+   * dataType from config, transform.pick types its output. Omitted = the
+   * static spec ports. Mirror any change in resolveNodePorts (src/lib/flows.ts). */
+  resolvePorts?(config: Record<string, unknown>): { inputs: NodePort[]; outputs: NodePort[] }
   run(
     inputs: Record<string, FlowItem[]>,
     config: Record<string, unknown>,
     ctx: RunContext,
   ): Promise<Record<string, FlowItem[]>>
+}
+
+/** Config select options for ports that can carry any data type. */
+const DATA_TYPE_OPTIONS = (['items', 'text', 'number', 'color', 'url', 'json', 'embed'] as const).map(
+  (t) => ({ value: t, label: t }),
+)
+
+const configDataType = (config: Record<string, unknown>): PortDataType | undefined => {
+  const v = String(config.dataType ?? '')
+  return (DATA_TYPE_OPTIONS.some((o) => o.value === v) ? v : undefined) as PortDataType | undefined
 }
 
 const str = (config: Record<string, unknown>, key: string, fallback: string): string => {
@@ -73,6 +225,22 @@ const bool = (config: Record<string, unknown>, key: string, fallback: boolean): 
   return fallback
 }
 
+// Per-node "Run on dry runs" toggle for side-effecting nodes (delay, web
+// requests, activity log). A dry run normally skips a node's real action; when
+// this is on, the node performs it even in a dry run. `def` is the node's
+// natural default (e.g. the activity log keeps logging on dry, a web request
+// stays skipped). `runOnDryField(def)` declares the matching config field.
+const runsLive = (config: Record<string, unknown>, ctx: RunContext, def: boolean): boolean =>
+  !ctx.dryRun || bool(config, 'runOnDry', def)
+
+const runOnDryField = (def: boolean): ConfigField => ({
+  key: 'runOnDry',
+  label: 'Run on dry runs',
+  kind: 'boolean',
+  default: def,
+  help: 'Off = does nothing on a dry run (safe preview). On = performs its action even in a dry run.',
+})
+
 const norm = (s: unknown): string =>
   String(s ?? '')
     .toLowerCase()
@@ -84,25 +252,12 @@ const allInputs = (inputs: Record<string, FlowItem[]>): FlowItem[] =>
 
 const USER_AGENT = 'boop-watch-flows/1.0'
 
-async function fetchJson(url: string): Promise<unknown> {
-  // Retry on 429, honouring Retry-After. TsukiHime documents per-IP windows
-  // (120 req/min default, 50 req/min for /v1/search/torrents) and returns 429 +
-  // Retry-After when exceeded; our per-request spacing keeps us under, this is
-  // the safety net for a burst that still trips a fixed window.
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
-      signal: AbortSignal.timeout(20_000),
-    })
-    if (res.status === 429 && attempt < 3) {
-      const retryAfter = Number(res.headers.get('retry-after'))
-      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000 * (attempt + 1)
-      await new Promise((r) => setTimeout(r, Math.min(waitMs, 30_000)))
-      continue
-    }
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${new URL(url).host}`)
-    return res.json()
-  }
+// Through the shared limiter, keyed by host — TsukiHime and AnimeTosho each get
+// their own min-gap + Retry-After-honouring retry (TsukiHime documents per-IP
+// windows: 120 req/min default, 50 req/min for /v1/search/torrents), and the
+// generic source.http node gets limiting for free (hostKey falls back to 'other').
+function fetchJson(url: string): Promise<unknown> {
+  return limitedJson(hostKey(url), url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } })
 }
 
 /** Resolves a dot path ("data.results") into a fetched JSON document. */
@@ -148,11 +303,11 @@ function fromJellyfin(it: JfItem): FlowItem {
 const jellyfinSource: NodeImpl = {
   spec: {
     type: 'source.jellyfin',
-    label: 'Jellyfin collection',
+    label: 'Get Jellyfin titles',
     category: 'source',
     description: 'Fetches titles from the Public Jellyfin collection.',
-    inputs: [],
-    outputs: [{ id: 'items', label: 'items' }],
+    inputs: [{ id: 'when', label: 'when' }],
+    outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [
       {
         key: 'itemTypes',
@@ -185,11 +340,11 @@ const jellyfinSource: NodeImpl = {
 const indexerSource: NodeImpl = {
   spec: {
     type: 'source.indexer',
-    label: 'Indexer series',
+    label: 'Get Catalog',
     category: 'source',
     description: 'Reads the /manage catalog (MAL-backed series list).',
-    inputs: [],
-    outputs: [{ id: 'items', label: 'items' }],
+    inputs: [{ id: 'when', label: 'when' }],
+    outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [],
   },
   async run() {
@@ -200,11 +355,11 @@ const indexerSource: NodeImpl = {
 const portalSource: NodeImpl = {
   spec: {
     type: 'source.portal',
-    label: 'Portal items',
+    label: 'Get Portal items',
     category: 'source',
     description: 'Reads items already stored in the public portal database.',
-    inputs: [],
-    outputs: [{ id: 'items', label: 'items' }],
+    inputs: [{ id: 'when', label: 'when' }],
+    outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [
       {
         key: 'type',
@@ -233,7 +388,7 @@ const httpSource: NodeImpl = {
     label: 'Fetch JSON',
     category: 'source',
     description: 'GETs a URL and emits the JSON items found at a path in the response.',
-    inputs: [],
+    inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'items' }],
     config: [
       { key: 'url', label: 'URL', kind: 'text', default: '' },
@@ -258,6 +413,402 @@ const httpSource: NodeImpl = {
         : []
     if (!Array.isArray(found)) ctx.notes.push('response path was not an array')
     return { items }
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Outbound web-request nodes: enrich.http fires one request per item and keeps
+// the response, sink.http delivers items somewhere (webhook-style). Both fill
+// {field} placeholders from the item, escaping each value for where it lands.
+// ---------------------------------------------------------------------------
+
+const CONTENT_TYPES: Record<string, string> = {
+  json: 'application/json',
+  form: 'application/x-www-form-urlencoded',
+  text: 'text/plain',
+}
+
+const CONTENT_TYPE_OPTIONS = [
+  { value: 'json', label: 'JSON' },
+  { value: 'form', label: 'Form (urlencoded)' },
+  { value: 'text', label: 'Plain text' },
+]
+
+// Placeholder lookup: a literal key wins, otherwise a dot path digs into
+// nested values ({response.data.title}) so JSON built by one node is
+// addressable by the next.
+const fieldValue = (item: FlowItem, key: string): unknown =>
+  key in item ? item[key] : key.includes('.') ? digPath(item, key) : undefined
+
+// Placeholders are restricted to word characters ({title}, {mal_id}) so JSON
+// braces in a body/headers template are never mistaken for one.
+function fillTemplate(tpl: string, item: FlowItem, escape: 'none' | 'url' | 'json'): string {
+  return tpl.replace(/\{([\w.]+)\}/g, (_, key: string) => {
+    const raw = fieldValue(item, key)
+    const v = raw == null ? '' : typeof raw === 'object' ? JSON.stringify(raw) : String(raw)
+    if (escape === 'url') return encodeURIComponent(v)
+    if (escape === 'json') return JSON.stringify(v).slice(1, -1)
+    return v
+  })
+}
+
+/** Headers config is a JSON object; values support {field} placeholders. */
+function templateHeaders(raw: string, item: FlowItem): Record<string, string> {
+  if (!raw) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(fillTemplate(raw, item, 'json'))
+  } catch {
+    throw new Error('Headers must be a JSON object, e.g. {"X-Api-Key": "secret"}')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Headers must be a JSON object, e.g. {"X-Api-Key": "secret"}')
+  }
+  return Object.fromEntries(Object.entries(parsed).map(([k, v]) => [k, String(v)]))
+}
+
+/** Walks a parsed JSON body template: a string that is exactly "{field}"
+ * becomes the item's raw value (numbers/objects keep their type, missing →
+ * null); strings mixing text and placeholders interpolate; everything else is
+ * a literal default and passes through untouched. */
+function fillJsonTemplate(node: unknown, item: FlowItem): unknown {
+  if (typeof node === 'string') {
+    const exact = node.match(/^\{([\w.]+)\}$/)
+    if (exact) return fieldValue(item, exact[1]) ?? null
+    return fillTemplate(node, item, 'none')
+  }
+  if (Array.isArray(node)) return node.map((v) => fillJsonTemplate(v, item))
+  if (node && typeof node === 'object') {
+    return Object.fromEntries(
+      Object.entries(node).map(([k, v]) => [k, fillJsonTemplate(v, item)]),
+    )
+  }
+  return node
+}
+
+function buildBody(tpl: string, item: FlowItem, ctKey: string): string {
+  if (ctKey === 'json') {
+    // A body that is itself valid JSON (placeholders live inside strings) is
+    // treated as a typed template — defaults stay literal, "{field}" values
+    // take the item's raw value. Anything else falls back to plain text
+    // templating with JSON-escaped substitutions so a quote in a title can't
+    // break the payload.
+    try {
+      return JSON.stringify(fillJsonTemplate(JSON.parse(tpl), item))
+    } catch {
+      return fillTemplate(tpl, item, 'json')
+    }
+  }
+  return ctKey === 'form' ? fillTemplate(tpl, item, 'url') : fillTemplate(tpl, item, 'none')
+}
+
+const httpEnrich: NodeImpl = {
+  spec: {
+    type: 'enrich.http',
+    label: 'Web request',
+    category: 'enrich',
+    description:
+      'Sends an HTTP request per item — URL, body, and headers are filled from its fields — and stores the response in a field.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'ok', label: 'ok' },
+      { id: 'error', label: 'error' },
+    ],
+    config: [
+      {
+        key: 'url',
+        label: 'URL',
+        kind: 'text',
+        default: '',
+        help: '{name} placeholders are replaced with the item’s field values (URL-encoded).',
+      },
+      {
+        key: 'method',
+        label: 'Method',
+        kind: 'select',
+        default: 'GET',
+        options: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((m) => ({ value: m, label: m })),
+      },
+      {
+        key: 'body',
+        label: 'Body',
+        kind: 'json',
+        default: '',
+        help: 'JSON template mixing defaults with item fields: a value that is exactly "{field}" takes the item’s raw value (numbers/objects stay typed, missing = null); strings can mix text and {field}; anything else is sent as a literal default. Empty (or GET) = no body.',
+      },
+      { key: 'contentType', label: 'Content type', kind: 'select', default: 'json', options: CONTENT_TYPE_OPTIONS },
+      {
+        key: 'headers',
+        label: 'Extra headers',
+        kind: 'json',
+        default: '',
+        help: 'JSON object, e.g. {"X-Api-Key": "secret"}; values support {field} placeholders.',
+      },
+      {
+        key: 'responsePath',
+        label: 'Response path',
+        kind: 'text',
+        default: '',
+        help: 'Dot path into the JSON response, e.g. "data.0.score". Empty = whole body.',
+      },
+      { key: 'field', label: 'Store in field', kind: 'text', default: 'response' },
+      runOnDryField(false),
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const urlTpl = str(config, 'url', '')
+    if (!urlTpl) throw new Error('URL is required')
+    const method = str(config, 'method', 'GET').toUpperCase()
+    const bodyTpl = str(config, 'body', '')
+    const ctKey = str(config, 'contentType', 'json')
+    const headersRaw = str(config, 'headers', '')
+    const responsePath = str(config, 'responsePath', '')
+    const field = str(config, 'field', 'response')
+
+    const items = allInputs(inputs)
+    // GETs are read-only and run even on dry runs (like Fetch JSON); anything
+    // else could mutate the remote side, so a dry run only counts them unless
+    // "Run on dry runs" is on.
+    if (method !== 'GET' && !runsLive(config, ctx, false)) {
+      ctx.notes.push(`dry run — would send ${items.length} ${method} request(s)`)
+      return { ok: items, error: [] }
+    }
+
+    const ok: FlowItem[] = []
+    const error: FlowItem[] = []
+    for (const item of items) {
+      const url = fillTemplate(urlTpl, item, 'url')
+      try {
+        new URL(url)
+      } catch {
+        error.push({ ...item, http_error: `invalid URL: ${url}` })
+        continue
+      }
+      try {
+        const headers: Record<string, string> = {
+          'User-Agent': USER_AGENT,
+          Accept: 'application/json',
+          ...templateHeaders(headersRaw, item),
+        }
+        const init: RequestInit = { method, headers }
+        if (bodyTpl && method !== 'GET') {
+          headers['Content-Type'] = CONTENT_TYPES[ctKey] ?? CONTENT_TYPES.json
+          init.body = buildBody(bodyTpl, item, ctKey)
+        }
+        const res = await limitedFetch(hostKey(url), url, init)
+        const text = await res.text()
+        if (!res.ok) {
+          error.push({ ...item, http_status: res.status, http_error: `${res.status} ${res.statusText}` })
+          continue
+        }
+        let doc: unknown = text
+        try {
+          doc = JSON.parse(text)
+        } catch {
+          /* not JSON — keep the raw text */
+        }
+        ok.push({ ...item, [field]: responsePath ? digPath(doc, responsePath) : doc, http_status: res.status })
+      } catch (e) {
+        error.push({ ...item, http_error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    ctx.notes.push(`${ok.length} ok, ${error.length} failed`)
+    const firstError = error.find((it) => it.http_error)
+    if (firstError) ctx.notes.push(`first error: ${String(firstError.http_error)}`)
+    return { ok, error }
+  },
+}
+
+// A node's ctx.notes are what the activity feed keeps (activityFromReport in
+// flowRoutes.ts drops silent nodes), so logging = pushing rendered notes.
+const logSink: NodeImpl = {
+  spec: {
+    type: 'sink.log',
+    label: 'Log to activity',
+    category: 'sink',
+    description:
+      'Writes a templated message to the run’s activity log (the Activity tab) — one line per item, or a single summary line. Items pass through unchanged, so it can sit anywhere in a flow.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      {
+        key: 'message',
+        label: 'Message',
+        kind: 'text',
+        default: '{title}',
+        help: '{field} placeholders fill from each item (dot paths reach nested values); {count} is the item count.',
+      },
+      {
+        key: 'perItem',
+        label: 'One line per item',
+        kind: 'boolean',
+        default: true,
+        help: 'Off = a single line, filled from the first item (useful with {count}).',
+      },
+      {
+        key: 'limit',
+        label: 'Max lines',
+        kind: 'number',
+        default: 20,
+        help: 'Per-item lines beyond this collapse into "…and N more".',
+      },
+      {
+        key: 'skipEmpty',
+        label: 'Skip when no items',
+        kind: 'boolean',
+        default: true,
+        help: 'Off = log the message (with {count} = 0) even when nothing arrives.',
+      },
+      // Logs on both dry and live by default (a dry run's log is its preview);
+      // turn off to keep dry runs out of the activity feed.
+      runOnDryField(true),
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const message = str(config, 'message', '{title}')
+    const perItem = bool(config, 'perItem', true)
+    const limit = Math.max(1, Math.floor(num(config, 'limit', 20)))
+    const skipEmpty = bool(config, 'skipEmpty', true)
+
+    const items = allInputs(inputs)
+    // Pass items through regardless; only the logging respects the dry-run toggle.
+    if (!runsLive(config, ctx, true)) {
+      ctx.notes.push(`dry run — logging skipped (${items.length} item(s))`)
+      return { items }
+    }
+    const fill = (item: FlowItem) =>
+      fillTemplate(message, { ...item, count: items.length }, 'none').trim()
+
+    if (items.length === 0) {
+      if (!skipEmpty) ctx.notes.push(fill({}))
+      return { items }
+    }
+    if (perItem) {
+      for (const item of items.slice(0, limit)) {
+        const line = fill(item)
+        if (line) ctx.notes.push(line)
+      }
+      if (items.length > limit) ctx.notes.push(`…and ${items.length - limit} more`)
+    } else {
+      const line = fill(items[0])
+      if (line) ctx.notes.push(line)
+    }
+    return { items }
+  },
+}
+
+const httpSink: NodeImpl = {
+  spec: {
+    type: 'sink.http',
+    label: 'Send web request',
+    category: 'sink',
+    description:
+      'Sends one HTTP request per incoming item (webhook-style) — or all items batched into one JSON array request.',
+    inputs: [{ id: 'in', label: 'items to send' }],
+    outputs: [
+      { id: 'sent', label: 'sent' },
+      { id: 'failed', label: 'failed' },
+    ],
+    config: [
+      {
+        key: 'url',
+        label: 'URL',
+        kind: 'text',
+        default: '',
+        help: '{name} placeholders are replaced with the item’s field values (URL-encoded).',
+      },
+      {
+        key: 'method',
+        label: 'Method',
+        kind: 'select',
+        default: 'POST',
+        options: ['POST', 'PUT', 'PATCH', 'DELETE', 'GET'].map((m) => ({ value: m, label: m })),
+      },
+      {
+        key: 'body',
+        label: 'Body',
+        kind: 'json',
+        default: '',
+        help: 'JSON template per item mixing defaults with item fields ("{field}" = raw value, strings interpolate). Empty = the whole item as JSON. Ignored when batching.',
+      },
+      { key: 'contentType', label: 'Content type', kind: 'select', default: 'json', options: CONTENT_TYPE_OPTIONS },
+      {
+        key: 'headers',
+        label: 'Extra headers',
+        kind: 'json',
+        default: '',
+        help: 'JSON object, e.g. {"Authorization": "Bearer …"}; values support {field} placeholders.',
+      },
+      {
+        key: 'batch',
+        label: 'Batch into one request',
+        kind: 'boolean',
+        default: false,
+        help: 'Send a single request with every item as a JSON array (URL placeholders resolve empty).',
+      },
+      runOnDryField(false),
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const urlTpl = str(config, 'url', '')
+    if (!urlTpl) throw new Error('URL is required')
+    const method = str(config, 'method', 'POST').toUpperCase()
+    const bodyTpl = str(config, 'body', '')
+    const ctKey = str(config, 'contentType', 'json')
+    const headersRaw = str(config, 'headers', '')
+    const batch = bool(config, 'batch', false)
+
+    const items = allInputs(inputs)
+    if (items.length === 0) return { sent: [], failed: [] }
+    if (!runsLive(config, ctx, false)) {
+      ctx.notes.push(`dry run — would send ${batch ? 1 : items.length} ${method} request(s)`)
+      return { sent: items, failed: [] }
+    }
+
+    const send = async (url: string, item: FlowItem, body: string | undefined) => {
+      new URL(url) // throws on an invalid URL
+      const headers: Record<string, string> = {
+        'User-Agent': USER_AGENT,
+        ...templateHeaders(headersRaw, item),
+      }
+      const init: RequestInit = { method, headers }
+      if (body !== undefined && method !== 'GET') {
+        headers['Content-Type'] = CONTENT_TYPES[ctKey] ?? CONTENT_TYPES.json
+        init.body = body
+      }
+      const res = await limitedFetch(hostKey(url), url, init)
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      return res.status
+    }
+
+    if (batch) {
+      try {
+        const status = await send(fillTemplate(urlTpl, {}, 'url'), {}, JSON.stringify(items))
+        ctx.notes.push(`sent ${items.length} item(s) in one request (${status})`)
+        return { sent: items.map((it) => ({ ...it, http_status: status })), failed: [] }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        ctx.notes.push(`batch request failed: ${msg}`)
+        return { sent: [], failed: items.map((it) => ({ ...it, http_error: msg })) }
+      }
+    }
+
+    const sent: FlowItem[] = []
+    const failed: FlowItem[] = []
+    for (const item of items) {
+      try {
+        const body =
+          method === 'GET' ? undefined : bodyTpl ? buildBody(bodyTpl, item, ctKey) : JSON.stringify(item)
+        const status = await send(fillTemplate(urlTpl, item, 'url'), item, body)
+        sent.push({ ...item, http_status: status })
+      } catch (e) {
+        failed.push({ ...item, http_error: e instanceof Error ? e.message : String(e) })
+      }
+    }
+    ctx.notes.push(`sent ${sent.length}, failed ${failed.length}`)
+    const firstError = failed.find((it) => it.http_error)
+    if (firstError) ctx.notes.push(`first error: ${String(firstError.http_error)}`)
+    return { sent, failed }
   },
 }
 
@@ -315,12 +866,12 @@ interface QbitInfo {
 const qbittorrentSource: NodeImpl = {
   spec: {
     type: 'source.qbittorrent',
-    label: 'qBittorrent torrents',
+    label: 'Get Torrents',
     category: 'source',
     description:
       'Lists torrents from qBittorrent (optionally completed only), emitting each one’s on-disk content path so the importer can place the files.',
-    inputs: [],
-    outputs: [{ id: 'items', label: 'items' }],
+    inputs: [{ id: 'when', label: 'when' }],
+    outputs: [{ id: 'items', label: 'torrents', dataType: 'torrent' }],
     config: [
       { key: 'url', label: 'qBittorrent URL', kind: 'text', default: '', help: 'Empty = QBIT_URL env.' },
       { key: 'username', label: 'Username', kind: 'text', default: '', help: 'Empty = QBIT_USERNAME env.' },
@@ -379,7 +930,10 @@ const template: NodeImpl = {
     description:
       'Sets a field by filling a template with the item’s own values, e.g. "{title} 1080p".',
     inputs: [{ id: 'in', label: 'in' }],
-    outputs: [{ id: 'items', label: 'items' }],
+    outputs: [
+      { id: 'items', label: 'items' },
+      { id: 'text', label: 'text', dataType: 'text' },
+    ],
     config: [
       { key: 'field', label: 'Set field', kind: 'text', default: 'query' },
       {
@@ -387,18 +941,464 @@ const template: NodeImpl = {
         label: 'Template',
         kind: 'text',
         default: '{title}',
-        help: '{name} placeholders are replaced with the item’s field values.',
+        help: '{name} placeholders are replaced with the item’s field values. Empty = set the field to an empty value. The "text" output emits each filled string as a text value.',
       },
     ],
   },
   async run(inputs, config) {
     const field = str(config, 'field', 'query')
-    const tpl = str(config, 'template', '{title}')
-    const items = allInputs(inputs).map((item) => ({
-      ...item,
-      [field]: tpl.replace(/\{([^}]+)\}/g, (_, key: string) => String(item[key] ?? '')).trim(),
-    }))
+    // An explicitly empty template means "set the field to ''" (so optional
+    // component params can be left blank) — only a missing key falls back.
+    const tplRaw = config['template']
+    const tpl = typeof tplRaw === 'string' ? tplRaw : '{title}'
+    const filled = allInputs(inputs).map(
+      (item) => tpl.replace(/\{([^}]+)\}/g, (_, key: string) => String(item[key] ?? '')).trim(),
+    )
+    const items = allInputs(inputs).map((item, i) => ({ ...item, [field]: filled[i] }))
+    return { items, text: asValueItems(filled) }
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Value literal nodes: each emits a single constant on a typed value port, so
+// graphs can wire "the color", "the bot name", … into a socket instead of
+// burying it in another node's config. One value broadcasts to every item on
+// the receiving side (see pickValue).
+// ---------------------------------------------------------------------------
+
+const valueLiteral = (
+  type: string,
+  label: string,
+  dataType: PortDataType,
+  field: ConfigField,
+  parse: (raw: string) => unknown,
+): NodeImpl => ({
+  spec: {
+    type,
+    label,
+    category: 'value',
+    description: `A constant ${dataType} value, emitted on a typed port. Wire it into a matching (${dataType}) input socket.`,
+    inputs: [],
+    outputs: [{ id: 'value', label: dataType, dataType }],
+    config: [field],
+  },
+  async run(_inputs, config) {
+    const raw = str(config, 'value', String(field.default ?? ''))
+    return { value: asValueItems([parse(raw)]) }
+  },
+})
+
+const textValue = valueLiteral(
+  'value.text',
+  'Text',
+  'text',
+  { key: 'value', label: 'Text', kind: 'text', default: '' },
+  (raw) => raw,
+)
+
+const numberValue = valueLiteral(
+  'value.number',
+  'Number',
+  'number',
+  { key: 'value', label: 'Number', kind: 'number', default: 0 },
+  (raw) => {
+    const n = Number(raw)
+    if (!Number.isFinite(n)) throw new Error(`Not a number: ${raw}`)
+    return n
+  },
+)
+
+const colorValue = valueLiteral(
+  'value.color',
+  'Color',
+  'color',
+  { key: 'value', label: 'Color', kind: 'color', default: '#7c5cff' },
+  (raw) => {
+    if (!/^#?[0-9a-f]{6}$/i.test(raw)) throw new Error(`Not a hex color: ${raw}`)
+    return raw.startsWith('#') ? raw : `#${raw}`
+  },
+)
+
+const jsonValue = valueLiteral(
+  'value.json',
+  'JSON',
+  'json',
+  { key: 'value', label: 'JSON', kind: 'json', default: '{}' },
+  (raw) => {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      throw new Error('Not valid JSON')
+    }
+  },
+)
+
+const urlValue = valueLiteral(
+  'value.url',
+  'URL',
+  'url',
+  { key: 'value', label: 'URL', kind: 'text', default: '' },
+  (raw) => {
+    if (raw && !asHttpUrl(raw)) throw new Error(`Not an http(s) URL: ${raw}`)
+    return raw
+  },
+)
+
+// ---------------------------------------------------------------------------
+// JSON-builder nodes: transform.json shapes a typed JSON value onto each item,
+// combine.collect folds a field from many items into one array field, and
+// transform.discord-embed emits a Discord-format embed object (with typed
+// value sockets for its parts). combine.discord-message assembles embeds +
+// content into webhook payloads (a Discord message carries up to 10 embeds).
+// ---------------------------------------------------------------------------
+
+const isEmptyValue = (v: unknown): boolean => {
+  if (v == null || v === '') return true
+  if (Array.isArray(v)) return v.length === 0
+  if (typeof v === 'object') return Object.keys(v).length === 0
+  return false
+}
+
+/** Recursively drops empty values (null, "", empty objects/arrays) so optional
+ * JSON keys disappear instead of being sent as null. 0 and false survive. */
+function pruneEmpty(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(pruneEmpty).filter((v) => !isEmptyValue(v))
+  if (node && typeof node === 'object') {
+    return Object.fromEntries(
+      Object.entries(node)
+        .map(([k, v]) => [k, pruneEmpty(v)] as const)
+        .filter(([, v]) => !isEmptyValue(v)),
+    )
+  }
+  return node
+}
+
+const setJson: NodeImpl = {
+  spec: {
+    type: 'transform.json',
+    label: 'Set field from JSON',
+    category: 'enrich',
+    description:
+      'Builds a JSON value from a typed template and stores it in a field — the JSON companion to "Set field from template". Use it to shape webhook payloads.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'field', label: 'Set field', kind: 'text', default: 'payload' },
+      {
+        key: 'template',
+        label: 'JSON template',
+        kind: 'json',
+        default: '{}',
+        help: 'JSON mixing literal defaults with item fields: a value that is exactly "{field}" takes the item’s raw value (objects/arrays/numbers keep their type, dot paths reach into nested values); other strings can mix text and {field}.',
+      },
+      {
+        key: 'dropEmpty',
+        label: 'Drop empty values',
+        kind: 'boolean',
+        default: true,
+        help: 'Remove null / "" / empty object-or-array values after filling, so optional keys vanish instead of being sent as null.',
+      },
+    ],
+  },
+  async run(inputs, config) {
+    const field = str(config, 'field', 'payload')
+    const raw = str(config, 'template', '')
+    if (!raw) throw new Error('JSON template is required')
+    let tpl: unknown
+    try {
+      tpl = JSON.parse(raw)
+    } catch {
+      throw new Error(
+        'Template must be valid JSON — placeholders live inside strings, e.g. {"content": "{title}"}',
+      )
+    }
+    const drop = bool(config, 'dropEmpty', true)
+    const items = allInputs(inputs).map((item) => {
+      const value = fillJsonTemplate(tpl, item)
+      return { ...item, [field]: drop ? pruneEmpty(value) : value }
+    })
     return { items }
+  },
+}
+
+const collect: NodeImpl = {
+  spec: {
+    type: 'combine.collect',
+    label: 'Collect into list',
+    category: 'combine',
+    description:
+      'Folds many items into few: gathers a field’s value from every incoming item into one array field, optionally grouped by a key and chunked (e.g. 10 embeds per Discord message). The emitted item keeps the chunk’s first item’s other fields.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'items', label: 'items' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      {
+        key: 'field',
+        label: 'Collect field',
+        kind: 'text',
+        default: 'embed',
+        help: 'Field taken from each item; items without it exit "skipped". Empty = collect whole items.',
+      },
+      { key: 'into', label: 'Into list field', kind: 'text', default: 'embeds' },
+      {
+        key: 'groupBy',
+        label: 'Group by',
+        kind: 'text',
+        default: '',
+        help: 'Key field: one output item per distinct value. Empty = everything into one.',
+      },
+      {
+        key: 'max',
+        label: 'Max per item',
+        kind: 'number',
+        default: 10,
+        help: 'A group with more values than this emits multiple chunked items (Discord allows 10 embeds per message). 0 = unlimited.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', '')
+    const into = str(config, 'into', 'embeds')
+    const groupBy = str(config, 'groupBy', '')
+    const max = Math.max(0, Math.floor(num(config, 'max', 10)))
+
+    const skipped: FlowItem[] = []
+    const groups = new Map<string, FlowItem[]>()
+    for (const item of allInputs(inputs)) {
+      if (field && item[field] == null) {
+        skipped.push(item)
+        continue
+      }
+      const key = groupBy ? String(item[groupBy] ?? '') : ''
+      const group = groups.get(key) ?? []
+      group.push(item)
+      groups.set(key, group)
+    }
+
+    const out: FlowItem[] = []
+    for (const members of groups.values()) {
+      const size = max > 0 ? max : members.length
+      for (let i = 0; i < members.length; i += size) {
+        const chunk = members.slice(i, i + size)
+        const base = { ...chunk[0] }
+        if (field) delete base[field]
+        out.push({ ...base, [into]: chunk.map((it) => (field ? it[field] : { ...it })) })
+      }
+    }
+    ctx.notes.push(
+      `${out.length} item(s) from ${groups.size} group(s)` +
+        (skipped.length ? `, ${skipped.length} skipped (no "${field}")` : ''),
+    )
+    return { items: out, skipped }
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Generic typed-socket primitives. These (not domain nodes) are what Discord
+// components are built from: set-field wires any value socket into an item
+// field, convert covers the mechanical transforms (hex color -> Discord's
+// decimal int, truncation, timestamps), and pick lifts a field back out onto
+// a typed value port so components can expose typed outputs.
+// ---------------------------------------------------------------------------
+
+const truncate = (s: string, max: number): string =>
+  s.length <= max ? s : s.slice(0, max - 1) + '\u2026'
+
+/** Discord wants colors as a decimal int; accept "#7c5cff", "7c5cff", or a number. */
+function parseEmbedColor(s: string): number | undefined {
+  const hex = s.match(/^#?([0-9a-f]{6})$/i)
+  if (hex) return parseInt(hex[1], 16)
+  const n = Number(s)
+  return Number.isFinite(n) && n >= 0 && n <= 0xffffff ? Math.floor(n) : undefined
+}
+
+const asHttpUrl = (s: string): string => {
+  try {
+    const u = new URL(s)
+    return u.protocol === 'http:' || u.protocol === 'https:' ? s : ''
+  } catch {
+    return ''
+  }
+}
+
+const setField: NodeImpl = {
+  spec: {
+    type: 'combine.set-field',
+    label: 'Set field from value',
+    category: 'combine',
+    description:
+      'Writes a wired value into a field on each item \u2014 the bridge from typed sockets to item fields. One value broadcasts to every item; N values zip by index. Nothing wired = items pass through untouched (so config templates upstream act as the fallback).',
+    inputs: [
+      { id: 'in', label: 'in' },
+      { id: 'value', label: 'value', dataType: 'json' },
+    ],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'field', label: 'Set field', kind: 'text', default: 'value' },
+      {
+        key: 'skipEmpty',
+        label: 'Ignore empty values',
+        kind: 'boolean',
+        default: true,
+        help: 'Leave the item untouched when the wired value is null or "" (keeps the field\u2019s existing fallback).',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'value')
+    const skipEmpty = bool(config, 'skipEmpty', true)
+    const vals = socketValues(inputs.value)
+    const items = (inputs.in ?? []).map((item, idx) => {
+      const v = pickValue(vals, idx)
+      if (v === undefined || (skipEmpty && (v === null || v === ''))) return item
+      return { ...item, [field]: v }
+    })
+    if (vals.length === 0) ctx.notes.push('no value wired \u2014 items passed through')
+    return { items }
+  },
+}
+
+const convert: NodeImpl = {
+  spec: {
+    type: 'transform.convert',
+    label: 'Convert field',
+    category: 'enrich',
+    description:
+      'Mechanical field conversions: hex color \u2192 decimal int (Discord\u2019s format), truncate to a length, date \u2192 ISO timestamp, "now" \u2192 ISO timestamp, string \u2192 number. Missing/empty fields are left untouched.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [
+      { key: 'field', label: 'Field', kind: 'text', default: '' },
+      {
+        key: 'op',
+        label: 'Conversion',
+        kind: 'select',
+        default: 'hex-color-int',
+        options: [
+          { value: 'hex-color-int', label: 'Hex color \u2192 int' },
+          { value: 'truncate', label: 'Truncate text' },
+          { value: 'to-iso-date', label: 'Date \u2192 ISO timestamp' },
+          { value: 'now', label: 'Set to now (ISO timestamp)' },
+          { value: 'to-number', label: 'Text \u2192 number' },
+        ],
+      },
+      {
+        key: 'length',
+        label: 'Max length',
+        kind: 'number',
+        default: 0,
+        help: 'For Truncate: keep this many characters (adds \u2026). 0 = no-op.',
+      },
+      {
+        key: 'outField',
+        label: 'Store in field',
+        kind: 'text',
+        default: '',
+        help: 'Empty = overwrite the source field.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', '')
+    const op = str(config, 'op', 'hex-color-int')
+    const length = Math.max(0, Math.floor(num(config, 'length', 0)))
+    const outField = str(config, 'outField', '') || field
+    if (!field && op !== 'now') throw new Error('Field is required')
+    if (op === 'now' && !outField) throw new Error('Store in field is required for "now"')
+
+    let failed = 0
+    const items = allInputs(inputs).map((item) => {
+      if (op === 'now') return { ...item, [outField]: new Date().toISOString() }
+      const raw = item[field]
+      if (raw == null || raw === '') return item
+      switch (op) {
+        case 'hex-color-int': {
+          const parsed = parseEmbedColor(String(raw))
+          if (parsed === undefined) {
+            failed++
+            return item
+          }
+          return { ...item, [outField]: parsed }
+        }
+        case 'truncate':
+          return length > 0 ? { ...item, [outField]: truncate(String(raw), length) } : item
+        case 'to-iso-date': {
+          const d = new Date(String(raw))
+          if (Number.isNaN(d.getTime())) {
+            failed++
+            return item
+          }
+          return { ...item, [outField]: d.toISOString() }
+        }
+        case 'to-number': {
+          const n = Number(raw)
+          if (!Number.isFinite(n)) {
+            failed++
+            return item
+          }
+          return { ...item, [outField]: n }
+        }
+        default:
+          throw new Error(`Unknown conversion: ${op}`)
+      }
+    })
+    if (failed > 0) ctx.notes.push(`${failed} item(s) had an unconvertible value \u2014 left untouched`)
+    return { items }
+  },
+}
+
+const fromValue: NodeImpl = {
+  spec: {
+    type: 'transform.from-value',
+    label: 'Values to items',
+    category: 'combine',
+    description:
+      'Turns a typed value stream back into an item stream: each wired value becomes an item holding it in a field. Use it inside a component to process what a typed boundary input receives (e.g. embeds → Collect).',
+    inputs: [{ id: 'value', label: 'value', dataType: 'json' }],
+    outputs: [{ id: 'items', label: 'items' }],
+    config: [{ key: 'field', label: 'Store in field', kind: 'text', default: 'value' }],
+  },
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'value')
+    const items = socketValues(inputs.value).map((v): FlowItem => ({ [field]: v }))
+    ctx.notes.push(`${items.length} value(s) → items`)
+    return { items }
+  },
+}
+
+const pick: NodeImpl = {
+  spec: {
+    type: 'transform.pick',
+    label: 'Pick field as value',
+    category: 'enrich',
+    description:
+      'Lifts a field off each item onto a typed value port (the inverse of "Set field from value"). Use it in front of a typed boundary output so a component can emit e.g. embeds. Items without the field are skipped.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'value', label: 'value', dataType: 'json' }],
+    config: [
+      { key: 'field', label: 'Field', kind: 'text', default: 'value', help: 'Dot paths reach nested values.' },
+      {
+        key: 'dataType',
+        label: 'Value type',
+        kind: 'select',
+        default: 'json',
+        options: DATA_TYPE_OPTIONS.filter((o) => o.value !== 'items'),
+      },
+    ],
+  },
+  resolvePorts: (config) => ({
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'value', label: 'value', dataType: configDataType(config) ?? 'json' }],
+  }),
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'value')
+    const vals = allInputs(inputs)
+      .map((item) => fieldValue(item, field))
+      .filter((v) => v !== undefined && v !== null)
+    ctx.notes.push(`${vals.length} value(s) picked from "${field}"`)
+    return { value: asValueItems(vals) }
   },
 }
 
@@ -1085,7 +2085,7 @@ const jikanEnrich: NodeImpl = {
         ctx.notes.push(`Jikan error for "${q}": ${e instanceof Error ? e.message : String(e)}`)
         missed.push(item)
       }
-      await new Promise((r) => setTimeout(r, 1000)) // Jikan rate limit
+      // Jikan spacing handled by the shared 'jikan' queue.
     }
     if (maxItems > 0 && items.length > maxItems) {
       ctx.notes.push(`capped at ${maxItems} of ${items.length} items`)
@@ -1338,7 +2338,7 @@ const torrentSearch: NodeImpl = {
       'Searches a torrent index per item, scores results by resolution/audio/seeders, and picks a season-pack batch or one release per episode.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
-      { id: 'found', label: 'found' },
+      { id: 'found', label: 'found', dataType: 'release' },
       { id: 'missed', label: 'missed' },
     ],
     config: [
@@ -1517,10 +2517,7 @@ const torrentSearch: NodeImpl = {
         ctx.notes.push(`search error for "${q}": ${e instanceof Error ? e.message : String(e)}`)
         missed.push(item)
       }
-      // Space searches under the index's rate limit. TsukiHime documents 50
-      // req/min for /v1/search/torrents (→ 1.3s spacing keeps headroom under the
-      // fixed window); AnimeTosho is undocumented, keep the polite 500ms.
-      await new Promise((r) => setTimeout(r, provider === 'tsukihime' ? 1300 : 500))
+      // Rate-limit spacing is handled by the shared queue (tsukihime/tosho keys).
     }
     if (maxItems > 0 && items.length > maxItems) {
       ctx.notes.push(`capped at ${maxItems} of ${items.length} shows`)
@@ -1629,9 +2626,9 @@ const expandFiles: NodeImpl = {
     category: 'enrich',
     description:
       'Turns each item into one item per video file at its path (recurses into folders for season packs). Re-parses the episode number from each file name.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'torrent' }],
     outputs: [
-      { id: 'files', label: 'files' },
+      { id: 'files', label: 'files', dataType: 'file' },
       { id: 'empty', label: 'no files' },
     ],
     config: [
@@ -1687,9 +2684,9 @@ const mediaProbe: NodeImpl = {
     category: 'enrich',
     description:
       'ffprobes the video file and emits its stream facts (sub_langs, sub_codecs, sub_track_count, audio_langs, video_codec) plus a sub_tracks list for the extractor. Branch on these with a Compare node.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
-      { id: 'probed', label: 'probed' },
+      { id: 'probed', label: 'probed', dataType: 'probed' },
       { id: 'error', label: 'error' },
     ],
     config: [
@@ -1756,7 +2753,7 @@ const extractSubs: NodeImpl = {
     category: 'enrich',
     description:
       'Pulls an embedded text subtitle track out of the file into a sidecar we own (sets subtitle_path/subtitle_lang), plus any embedded fonts. Picks by language, with fallback. Image subs (PGS/VobSub) can’t be extracted.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
       { id: 'extracted', label: 'extracted' },
       { id: 'none', label: 'no track' },
@@ -1898,9 +2895,8 @@ const fetchSubs: NodeImpl = {
     }
 
     const jimaku = async (path: string): Promise<unknown> => {
-      const res = await fetch(base + path, {
+      const res = await limitedFetch('jimaku', base + path, {
         headers: { Authorization: apiKey, Accept: 'application/json', 'User-Agent': USER_AGENT },
-        signal: AbortSignal.timeout(20_000),
       })
       if (!res.ok) throw new Error(`Jimaku ${res.status} ${res.statusText}`)
       return res.json()
@@ -1956,7 +2952,7 @@ const fetchSubs: NodeImpl = {
         ctx.notes.push(`Jimaku error for "${query || anilist}": ${e instanceof Error ? e.message : String(e)}`)
         missed.push(item)
       }
-      await new Promise((r) => setTimeout(r, 500)) // be polite to Jimaku
+      // Jimaku API spacing handled by the shared 'jimaku' queue.
     }
     ctx.notes.push(ctx.dryRun ? `dry run — resolved ${found.length} Jimaku sub(s)` : `fetched ${found.length} sub(s), ${missed.length} missed`)
     return { found, missed }
@@ -1976,7 +2972,7 @@ const muxTracks: NodeImpl = {
     category: 'enrich',
     description:
       'Muxes an audio (and/or subtitle) track from a donor file onto the primary video, stream-copied into a new MKV (no re-encode). Use to build a playable dual-audio file: playable h264 primary + eng dub from a dual donor. Same-source pairs only (matching edit/framerate); audioOffset corrects a constant delay.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
       { id: 'muxed', label: 'muxed' },
       { id: 'skipped', label: 'skipped' },
@@ -2186,7 +3182,7 @@ const metadataEnrich: NodeImpl = {
         ctx.notes.push(`metadata lookup failed for mal ${mal}: ${e instanceof Error ? e.message : String(e)}`)
         skipped.push(item)
       }
-      await new Promise((r) => setTimeout(r, 1000)) // Jikan rate limit
+      // Jikan spacing handled by the shared 'jikan' queue.
     }
     ctx.notes.push(
       ctx.dryRun
@@ -2394,7 +3390,7 @@ const libraryImport: NodeImpl = {
     category: 'sink',
     description:
       'Places each video file into the media library at a templated path (hardlink, falling back to copy across filesystems), moving its subtitle sidecars alongside. This is what makes a download watchable.',
-    inputs: [{ id: 'in', label: 'in' }],
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
       { id: 'imported', label: 'imported' },
       { id: 'skipped', label: 'skipped' },
@@ -2700,6 +3696,24 @@ const jellyfinCollection: NodeImpl = {
   },
 }
 
+// A wire-routing waypoint (the editor renders it as a movable dot): passes its
+// input straight through unchanged, so it's transparent at run time. Its output
+// is untyped, so the connection's record type propagates through it.
+const reroute: NodeImpl = {
+  spec: {
+    type: 'transform.reroute',
+    label: 'Reroute',
+    category: 'combine',
+    description: 'A movable anchor for routing wires — passes its input through unchanged.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [],
+  },
+  async run(inputs) {
+    return { out: allInputs(inputs) }
+  },
+}
+
 const merge: NodeImpl = {
   spec: {
     type: 'combine.merge',
@@ -2712,6 +3726,37 @@ const merge: NodeImpl = {
   },
   async run(inputs) {
     return { items: allInputs(inputs) }
+  },
+}
+
+// Longest a Delay will actually wait — the run holds the single flow lock, so an
+// unbounded delay would block the scheduler and other runs.
+const MAX_DELAY_S = 600
+
+const delay: NodeImpl = {
+  spec: {
+    type: 'transform.delay',
+    label: 'Delay',
+    category: 'enrich',
+    description:
+      'Waits the configured time, then passes its input straight through unchanged. Waits once (not per item). A dry run skips the wait unless "Run on dry runs" is on. Capped at 10 minutes — the run holds the flow lock while waiting.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [
+      { key: 'seconds', label: 'Delay (seconds)', kind: 'number', default: 5 },
+      runOnDryField(false),
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const items = allInputs(inputs)
+    const seconds = Math.min(Math.max(0, num(config, 'seconds', 5)), MAX_DELAY_S)
+    if (runsLive(config, ctx, false)) {
+      if (seconds > 0) await new Promise((resolve) => setTimeout(resolve, seconds * 1000))
+      ctx.notes.push(`waited ${seconds}s, passed ${items.length} item(s)`)
+    } else {
+      ctx.notes.push(`would wait ${seconds}s, then pass ${items.length} item(s)`)
+    }
+    return { out: items }
   },
 }
 
@@ -2769,11 +3814,317 @@ const portalSink: NodeImpl = {
   },
 }
 
+// Runs a published flow as a composite node: the caller's per-port items feed
+// the referenced graph's boundary.input nodes, and the referenced graph's
+// boundary.output nodes become this node's outputs. The static spec below is
+// a placeholder — real instances get their actual ports from the referenced
+// flow's derived interface via componentToNodeSpec (see flowComponents.ts),
+// swapped in client-side and by buildSpecResolver during graph validation.
+//
+// Imports runFlow dynamically to dodge the flowExecutor <-> flowNodes import
+// cycle (flowExecutor imports NODE_REGISTRY from this file at module scope).
+const subflow: NodeImpl = {
+  spec: {
+    type: 'flow.subflow',
+    label: 'Sub-flow',
+    category: 'combine',
+    description: 'Runs a published flow as a composite node.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [{ key: 'flowId', label: 'Component flow', kind: 'number' }],
+  },
+  run: async (inputs, config, ctx) => {
+    const flowId = Number(config.flowId)
+    if (!Number.isFinite(flowId)) throw new Error('flowId required')
+
+    const row = getFlow(flowId)
+    if (!row) throw new Error(`Flow ${flowId} not found`)
+    const meta = parseComponent(row.component)
+    if (!meta?.published) throw new Error(`Flow ${flowId} is not a published component`)
+
+    const graph = JSON.parse(row.graph) as FlowGraph
+
+    // Exposed-param overrides: componentToNodeSpec exposes them as flat
+    // `params.<nodeId>.<configKey>` config keys on this node; also accept a
+    // nested `params` object (keyed either the same way or by bare configKey)
+    // for callers that build config programmatically (e.g. the verify script).
+    const nestedParams = (config.params ?? {}) as Record<string, unknown>
+    for (const node of graph.nodes) {
+      for (const ep of meta.exposedParams) {
+        if (ep.nodeId !== node.id) continue
+        const flatKey = `params.${ep.nodeId}.${ep.configKey}`
+        const nestedKey = `${ep.nodeId}.${ep.configKey}`
+        if (config[flatKey] !== undefined) {
+          node.config = { ...node.config, [ep.configKey]: config[flatKey] }
+        } else if (nestedParams[nestedKey] !== undefined) {
+          node.config = { ...node.config, [ep.configKey]: nestedParams[nestedKey] }
+        } else if (nestedParams[ep.configKey] !== undefined) {
+          node.config = { ...node.config, [ep.configKey]: nestedParams[ep.configKey] }
+        }
+      }
+    }
+
+    const iface = deriveInterface(flowId, graph, meta)
+    if ('error' in iface) throw new Error(iface.error)
+
+    const { runFlow } = await import('./flowExecutor.js')
+
+    const inner = await runFlow(graph, ctx.dryRun, {
+      injectOutput: (node) => {
+        if (node.type !== 'boundary.input') return null
+        const portId = String(node.config.portId ?? '')
+        return inputs[portId] ?? null
+      },
+      qualifyId: (id) => (ctx.nodeId ? `${ctx.nodeId}/${id}` : id),
+      hooks: ctx.hooks,
+      // This flow's own graph may itself contain flow.subflow nodes
+      // referencing further published components — resolve those too so
+      // nested composites of composites validate correctly.
+      resolveSpec: buildSpecResolver(flowId, getFlow),
+    })
+
+    ctx.mergeNestedReports?.(inner.nodes)
+
+    if (!inner.ok) {
+      const failedEntry = Object.entries(inner.nodes).find(([, r]) => r.status === 'error')
+      throw new Error(failedEntry?.[1].error ?? inner.error ?? 'Sub-flow failed')
+    }
+
+    const outputs: Record<string, FlowItem[]> = {}
+    for (const node of graph.nodes) {
+      if (node.type !== 'boundary.output') continue
+      const portId = String(node.config.portId ?? '')
+      const nodeInputs = inner.finalInputs?.get(node.id)
+      outputs[portId] = nodeInputs?.items ?? []
+    }
+
+    ctx.notes.push(`sub-flow ${flowId}: ${inner.durationMs}ms`)
+    return outputs
+  },
+}
+
+// --- Triggers: a named event bus for starting flows ------------------------
+
+const triggerStart: NodeImpl = {
+  spec: {
+    type: 'trigger.start',
+    label: 'Trigger',
+    category: 'trigger',
+    description:
+      'The named entry point of a flow — "this is where the flow starts". When its name is fired (by a schedule or a "Fire trigger" node in another flow) the flow starts here, emitting the trigger payload plus triggered_at. A manual run fires every trigger.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'start' }],
+    config: [
+      {
+        key: 'name',
+        label: 'Trigger name',
+        kind: 'text',
+        default: 'start',
+        help: 'Schedules and "Fire trigger" nodes address this name.',
+      },
+      { key: 'description', label: 'Note', kind: 'text', default: '' },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const name = str(config, 'name', 'start')
+    // A manual whole-flow run (no event) fires every trigger; a fire only its
+    // match — kind 'start' with the same name.
+    if (ctx.trigger != null && !(ctx.trigger.kind === 'start' && ctx.trigger.name === name)) {
+      ctx.notes.push(`idle — waiting on "${name}"`)
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    const payload = ctx.trigger?.items ?? []
+    const items: FlowItem[] = payload.length
+      ? payload.map((it) => ({ ...it, triggered_at, trigger: name }))
+      : [{ triggered_at, trigger: name }]
+    ctx.notes.push(ctx.trigger == null ? `manual start (${items.length})` : `fired "${name}" (${items.length})`)
+    return { out: items }
+  },
+}
+
+// Whether this run's event targets a given event-trigger kind: a matching fire,
+// or a manual whole-flow run (null event fires every trigger).
+const triggerMatches = (ctx: RunContext, kind: TriggerKind): boolean =>
+  ctx.trigger == null || ctx.trigger.kind === kind
+
+const triggerNewItem: NodeImpl = {
+  spec: {
+    type: 'trigger.new-item',
+    label: 'New catalog item',
+    category: 'trigger',
+    description:
+      'Fires when a new title is added to the catalog (the /manage Catalog tab), emitting the new series. Runs automatically on a schedule tick; a manual run emits the most-recently-added title as a sample.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'item', dataType: 'catalog' }],
+    config: [],
+  },
+  async run(_inputs, config, ctx) {
+    if (!triggerMatches(ctx, 'new-item')) {
+      ctx.notes.push('idle — waiting on a new catalog item')
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    // The watcher passes the new series; a manual run samples the latest one.
+    let source: FlowItem[] = ctx.trigger?.items ?? []
+    if (ctx.trigger == null || ctx.trigger.manual) {
+      const series = listSeries().sort((a, b) =>
+        String(b.added_at ?? '').localeCompare(String(a.added_at ?? '')),
+      )
+      source = series.slice(0, 1) as unknown as FlowItem[]
+      ctx.notes.push(source.length ? 'manual sample: latest catalog title' : 'no catalog titles to sample')
+    }
+    const items = source.map((it) => ({ ...it, triggered_at, trigger: 'new-item' }))
+    ctx.notes.push(`${items.length} new item(s)`)
+    return { out: items }
+  },
+}
+
+const triggerNewPortalItem: NodeImpl = {
+  spec: {
+    type: 'trigger.new-portal',
+    label: 'New portal item',
+    category: 'trigger',
+    description:
+      'Fires when a new title (series or movie) appears in the public portal — the Jellyfin collection live on the site — emitting the new item(s). Runs automatically on a schedule tick; a manual run emits the most-recently-added portal title as a sample.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'item', dataType: 'catalog' }],
+    config: [],
+  },
+  async run(_inputs, _config, ctx) {
+    if (!triggerMatches(ctx, 'new-portal')) {
+      ctx.notes.push('idle — waiting on a new portal item')
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    let source: FlowItem[] = ctx.trigger?.items ?? []
+    if (ctx.trigger == null || ctx.trigger.manual) {
+      const titles = getAllPortalItems()
+        .filter((p) => p.type === 'Series' || p.type === 'Movie')
+        .sort((a, b) => String(b.date_created ?? '').localeCompare(String(a.date_created ?? '')))
+      source = titles.slice(0, 1) as unknown as FlowItem[]
+      ctx.notes.push(source.length ? 'manual sample: latest portal title' : 'no portal titles to sample')
+    }
+    const items = source.map((it) => ({ ...it, triggered_at, trigger: 'new-portal' }))
+    ctx.notes.push(`${items.length} new item(s)`)
+    return { out: items }
+  },
+}
+
+const triggerQbitComplete: NodeImpl = {
+  spec: {
+    type: 'trigger.qbit-complete',
+    label: 'Download complete',
+    category: 'trigger',
+    description:
+      'Fires when a qBittorrent download finishes, emitting the completed torrent (hash, name, content_path) — wire it to expand-files to import promptly. Runs automatically on a schedule tick; a manual run samples the most-recently-completed torrent.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'torrent', dataType: 'torrent' }],
+    config: [],
+  },
+  async run(_inputs, _config, ctx) {
+    if (!triggerMatches(ctx, 'qbit-complete')) {
+      ctx.notes.push('idle — waiting on a completed download')
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    let source: FlowItem[] = ctx.trigger?.items ?? []
+    if (ctx.trigger == null || ctx.trigger.manual) {
+      if (!qbitConfigured()) {
+        ctx.notes.push('qBittorrent not configured — nothing to sample')
+        return { out: [] }
+      }
+      const done = (await qbitList()).filter((t) => t.progress >= 1).sort((a, b) => b.added_on - a.added_on)
+      source = done.slice(0, 1).map(qbitToItem) as unknown as FlowItem[]
+      ctx.notes.push(source.length ? 'manual sample: latest completed download' : 'no completed downloads to sample')
+    }
+    const items = source.map((it) => ({ ...it, triggered_at, trigger: 'qbit-complete' }))
+    ctx.notes.push(`${items.length} completed download(s)`)
+    return { out: items }
+  },
+}
+
+const triggerRelease: NodeImpl = {
+  spec: {
+    type: 'trigger.release',
+    label: 'Release due',
+    category: 'trigger',
+    description:
+      'Fires when a library show’s scheduled episode air time passes, emitting the aired episode (title, ep, air time). Runs automatically on a schedule tick; a manual run emits the next upcoming library airing as a sample.',
+    inputs: [],
+    outputs: [{ id: 'out', label: 'airing' }],
+    config: [],
+  },
+  async run(_inputs, config, ctx) {
+    if (!triggerMatches(ctx, 'release')) {
+      ctx.notes.push('idle — waiting on a release')
+      return { out: [] }
+    }
+    const triggered_at = new Date().toISOString()
+    let source: FlowItem[] = ctx.trigger?.items ?? []
+    if (ctx.trigger == null || ctx.trigger.manual) {
+      // Sample: the soonest upcoming airing, else the most recent aired one.
+      const airings = await libraryAirings()
+      const upcoming = airings.find((a) => !a.aired) ?? [...airings].reverse().find((a) => a.aired)
+      source = upcoming ? [upcoming.item as unknown as FlowItem] : []
+      ctx.notes.push(source.length ? 'manual sample: next airing' : 'no airings to sample')
+    }
+    const items = source.map((it) => ({ ...it, triggered_at, trigger: 'release' }))
+    ctx.notes.push(`${items.length} release(s)`)
+    return { out: items }
+  },
+}
+
+const triggerFire: NodeImpl = {
+  spec: {
+    type: 'trigger.fire',
+    label: 'Fire trigger',
+    category: 'trigger',
+    description:
+      'Publishes to a trigger name: every flow with a "Trigger" of that name runs, receiving these items as its payload. The fire is deferred until this flow finishes, so use it to chain flows. Items pass straight through.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'fired' }],
+    config: [
+      {
+        key: 'name',
+        label: 'Trigger name',
+        kind: 'text',
+        default: '',
+        help: 'The Trigger name to fire in other flows.',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const name = str(config, 'name', '')
+    const items = allInputs(inputs)
+    if (!name) {
+      ctx.notes.push('no trigger name set — nothing fired')
+      return { out: items }
+    }
+    if (ctx.dryRun) {
+      ctx.notes.push(`would fire "${name}" with ${items.length} item(s)`)
+    } else if (ctx.fireQueue) {
+      ctx.fireQueue.push({ name, items })
+      ctx.notes.push(`queued fire "${name}" with ${items.length} item(s)`)
+    } else {
+      ctx.notes.push(`fire "${name}" skipped (no dispatcher in this context)`)
+    }
+    return { out: items }
+  },
+}
+
 const IMPLS: NodeImpl[] = [
+  triggerStart,
+  triggerNewItem,
+  triggerNewPortalItem,
+  triggerQbitComplete,
+  triggerRelease,
+  triggerFire,
   jellyfinSource,
   indexerSource,
   portalSource,
   httpSource,
+  httpEnrich,
   qbittorrentSource,
   fieldFilter,
   compare,
@@ -2792,16 +4143,113 @@ const IMPLS: NodeImpl[] = [
   indexerMatch,
   jikanEnrich,
   template,
+  setJson,
+  setField,
+  convert,
+  pick,
+  fromValue,
+  collect,
+  textValue,
+  numberValue,
+  colorValue,
+  urlValue,
+  jsonValue,
   animeStatus,
   torrentSearch,
   diff,
   merge,
+  reroute,
+  delay,
   portalSink,
+  httpSink,
+  logSink,
   qbittorrentSink,
   qbittorrentDelete,
   libraryImport,
   jellyfinScan,
   jellyfinCollection,
+  subflow,
+  {
+    spec: {
+      type: 'boundary.input',
+      label: 'Input',
+      category: 'boundary',
+      description: 'External input port for a published component flow.',
+      inputs: [],
+      outputs: [{ id: 'items', label: 'items' }],
+      config: [
+        { key: 'portId', label: 'Port id', kind: 'text', default: 'in' },
+        { key: 'label', label: 'Label', kind: 'text', default: 'Input' },
+        {
+          key: 'dataType',
+          label: 'Type',
+          kind: 'select',
+          options: DATA_TYPE_OPTIONS,
+          default: 'items',
+          help: 'What this port carries. Value types (text, color, …) make the component input a typed socket.',
+        },
+        {
+          key: 'testItems',
+          label: 'Test items',
+          kind: 'json',
+          default: '',
+          help: 'JSON array of items this input emits when the flow runs on its own (Dry run and Apply). For a value-typed port use {"value": …} wrappers, e.g. [{"value": "#7c5cff"}]. Ignored when the flow runs as a component inside another flow — the parent’s items are used instead.',
+        },
+      ],
+    },
+    resolvePorts: (config) => ({
+      inputs: [],
+      outputs: [{ id: 'items', label: 'items', dataType: configDataType(config) }],
+    }),
+    // Only reached on standalone runs — when the flow is embedded as a
+    // component, the executor injects the parent's per-port items and skips
+    // run() entirely (see injectOutput in flowExecutor).
+    run: async (inputs, config, ctx) => {
+      const raw = str(config, 'testItems', '')
+      if (!raw) return { items: inputs.items ?? [] }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        throw new Error('Test items must be a JSON array, e.g. [{"title": "Frieren"}]')
+      }
+      const items = Array.isArray(parsed) ? parsed : [parsed]
+      if (!items.every((v): v is FlowItem => typeof v === 'object' && v !== null && !Array.isArray(v))) {
+        throw new Error('Test items must be a JSON array of objects')
+      }
+      ctx.notes.push(`emitting ${items.length} test item(s) — standalone run`)
+      return { items }
+    },
+  },
+  {
+    spec: {
+      type: 'boundary.output',
+      label: 'Output',
+      category: 'boundary',
+      description: 'External output port for a published component flow.',
+      inputs: [{ id: 'items', label: 'items' }],
+      outputs: [],
+      config: [
+        { key: 'portId', label: 'Port id', kind: 'text', default: 'out' },
+        { key: 'label', label: 'Label', kind: 'text', default: 'Output' },
+        {
+          key: 'dataType',
+          label: 'Type',
+          kind: 'select',
+          options: DATA_TYPE_OPTIONS,
+          default: 'items',
+          help: 'What this port carries — a value type makes the component output a typed socket.',
+        },
+      ],
+    },
+    resolvePorts: (config) => ({
+      inputs: [{ id: 'items', label: 'items', dataType: configDataType(config) }],
+      outputs: [],
+    }),
+    run: async () => {
+      return {}
+    },
+  },
 ]
 
 export const NODE_REGISTRY: Map<string, NodeImpl> = new Map(IMPLS.map((n) => [n.spec.type, n]))
