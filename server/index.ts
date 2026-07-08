@@ -213,25 +213,89 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
     typeof pageRaw === 'string' && Number.isFinite(Number(pageRaw))
       ? Math.max(1, Math.floor(Number(pageRaw)))
       : 1
+  const malUrl = series.url ?? `https://myanimelist.net/anime/${series.mal_id}`
   try {
     const { episodes, pagination } = await fetchAnimeEpisodesPage(series.mal_id, p)
-    res.json({
-      episodes: episodes.map((e) => ({
-        mal_id: e.mal_id,
-        url: e.url,
-        title: e.title,
-        title_japanese: e.title_japanese ?? null,
-        aired: e.aired ?? null,
-        filler: e.filler,
-        recap: e.recap,
-        episode: episodeNumberFromUrl(e.url),
+    // The episode number drives every per-episode cell (library file, download,
+    // watch link). MAL episode URLs don't always carry `/episode/N`, so fall back
+    // to the episode's own mal_id (Jikan numbers episodes there) then its page
+    // position — never leave it null, or the whole row goes blank.
+    const rows = episodes.map((e, i) => ({
+      mal_id: e.mal_id,
+      url: e.url,
+      title: e.title,
+      title_japanese: e.title_japanese ?? null,
+      aired: e.aired ?? null,
+      filler: e.filler,
+      recap: e.recap,
+      episode: episodeNumberFromUrl(e.url) ?? e.mal_id ?? (p - 1) * 100 + i + 1,
+    }))
+    // Cache what we got so the fallback below can serve it next time Jikan is down.
+    seriesDb.upsertEpisodes(
+      series.mal_id,
+      rows.map((r) => ({
+        number: r.episode,
+        title: r.title,
+        title_japanese: r.title_japanese,
+        aired: r.aired,
       })),
-      pagination,
-    })
+    )
+    res.json({ episodes: rows, pagination, source: 'jikan' })
   } catch (e) {
+    // Jikan (MAL proxy) flakes constantly. Rather than an empty page, serve a
+    // fallback so the per-episode library/watch status is still visible: cached
+    // rows if we ever fetched them, else a synthesized 1..N from the known count.
     console.error(e)
-    res.status(502).json({
-      error: e instanceof Error ? e.message : 'Could not load episodes',
+    if (p > 1) {
+      // Fallbacks are a single page; deeper paging has nothing more to give.
+      res.json({ episodes: [], pagination: { has_next_page: false, current_page: p }, source: 'none' })
+      return
+    }
+    const cached = seriesDb.getCachedEpisodes(series.mal_id)
+    let rows: {
+      mal_id: number
+      url: string
+      title: string
+      title_japanese: string | null
+      aired: string | null
+      filler: boolean
+      recap: boolean
+      episode: number
+    }[] = []
+    let source = ''
+    if (cached.length > 0) {
+      rows = cached.map((c) => ({
+        mal_id: series.mal_id,
+        url: malUrl,
+        title: c.title ?? `Episode ${c.number}`,
+        title_japanese: c.title_japanese ?? null,
+        aired: c.aired ?? null,
+        filler: false,
+        recap: false,
+        episode: c.number,
+      }))
+      source = 'cache'
+    } else if (series.episodes && series.episodes > 0) {
+      rows = Array.from({ length: series.episodes }, (_, i) => ({
+        mal_id: series.mal_id,
+        url: malUrl,
+        title: `Episode ${i + 1}`,
+        title_japanese: null,
+        aired: null,
+        filler: false,
+        recap: false,
+        episode: i + 1,
+      }))
+      source = 'synthesized'
+    }
+    if (rows.length === 0) {
+      res.status(502).json({ error: e instanceof Error ? e.message : 'Could not load episodes' })
+      return
+    }
+    res.json({
+      episodes: rows,
+      pagination: { has_next_page: false, current_page: 1, last_visible_page: 1 },
+      source,
     })
   }
 })

@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { Ban, Check, ChevronLeft, ExternalLink, Play, Trash2, Upload } from 'lucide-react'
+import {
+  Ban,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Circle,
+  ExternalLink,
+  Loader2,
+  Play,
+  Trash2,
+  Upload,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
@@ -188,6 +199,103 @@ function formatAired(iso: string | null): string {
   })
 }
 
+type StageTone = 'done' | 'active' | 'pending' | 'idle'
+interface Stage {
+  label: string
+  detail: string
+  tone: StageTone
+}
+
+// A one-glance "where is this title in the pipeline" strip, derived entirely from
+// data the page already loads (catalog → download → library → on site) so there's
+// no flow-chasing to see progress.
+function pipelineStages(args: {
+  expected: number | null
+  libCount: number
+  torrents: SeriesDownload[]
+  onSiteCount: number
+  qbitConfigured: boolean
+}): Stage[] {
+  const { expected, libCount, torrents, onSiteCount, qbitConfigured } = args
+  const active = torrents.filter((t) => t.progress < 1 && !t.state.includes('paused'))
+  const complete = torrents.filter((t) => t.progress >= 1)
+  const maxPct = active.length ? Math.max(...active.map((t) => t.progress)) : 0
+
+  const download: Stage = !qbitConfigured
+    ? { label: 'Download', detail: 'qBittorrent off', tone: 'idle' }
+    : active.length
+      ? { label: 'Download', detail: `Downloading ${Math.round(maxPct * 100)}%`, tone: 'active' }
+      : complete.length
+        ? { label: 'Download', detail: 'Complete', tone: 'done' }
+        : libCount > 0
+          ? { label: 'Download', detail: 'Done', tone: 'done' }
+          : { label: 'Download', detail: 'No release yet', tone: 'pending' }
+
+  const library: Stage =
+    expected && libCount >= expected
+      ? { label: 'Library', detail: `${libCount}/${expected} imported`, tone: 'done' }
+      : libCount > 0
+        ? {
+            label: 'Library',
+            detail: `${libCount}${expected ? `/${expected}` : ''} imported`,
+            tone: 'active',
+          }
+        : { label: 'Library', detail: expected ? `0/${expected}` : 'None yet', tone: 'pending' }
+
+  const onSite: Stage =
+    onSiteCount > 0
+      ? {
+          label: 'On site',
+          detail: `${onSiteCount}${expected ? `/${expected}` : ''} playable`,
+          tone: expected && onSiteCount >= expected ? 'done' : 'active',
+        }
+      : { label: 'On site', detail: 'Not yet', tone: 'pending' }
+
+  return [{ label: 'Catalog', detail: 'Added', tone: 'done' }, download, library, onSite]
+}
+
+const TONE_STYLES: Record<StageTone, { dot: string; text: string }> = {
+  done: { dot: 'text-emerald-500', text: 'text-foreground' },
+  active: { dot: 'text-sky-500', text: 'text-foreground' },
+  pending: { dot: 'text-muted-foreground', text: 'text-muted-foreground' },
+  idle: { dot: 'text-muted-foreground', text: 'text-muted-foreground' },
+}
+
+function StageIcon({ tone }: { tone: StageTone }) {
+  const cls = `size-4 shrink-0 ${TONE_STYLES[tone].dot}`
+  if (tone === 'done') return <Check className={cls} />
+  if (tone === 'active') return <Loader2 className={`${cls} animate-spin`} />
+  return <Circle className={cls} />
+}
+
+function PipelineStrip(props: {
+  expected: number | null
+  libCount: number
+  torrents: SeriesDownload[]
+  onSiteCount: number
+  qbitConfigured: boolean
+}) {
+  const stages = pipelineStages(props)
+  return (
+    <div className="flex flex-wrap items-center gap-x-1 gap-y-2 rounded-lg border border-border bg-card px-4 py-3">
+      {stages.map((s, i) => (
+        <div key={s.label} className="flex items-center gap-1">
+          <div className="flex items-center gap-2">
+            <StageIcon tone={s.tone} />
+            <div className="leading-tight">
+              <div className="text-xs font-medium text-muted-foreground">{s.label}</div>
+              <div className={`text-sm ${TONE_STYLES[s.tone].text}`}>{s.detail}</div>
+            </div>
+          </div>
+          {i < stages.length - 1 ? (
+            <ChevronRight className="mx-2 size-4 shrink-0 text-muted-foreground/40" />
+          ) : null}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function SeriesDetail() {
   const { seriesId } = useParams<{ seriesId: string }>()
   const navigate = useNavigate()
@@ -203,6 +311,8 @@ export default function SeriesDetail() {
   const [epHasNext, setEpHasNext] = useState(false)
   const [epLoading, setEpLoading] = useState(false)
   const [epError, setEpError] = useState('')
+  // 'jikan' = live MAL; 'cache'/'synthesized' = fallback while MAL is unreachable.
+  const [epSource, setEpSource] = useState('')
 
   const [dl, setDl] = useState<DownloadStatus | null>(null)
   const [busyHash, setBusyHash] = useState<string | null>(null)
@@ -408,6 +518,7 @@ export default function SeriesDetail() {
         const raw = await parseAuthJson<{
           episodes?: EpisodeRow[]
           pagination?: { has_next_page: boolean }
+          source?: string
           error?: string
         }>(r)
         if (!r.ok) throw new Error(raw.error ?? 'Episodes failed')
@@ -415,6 +526,7 @@ export default function SeriesDetail() {
         setEpisodes((prev) => (replace ? next : [...prev, ...next]))
         setEpPage(page)
         setEpHasNext(raw.pagination?.has_next_page ?? false)
+        if (replace) setEpSource(raw.source ?? '')
       } catch (e) {
         setEpError(e instanceof Error ? e.message : 'Episodes failed')
       } finally {
@@ -580,6 +692,14 @@ export default function SeriesDetail() {
             ) : null}
           </div>
         </section>
+
+        <PipelineStrip
+          expected={mal?.episodes ?? series.episodes ?? null}
+          libCount={libMedia.size}
+          torrents={dl?.torrents ?? []}
+          onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
+          qbitConfigured={dl?.qbitConfigured ?? false}
+        />
 
         <section>
           <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -798,6 +918,13 @@ export default function SeriesDetail() {
           <h2 className="mb-4 text-lg font-semibold">Episodes</h2>
           {epError ? (
             <p className="text-sm text-destructive">{epError}</p>
+          ) : null}
+          {epSource === 'synthesized' || epSource === 'cache' ? (
+            <p className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-500">
+              MyAnimeList is unreachable right now, so episode titles are{' '}
+              {epSource === 'cache' ? 'from our last cached copy' : 'placeholders'}. Library and
+              download status below is still live.
+            </p>
           ) : null}
 
           <div className="hidden overflow-hidden rounded-lg border border-border md:block">
