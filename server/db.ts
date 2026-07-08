@@ -100,15 +100,18 @@ export function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_history_user ON watch_history(username);
 
-    -- Free-text suggestions from logged-in portal users, reviewed in the
-    -- /manage "Suggestions" tab. user_id is the Supabase account id; email is
+    -- Free-text suggestions from logged-in portal users, reviewed on the
+    -- /manage "Suggestions" kanban. user_id is the Supabase account id; email is
     -- captured at submit time so admins can see who asked without a lookup.
+    -- status is the kanban column (unread | todo | working | staged | done);
+    -- resolved is kept for back-compat and mirrors status = 'done'.
     CREATE TABLE IF NOT EXISTS suggestions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
       email TEXT,
       body TEXT NOT NULL,
       resolved INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'unread',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_suggestions_created ON suggestions(created_at);
@@ -152,6 +155,17 @@ export function getDb(): Database.Database {
   )
   for (const [name, type] of SERIES_EXTRA_COLUMNS) {
     if (!existing.has(name)) instance.exec(`ALTER TABLE series ADD COLUMN ${name} ${type}`)
+  }
+
+  // Additive migration: the suggestions kanban `status` column landed after the
+  // table already existed on some deployments. Add it, then backfill from the
+  // older `resolved` flag so previously-resolved items open in the Done column.
+  const suggestionCols = new Set(
+    (instance.prepare(`PRAGMA table_info(suggestions)`).all() as { name: string }[]).map((c) => c.name),
+  )
+  if (!suggestionCols.has('status')) {
+    instance.exec(`ALTER TABLE suggestions ADD COLUMN status TEXT NOT NULL DEFAULT 'todo'`)
+    instance.exec(`UPDATE suggestions SET status = 'done' WHERE resolved = 1`)
   }
 
   db = instance
@@ -201,31 +215,40 @@ export function unsaveAnime(username: string, item_id: string) {
   getDb().prepare('DELETE FROM saved_animes WHERE username = ? AND item_id = ?').run(username, item_id)
 }
 
+export type SuggestionStatus = 'unread' | 'todo' | 'working' | 'staged' | 'done'
+export const SUGGESTION_STATUSES: SuggestionStatus[] = ['unread', 'todo', 'working', 'staged', 'done']
+
 export interface SuggestionRow {
   id: number
   user_id: string
   email: string | null
   body: string
   resolved: number
+  status: SuggestionStatus
   created_at: string
 }
 
 export function addSuggestion(user_id: string, email: string | null, body: string): SuggestionRow {
+  // Land new suggestions in the 'unread' column explicitly — DBs that migrated
+  // the status column earlier baked in a 'todo' default we don't want to inherit.
   const info = getDb()
-    .prepare('INSERT INTO suggestions (user_id, email, body) VALUES (?, ?, ?)')
+    .prepare("INSERT INTO suggestions (user_id, email, body, status) VALUES (?, ?, ?, 'unread')")
     .run(user_id, email, body)
   return getDb().prepare('SELECT * FROM suggestions WHERE id = ?').get(Number(info.lastInsertRowid)) as SuggestionRow
 }
 
-/** All suggestions, open ones first, newest within each group. */
+/** All suggestions, newest first (the board groups them into columns client-side). */
 export function listSuggestions(): SuggestionRow[] {
   return getDb()
-    .prepare('SELECT * FROM suggestions ORDER BY resolved ASC, created_at DESC')
+    .prepare('SELECT * FROM suggestions ORDER BY created_at DESC')
     .all() as SuggestionRow[]
 }
 
-export function setSuggestionResolved(id: number, resolved: boolean): SuggestionRow | undefined {
-  getDb().prepare('UPDATE suggestions SET resolved = ? WHERE id = ?').run(resolved ? 1 : 0, id)
+/** Move a suggestion to a kanban column. `resolved` is kept in sync (= 'done'). */
+export function setSuggestionStatus(id: number, status: SuggestionStatus): SuggestionRow | undefined {
+  getDb()
+    .prepare('UPDATE suggestions SET status = ?, resolved = ? WHERE id = ?')
+    .run(status, status === 'done' ? 1 : 0, id)
   return getDb().prepare('SELECT * FROM suggestions WHERE id = ?').get(id) as SuggestionRow | undefined
 }
 
