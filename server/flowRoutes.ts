@@ -402,20 +402,27 @@ const FIRE_DEPTH_CAP = 5
  * the flow lock (one at a time), and each run's own `trigger.fire` outputs are
  * drained recursively (depth-capped). Callers must NOT already hold the flow
  * lock. Never throws — a bad flow is logged and skipped so a chain can't wedge.
+ *
+ * Returns `false` if any subscriber was skipped because the flow lock was held
+ * (i.e. the event was NOT fully dispatched this pass) so an event-watcher can
+ * leave its watermark un-advanced and retry next tick. A flow that actually ran
+ * — even if it errored or was invalid — does not count as a lock-skip.
  */
 async function runMatchingFlows(
   flows: { id: number; name: string; graph: string }[],
   event: TriggerEvent,
   depth: number,
-): Promise<void> {
+): Promise<boolean> {
   const label = event.kind === 'start' ? `"${event.name}"` : event.kind
   if (depth > FIRE_DEPTH_CAP) {
     console.warn(`fireTrigger: depth cap (${FIRE_DEPTH_CAP}) reached at ${label} — stopping chain`)
-    return
+    return true
   }
+  let dispatched = true
   for (const flow of flows) {
     if (!acquireFlowLock()) {
       console.warn(`fireTrigger: ${label} → flow #${flow.id} skipped (a flow is already running)`)
+      dispatched = false
       continue
     }
     let fires: FireRequest[] = []
@@ -443,6 +450,7 @@ async function runMatchingFlows(
     // Drain this flow's own fires (lock released) before moving on.
     for (const f of fires) await fireTrigger(f.name, f.items, depth + 1)
   }
+  return dispatched
 }
 
 /** Publish to a named trigger bus: run every flow with a `trigger.start` of `name`. */
@@ -456,11 +464,13 @@ export async function fireTrigger(name: string, items: FlowItem[], depth = 0): P
 }
 
 /** Fire an event trigger: run every flow with a `trigger.<kind>` node, seeding
- * it with the event items. Used by the scheduler's watchers. */
-export async function fireEvent(kind: TriggerKind, items: FlowItem[], depth = 0): Promise<void> {
+ * it with the event items. Used by the scheduler's watchers. Returns `false` if
+ * a subscriber was lock-skipped (event not fully dispatched) so the caller can
+ * retry rather than advance its watermark. */
+export async function fireEvent(kind: TriggerKind, items: FlowItem[], depth = 0): Promise<boolean> {
   const flows = flowsDb.flowsWithTriggerType(`trigger.${kind}`)
-  if (flows.length === 0) return
-  await runMatchingFlows(flows, { kind, items }, depth)
+  if (flows.length === 0) return true
+  return runMatchingFlows(flows, { kind, items }, depth)
 }
 
 const TRIGGER_KINDS: TriggerKind[] = ['start', 'new-item', 'new-portal', 'release', 'qbit-complete']
