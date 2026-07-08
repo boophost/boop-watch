@@ -180,27 +180,29 @@ app.get('/api/search/anime', requireAuth, async (req, res) => {
     res.json({ results: [] })
     return
   }
+  // AniList is the primary search source: it needs no auth, carries idMal (so
+  // hits stay addable to our MAL-id catalog), and is reliable. We self-host
+  // Jikan only for the MAL-specific data AniList lacks (per-episode titles,
+  // detail) — its search endpoint needs a Typesense index we don't run, so it's
+  // the fallback here, used only if AniList is down.
   try {
-    const data = await searchAnime(q)
-    res.json({
-      results: data.map((a) => ({
-        mal_id: a.mal_id,
-        title: a.title,
-        synopsis: a.synopsis ?? '',
-        image_url: pickPosterUrl(a),
-        url: a.url,
-      })),
-    })
-  } catch (jikanErr) {
-    // Jikan is an unofficial MAL proxy and periodically can't reach MAL (504
-    // "failed to connect to MyAnimeList"). Fall back to AniList, which needs no
-    // auth and carries idMal, so results stay addable to our MAL-id catalog.
-    console.error('search: Jikan failed, trying AniList —', jikanErr)
+    const results = await searchAnimeAniList(q)
+    res.json({ results })
+  } catch (anilistErr) {
+    console.error('search: AniList failed, trying Jikan —', anilistErr)
     try {
-      const results = await searchAnimeAniList(q)
-      res.json({ results })
-    } catch (anilistErr) {
-      console.error('search: AniList fallback also failed —', anilistErr)
+      const data = await searchAnime(q)
+      res.json({
+        results: data.map((a) => ({
+          mal_id: a.mal_id,
+          title: a.title,
+          synopsis: a.synopsis ?? '',
+          image_url: pickPosterUrl(a),
+          url: a.url,
+        })),
+      })
+    } catch (jikanErr) {
+      console.error('search: Jikan fallback also failed —', jikanErr)
       res.status(502).json({ error: 'Anime metadata lookup is temporarily unavailable — try again shortly' })
     }
   }
@@ -224,6 +226,19 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
   }
   try {
     const mal = await fetchAnimeFull(series.mal_id)
+    // Persist the episode count so the episodes API's synthesized fallback can
+    // still render a full 1..N grid (with library/download status) if the
+    // episodes scrape is ever unavailable — otherwise a null count dead-ends.
+    if (typeof mal.episodes === 'number' && mal.episodes > 0 && mal.episodes !== series.episodes) {
+      try {
+        seriesDb.upsertSeriesMetadata(
+          { mal_id: series.mal_id, title: series.title },
+          { episodes: mal.episodes },
+        )
+      } catch (persistErr) {
+        console.error('detail: failed to persist episode count —', persistErr)
+      }
+    }
     res.json({ series, mal })
   } catch (e) {
     console.error(e)

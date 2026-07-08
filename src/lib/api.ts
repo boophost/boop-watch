@@ -28,7 +28,16 @@ export async function parseAuthJson<T>(r: Response): Promise<T> {
   const ct = r.headers.get('content-type') ?? ''
   if (!ct.includes('application/json')) {
     const text = (await r.text()).trim()
-    throw new Error(text || `Request failed (${r.status})`)
+    // A non-JSON body here is an infra error page (e.g. a Cloudflare 5xx),
+    // not our API. Dumping the raw HTML into the UI produces a wall of markup
+    // (that's how a gateway blip used to render on the episodes tab), so throw
+    // a concise message instead.
+    if (!text || /^\s*</.test(text)) {
+      throw new Error(
+        r.status >= 500 ? `Upstream error (${r.status})` : `Request failed (${r.status})`,
+      )
+    }
+    throw new Error(text)
   }
   return (await r.json()) as T
 }
