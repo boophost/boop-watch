@@ -74,14 +74,31 @@ const eps = [
 }
 
 {
+  // Finished cour: MAL total known and met → no chase.
   const done = resolveNextChase({
     episodes: [{ episode: 1, aired: '2026-07-01T15:00:00Z' }],
     siteEpisodes: { '1': 'jf-1' },
     libraryEpisodes: new Set([1]),
     torrents: [],
+    malEpisodes: 1,
     now,
   })
-  assert(done === null, 'no chase when caught up with only aired ep')
+  assert(done === null, 'no chase when MAL total met')
+}
+
+{
+  // Airing: only ep 1 cached + on site, no MAL total → synthesize ep 2 as upcoming.
+  const synth = resolveNextChase({
+    episodes: [{ episode: 1, title: 'Ep 1', aired: '2026-07-03T00:00:00Z' }],
+    siteEpisodes: { '1': 'jf-1' },
+    libraryEpisodes: new Set([1]),
+    torrents: [],
+    malEpisodes: null,
+    now,
+  })
+  assert(synth?.episode === 2, `synth ep=${synth?.episode}`)
+  assert(synth?.state === 'waiting', `synth state=${synth?.state}`)
+  assert(synth?.airsAt == null, 'synth has no air date yet')
 }
 
 console.log('verify-episode-chase: ok')
