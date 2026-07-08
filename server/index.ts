@@ -687,12 +687,16 @@ app.get('/api/suggestions', requireAuth, requireAdmin, (_req, res) => {
 
 app.patch('/api/suggestions/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id)
-  const { resolved } = req.body as { resolved?: unknown }
-  if (!Number.isFinite(id) || typeof resolved !== 'boolean') {
-    res.status(400).json({ error: 'resolved (boolean) required' })
+  const { status } = req.body as { status?: unknown }
+  if (
+    !Number.isFinite(id) ||
+    typeof status !== 'string' ||
+    !seriesDb.SUGGESTION_STATUSES.includes(status as seriesDb.SuggestionStatus)
+  ) {
+    res.status(400).json({ error: `status must be one of: ${seriesDb.SUGGESTION_STATUSES.join(', ')}` })
     return
   }
-  const row = seriesDb.setSuggestionResolved(id, resolved)
+  const row = seriesDb.setSuggestionStatus(id, status as seriesDb.SuggestionStatus)
   if (!row) {
     res.status(404).json({ error: 'Not found' })
     return

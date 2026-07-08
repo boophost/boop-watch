@@ -1,11 +1,14 @@
 import { fetchAuth, parseAuthJson } from './api'
 
+export type SuggestionStatus = 'unread' | 'todo' | 'working' | 'staged' | 'done'
+
 export interface SuggestionRow {
   id: number
   user_id: string
   email: string | null
   body: string
   resolved: number
+  status: SuggestionStatus
   created_at: string
 }
 
@@ -16,11 +19,11 @@ export async function listSuggestions(): Promise<SuggestionRow[]> {
   return data.suggestions
 }
 
-export async function setSuggestionResolved(id: number, resolved: boolean): Promise<SuggestionRow> {
+export async function setSuggestionStatus(id: number, status: SuggestionStatus): Promise<SuggestionRow> {
   const r = await fetchAuth(`/api/suggestions/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ resolved }),
+    body: JSON.stringify({ status }),
   })
   const data = await parseAuthJson<{ suggestion: SuggestionRow; error?: string }>(r)
   if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`)
