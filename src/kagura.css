@@ -788,10 +788,43 @@ body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
   cursor: default;
   pointer-events: none;
 }
+/* Status lives outside the 30px play-icon .go slot so "airs in …" isn't clipped. */
+.kagura .eprow .ep-status-slot,
+.player .eprow .ep-status-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: none;
+  max-width: 42%;
+  min-width: 0;
+}
+.kagura .eprow .ep-status-slot .ep-status,
+.player .eprow .ep-status-slot .ep-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.player .eprow.chasing .epnow {
+  flex: none;
+  max-width: 46%;
+  min-width: 0;
+  overflow: hidden;
+}
+.player .eprow.chasing .epnow .ep-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .kagura .badge.ep-chase {
   height: auto;
   min-height: 20px;
   padding: 2px 8px;
+  max-width: 100%;
+}
+.kagura .badge.ep-chase .ep-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @keyframes ep-status-pulse {
