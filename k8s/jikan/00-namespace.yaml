@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jikan
+  labels:
+    # A dedicated namespace (not link-apps) so the link platform's reconciler
+    # never prunes this supporting stack — it isn't a link-managed app.
+    app.kubernetes.io/part-of: jikan

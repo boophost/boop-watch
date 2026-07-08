@@ -1,0 +1,64 @@
+# MongoDB — jikan-rest's response cache (DB_CACHING=true) and its database
+# queue. Auth-free: this is an internal ClusterIP only ever reached by jikan-rest
+# inside the cluster, same posture as the LAN-only qBittorrent WebUI.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongo-data
+  namespace: jikan
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: jikan
+  labels: { app: mongodb }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }   # RWO volume — never two pods on it at once
+  selector:
+    matchLabels: { app: mongodb }
+  template:
+    metadata:
+      labels: { app: mongodb }
+    spec:
+      containers:
+        - name: mongodb
+          # Pinned to 4.4 — the last MongoDB that runs without AVX (the cluster
+          # nodes' CPUs lack it; 5.0+ crashes on boot). jikan-rest is 4.x-compatible.
+          image: mongo:4.4
+          args: ["--wiredTigerCacheSizeGB", "0.5"]
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+          readinessProbe:
+            exec:
+              command: ["mongo", "--quiet", "--eval", "db.adminCommand('ping')"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "50m", memory: "256Mi" }
+            limits: { memory: "1Gi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mongo-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: jikan
+spec:
+  selector: { app: mongodb }
+  ports:
+    - port: 27017
+      targetPort: 27017

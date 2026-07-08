@@ -1,6 +1,10 @@
 import { limitedFetch } from './httpQueue.js'
 
-const JIKAN_BASE = 'https://api.jikan.moe/v4'
+// Base URL of the Jikan (MyAnimeList proxy) API. Defaults to the public
+// instance, but in production we point it at our own self-hosted jikan-rest
+// (JIKAN_URL) — the public api.jikan.moe is chronically overloaded and 504s,
+// which used to surface as a hard 502 on the episodes API. See k8s/jikan/.
+const JIKAN_BASE = process.env.JIKAN_URL || 'https://api.jikan.moe/v4'
 
 // Jikan allows ~3 req/s; the shared 'jikan' queue serializes every caller
 // (search + detail + episodes on one page load, plus aniskip's chain-walk) so
