@@ -80,8 +80,19 @@ function chaseFromStatus(
   return { airedCount, expectedForPipeline: expected, nextChase }
 }
 
+function withBudget<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  if (ms <= 0) return p
+  return Promise.race([
+    p,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ])
+}
+
 /** Ensure we have a broadcast blob for airing seasons that need an estimate. */
-async function ensureBroadcast(series: SeriesRow): Promise<MalBroadcast | null> {
+async function ensureBroadcast(
+  series: SeriesRow,
+  opts: { budgetMs?: number } = {},
+): Promise<MalBroadcast | null> {
   const existing = parseStoredBroadcast(series.broadcast)
   if (existing?.day && existing?.time) return existing
 
@@ -91,36 +102,46 @@ async function ensureBroadcast(series: SeriesRow): Promise<MalBroadcast | null> 
     status.includes('air') || !series.episodes || series.episodes <= 0 || !existing
   if (!maybeAiring && existing) return existing
 
-  try {
-    const mal = await fetchAnimeFull(series.mal_id)
-    const bc = mal.broadcast ?? null
-    const serialized = serializeBroadcast(bc)
-    if (serialized && serialized !== series.broadcast) {
-      try {
-        upsertSeriesMetadata(
-          { mal_id: series.mal_id, title: series.title },
-          {
-            broadcast: serialized,
-            ...(typeof mal.episodes === 'number' && mal.episodes > 0
-              ? { episodes: mal.episodes }
-              : {}),
-            ...(mal.status ? { status: mal.status } : {}),
-          },
-        )
-      } catch (e) {
-        console.error('chase: failed to persist broadcast —', e)
+  const fetchAndPersist = async (): Promise<MalBroadcast | null> => {
+    try {
+      const mal = await fetchAnimeFull(series.mal_id)
+      const bc = mal.broadcast ?? null
+      const serialized = serializeBroadcast(bc)
+      if (serialized && serialized !== series.broadcast) {
+        try {
+          upsertSeriesMetadata(
+            { mal_id: series.mal_id, title: series.title },
+            {
+              broadcast: serialized,
+              ...(typeof mal.episodes === 'number' && mal.episodes > 0
+                ? { episodes: mal.episodes }
+                : {}),
+              ...(mal.status ? { status: mal.status } : {}),
+            },
+          )
+        } catch (e) {
+          console.error('chase: failed to persist broadcast —', e)
+        }
       }
+      return bc
+    } catch (e) {
+      console.error('chase: broadcast fetch failed —', e)
+      return existing
     }
-    return bc
-  } catch (e) {
-    console.error('chase: broadcast fetch failed —', e)
-    return existing
   }
+
+  const budgetMs = opts.budgetMs ?? 0
+  if (budgetMs > 0) {
+    // Race a budget; the underlying fetch keeps running so the next request
+    // can hit a warm cache — don't start a second fetch.
+    return withBudget(fetchAndPersist(), budgetMs, existing)
+  }
+  return fetchAndPersist()
 }
 
 export async function buildSeriesChase(
   seriesId: number,
-  opts: { includeLibrary?: boolean } = {},
+  opts: { includeLibrary?: boolean; budgetMs?: number } = {},
 ): Promise<{
   airedCount: number
   expectedForPipeline: number | null
@@ -160,7 +181,9 @@ export async function buildSeriesChase(
   let broadcast = parseStoredBroadcast(series.broadcast)
   const prelim = chaseFromStatus(series, status, libraryEpisodes, broadcast)
   if (prelim.nextChase && !prelim.nextChase.airsAt) {
-    broadcast = await ensureBroadcast(series)
+    broadcast = await ensureBroadcast(series, {
+      budgetMs: opts.budgetMs,
+    })
   }
 
   const { airedCount, expectedForPipeline, nextChase } = chaseFromStatus(
