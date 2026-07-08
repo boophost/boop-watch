@@ -30,6 +30,18 @@ export interface SeriesRow {
   studios: string | null // JSON array of names
   genres: string | null // JSON array of names
   metadata_updated_at: string | null
+  // Multi-season placement. A single Jellyfin/TVDB show is often several MAL
+  // cours (Mushoku Tensei S1c1/S1c2/S2/…), each a separate mal_id row. tvdb_id
+  // groups the cours as one show; tvdb_season is the Jellyfin season number the
+  // cour's episodes belong to; episode_offset is added to each release's
+  // (per-cour) episode number to land it at the right absolute slot in that
+  // season (e.g. S1 cour 2 → offset 11). Populated from the season-map dataset
+  // unless mapping_source='manual' (an admin override the auto-enrich won't
+  // clobber). See server/seasonMap.ts.
+  tvdb_id: number | null
+  tvdb_season: number | null
+  episode_offset: number | null
+  mapping_source: string | null // 'auto' | 'manual' | null
 }
 
 // Columns added after the original 5-field schema. Applied as additive ALTERs so
@@ -48,6 +60,10 @@ const SERIES_EXTRA_COLUMNS: [string, string][] = [
   ['studios', 'TEXT'],
   ['genres', 'TEXT'],
   ['metadata_updated_at', 'TEXT'],
+  ['tvdb_id', 'INTEGER'],
+  ['tvdb_season', 'INTEGER'],
+  ['episode_offset', 'INTEGER'],
+  ['mapping_source', 'TEXT'],
 ]
 
 export interface SeriesMetadata {
@@ -201,6 +217,35 @@ export function upsertSeriesMetadata(
     mal_id: base.mal_id,
   })
   return findByMalId(base.mal_id)!
+}
+
+/**
+ * Set (or clear) the multi-season placement mapping on a catalog row. `source`
+ * distinguishes an admin override ('manual') from a dataset-derived value
+ * ('auto'); callers doing an auto-enrich must not overwrite a 'manual' row (see
+ * seasonMap.enrichSeasonMapping). Pass null fields to clear.
+ */
+export function setSeasonMapping(
+  mal_id: number,
+  m: { tvdb_id?: number | null; tvdb_season?: number | null; episode_offset?: number | null; source?: string | null },
+): SeriesRow | undefined {
+  getDb()
+    .prepare(
+      `UPDATE series SET
+         tvdb_id = @tvdb_id,
+         tvdb_season = @tvdb_season,
+         episode_offset = @episode_offset,
+         mapping_source = @mapping_source
+       WHERE mal_id = @mal_id`,
+    )
+    .run({
+      mal_id,
+      tvdb_id: m.tvdb_id ?? null,
+      tvdb_season: m.tvdb_season ?? null,
+      episode_offset: m.episode_offset ?? null,
+      mapping_source: m.source ?? null,
+    })
+  return findByMalId(mal_id)
 }
 
 export function getSavedAnimes(username: string): { item_id: string; added_at: string }[] {

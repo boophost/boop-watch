@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
 import { listSeries, upsertSeriesMetadata } from './db.js'
+import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
@@ -3160,6 +3161,24 @@ const metadataEnrich: NodeImpl = {
             meta,
           )
         }
+        // Resolve the multi-season placement (TVDB season + episode offset) so a
+        // cour lands under the right Jellyfin `Season NN` at the right episode
+        // numbers. Best-effort: a lookup failure just leaves the item unmapped
+        // (import falls back to season 1 / no offset, the old behaviour). Writes
+        // to the catalog row only when persisting metadata, and never over a
+        // manual override.
+        let season: Awaited<ReturnType<typeof enrichSeasonMapping>> = null
+        try {
+          season = await enrichSeasonMapping(mal, { write: writeDb && !ctx.dryRun })
+        } catch (e) {
+          ctx.notes.push(`season-map lookup failed for mal ${mal}: ${e instanceof Error ? e.message : String(e)}`)
+        }
+        if (season) {
+          ctx.notes.push(
+            `mal ${mal} → tvdb ${season.tvdbId ?? '?'} S${season.tvdbSeason ?? '?'} +${season.episodeOffset}` +
+              (season.reason ? ` (${season.reason})` : ''),
+          )
+        }
         enriched.push({
           ...item,
           title_english: meta.title_english,
@@ -3172,6 +3191,11 @@ const metadataEnrich: NodeImpl = {
           // number — expose it as mal_season so it never lands in the numeric
           // {season} slot of the library path template.
           mal_season: meta.season,
+          // Multi-season placement (null when unmapped) — consumed by
+          // sink.library-import for {season} and the episode offset.
+          ...(season?.tvdbId != null ? { tvdb_id: season.tvdbId } : {}),
+          ...(season?.tvdbSeason != null ? { tvdb_season: season.tvdbSeason } : {}),
+          ...(season ? { episode_offset: season.episodeOffset } : {}),
           // Feed the import path template; only set when known so it doesn't
           // clobber an existing production_year.
           ...(meta.year != null ? { production_year: meta.year, year: meta.year } : {}),
@@ -3468,12 +3492,23 @@ const libraryImport: NodeImpl = {
         continue
       }
       const ext = path.extname(src)
+      // Multi-season placement: tvdb_season (set by enrich.metadata from the
+      // season-map dataset) is the Jellyfin season number this cour belongs to,
+      // and episode_offset shifts a cour's per-cour episode numbers to their
+      // absolute slot within that season (S1 cour 2 → +11). Both fall back to
+      // the old behaviour (season 1 / no offset) when unmapped.
+      const season = item.tvdb_season ?? item.season ?? item.parent_index_number ?? defaultSeason
+      const baseEp = item.torrent_episode ?? item.index_number
+      const offset = Number(item.episode_offset ?? 0)
+      const epNum = Number(baseEp)
+      const episode =
+        Number.isFinite(epNum) && Number.isFinite(offset) ? epNum + offset : (baseEp ?? '')
       // Expose derived template fields without mutating the item.
       const ctxItem: FlowItem = {
         ...item,
         show,
-        season: item.season ?? item.parent_index_number ?? defaultSeason,
-        torrent_episode: item.torrent_episode ?? item.index_number ?? '',
+        season,
+        torrent_episode: episode,
       }
       const rel = sanitizeSegments(fillPathTemplate(tpl, ctxItem))
       if (!rel) {

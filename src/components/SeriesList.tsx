@@ -13,6 +13,12 @@ export interface SeriesEntry {
   url: string | null
   added_at: string
   episodes?: number | null
+  // Multi-season placement (see server/seasonMap.ts). tvdb_id groups a show's
+  // cours; tvdb_season / episode_offset place this cour in the library.
+  tvdb_id?: number | null
+  tvdb_season?: number | null
+  episode_offset?: number | null
+  mapping_source?: string | null
 }
 
 interface SeriesListProps {
