@@ -3,6 +3,7 @@ import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { Chrome } from './Chrome'
 import { Icon } from './Icon'
 import { useAuth } from '@/lib/AuthContext'
+import { useSuggest } from './SuggestModal'
 import { presenceBrowse, presenceStop } from '@/lib/presence'
 
 /** Collapse state for the side nav, remembered per browser. Lives on the shell
@@ -19,6 +20,7 @@ export function useSidebarCollapsed() {
  * Shared by the portal shell and the player page. */
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { user } = useAuth()
+  const { open: openSuggest } = useSuggest()
   return (
     <aside className="snav">
       <div className="snav-inner">
@@ -38,6 +40,11 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
           <NavLink to="/library" className="snav-link" title="Library">
             <Icon name="bookmark" size={16} /><span className="snav-label">Library</span>
           </NavLink>
+          {user && (
+            <button type="button" className="snav-link" title="Suggestions" onClick={openSuggest}>
+              <Icon name="alert" size={16} /><span className="snav-label">Suggestions</span>
+            </button>
+          )}
           {user?.isAdmin && (
             <NavLink to="/manage" className="snav-link" title="Manage">
               <Icon name="gear" size={16} /><span className="snav-label">Manage</span>
@@ -60,6 +67,7 @@ export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
 /** Bottom tab bar shown on phones (where the side nav is hidden). Shared. */
 export function MobileNav() {
   const { user } = useAuth()
+  const { open: openSuggest } = useSuggest()
   return (
     <nav className="mob-nav">
       <NavLink to="/" end className="mob-link" title="All titles">
@@ -71,6 +79,11 @@ export function MobileNav() {
       <NavLink to="/library" className="mob-link" title="Library">
         <Icon name="bookmark" size={20} /><span>Library</span>
       </NavLink>
+      {user && (
+        <button type="button" className="mob-link" title="Suggestions" onClick={openSuggest}>
+          <Icon name="alert" size={20} /><span>Suggest</span>
+        </button>
+      )}
       {user?.isAdmin && (
         <NavLink to="/manage" className="mob-link" title="Manage">
           <Icon name="gear" size={20} /><span>Manage</span>

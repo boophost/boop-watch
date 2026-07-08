@@ -100,6 +100,19 @@ export function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_history_user ON watch_history(username);
 
+    -- Free-text suggestions from logged-in portal users, reviewed in the
+    -- /manage "Suggestions" tab. user_id is the Supabase account id; email is
+    -- captured at submit time so admins can see who asked without a lookup.
+    CREATE TABLE IF NOT EXISTS suggestions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      email TEXT,
+      body TEXT NOT NULL,
+      resolved INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_suggestions_created ON suggestions(created_at);
+
     -- MAL episode titles, cached so the portal can show real episode names
     -- without hitting Jikan on every sync. Keyed by (mal_id, episode number).
     CREATE TABLE IF NOT EXISTS series_episodes (
@@ -186,6 +199,38 @@ export function saveAnime(username: string, item_id: string) {
 
 export function unsaveAnime(username: string, item_id: string) {
   getDb().prepare('DELETE FROM saved_animes WHERE username = ? AND item_id = ?').run(username, item_id)
+}
+
+export interface SuggestionRow {
+  id: number
+  user_id: string
+  email: string | null
+  body: string
+  resolved: number
+  created_at: string
+}
+
+export function addSuggestion(user_id: string, email: string | null, body: string): SuggestionRow {
+  const info = getDb()
+    .prepare('INSERT INTO suggestions (user_id, email, body) VALUES (?, ?, ?)')
+    .run(user_id, email, body)
+  return getDb().prepare('SELECT * FROM suggestions WHERE id = ?').get(Number(info.lastInsertRowid)) as SuggestionRow
+}
+
+/** All suggestions, open ones first, newest within each group. */
+export function listSuggestions(): SuggestionRow[] {
+  return getDb()
+    .prepare('SELECT * FROM suggestions ORDER BY resolved ASC, created_at DESC')
+    .all() as SuggestionRow[]
+}
+
+export function setSuggestionResolved(id: number, resolved: boolean): SuggestionRow | undefined {
+  getDb().prepare('UPDATE suggestions SET resolved = ? WHERE id = ?').run(resolved ? 1 : 0, id)
+  return getDb().prepare('SELECT * FROM suggestions WHERE id = ?').get(id) as SuggestionRow | undefined
+}
+
+export function deleteSuggestion(id: number): boolean {
+  return getDb().prepare('DELETE FROM suggestions WHERE id = ?').run(id).changes > 0
 }
 
 export function listSeries(): SeriesRow[] {
