@@ -247,6 +247,16 @@ export function getEpisodeTitles(mal_id: number): Map<number, string> {
   return new Map(rows.filter((r) => r.title).map((r) => [r.number, r.title as string]))
 }
 
+/** All cached episode rows for a series, ordered by number (the fallback the
+ * episodes API serves when Jikan is unreachable). */
+export function getCachedEpisodes(mal_id: number): EpisodeRow[] {
+  return getDb()
+    .prepare(
+      'SELECT number, title, title_japanese, aired FROM series_episodes WHERE mal_id = ? ORDER BY number',
+    )
+    .all(mal_id) as EpisodeRow[]
+}
+
 export interface BannerRow {
   id: number
   mal_id: number
