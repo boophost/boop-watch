@@ -519,6 +519,11 @@ publicRouter.get('/img/:id', async (req, res) => {
     return
   }
   const pItem = getPortalItem(id)
+  // An admin-selected poster for this title's own cour wins, as with the hero.
+  if (pItem?.mal_id != null) {
+    const sel = getSelectedBanner(pItem.mal_id, 'poster')
+    if (sel && serveBanner(res, sel)) return
+  }
   if (pItem?.image_url) {
     res.redirect(302, pItem.image_url)
     return
@@ -526,9 +531,10 @@ publicRouter.get('/img/:id', async (req, res) => {
   await proxy(req, res, jfUrl(`/Items/${id}/Images/Primary`, { maxWidth: '400', quality: '90' }))
 })
 
-// Season poster (the picker cards) — the JF season item's own art, falling
-// back to the series poster so a card never renders empty. Guarded by the
-// series id, so only seasons of Public titles are reachable.
+// Season poster (the picker cards) — that cour's admin-selected poster, else the
+// JF season item's own art, falling back to the series poster so a card never
+// renders empty. Guarded by the series id, so only seasons of Public titles are
+// reachable.
 publicRouter.get('/img/:id/season/:season', async (req, res) => {
   if (!ensureConfigured(res)) return
   await ensureScope().catch(() => {})
@@ -538,9 +544,17 @@ publicRouter.get('/img/:id/season/:season', async (req, res) => {
     return
   }
   const n = Number(req.params.season)
-  const match = Number.isFinite(n)
-    ? (await getSeriesSeasons(id)).find((s) => s.IndexNumber === n)
-    : undefined
+  if (!Number.isFinite(n)) {
+    res.redirect(302, `/img/${id}`)
+    return
+  }
+  const pItem = getPortalItem(id)
+  const cour = pItem ? catalogCourForSeries(pItem, n) : undefined
+  if (cour) {
+    const sel = getSelectedBanner(cour.mal_id, 'poster')
+    if (sel && serveBanner(res, sel)) return
+  }
+  const match = (await getSeriesSeasons(id)).find((s) => s.IndexNumber === n)
   // No season item *or* that season has no poster of its own — Jellyfin 404s
   // the image rather than substituting one, so fall back here.
   if (!match?.ImageTags?.Primary) {
@@ -593,7 +607,12 @@ publicRouter.get('/img/:id/backdrop', async (req, res) => {
 publicRouter.get('/api/banner/:bannerId/image', (req, res) => {
   const bid = Number(req.params.bannerId)
   const b = Number.isFinite(bid) ? getBanner(bid) : undefined
-  if (!b || !serveBanner(res, b)) res.status(404).end()
+  if (!b) { res.status(404).end(); return }
+  // `?thumb=1` is the picker's grid: a cour can carry dozens of provider
+  // candidates, and only the selected one is ever cached locally, so fetching
+  // each at full size to draw a 300px card would be gratuitous.
+  if (req.query.thumb && b.thumb_url && !b.local_file) { res.redirect(302, b.thumb_url); return }
+  if (!serveBanner(res, b)) res.status(404).end()
 })
 
 // HLS entry point: build the master playlist request with transcode params.
