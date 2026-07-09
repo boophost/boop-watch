@@ -512,6 +512,16 @@ publicRouter.get('/img/:id/backdrop', async (req, res) => {
     return
   }
   const pItem = getPortalItem(id)
+  // ?season= — prefer that cour's admin-selected banner; an uncatalogued
+  // season (or one with no banner picked) falls through to the series chain.
+  const seasonQ = Number(qStr(req.query.season))
+  if (pItem && Number.isFinite(seasonQ)) {
+    const cour = catalogCourForSeries(pItem, seasonQ)
+    if (cour) {
+      const sel = getSelectedBanner(cour.mal_id)
+      if (sel && serveBanner(res, sel)) return
+    }
+  }
   // The admin-selected banner candidate wins (AniList/Kitsu/upload)…
   if (pItem?.mal_id != null) {
     const sel = getSelectedBanner(pItem.mal_id)
