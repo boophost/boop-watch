@@ -13,8 +13,8 @@ import {
 } from './jikan.js'
 import * as seriesDb from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { publicRouter, BANNERS_DIR } from './publicRoutes.js'
-import { ensureSeriesBanners } from './banners.js'
+import { publicRouter } from './publicRoutes.js'
+import { ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
@@ -679,7 +679,6 @@ app.post('/api/series/:id/banners/select', requireAuth, requireAdmin, (req, res)
 })
 
 // Upload a custom banner (raw image bytes; content-type sets the extension).
-const EXT_BY_TYPE: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif' }
 app.post(
   '/api/series/:id/banners/upload',
   requireAuth, requireAdmin,
