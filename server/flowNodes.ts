@@ -3875,6 +3875,14 @@ const libraryImport: NodeImpl = {
       const epNum = Number(baseEp)
       const episode =
         Number.isFinite(epNum) && Number.isFinite(offset) ? epNum + offset : (baseEp ?? '')
+      // An unresolved episode renders `{torrent_episode:2}` as nothing, and the
+      // file lands as "… - S02E.mkv": Jellyfin can't number it, so it shows up
+      // as a nameless ghost episode (and a duplicate series). Refuse instead.
+      if (tpl.includes('{torrent_episode') && asNumber(episode) == null) {
+        ctx.notes.push(`skipped "${rawShow.slice(0, 60)}" — no episode number resolved`)
+        skipped.push({ ...item, import_status: 'unresolved-episode' })
+        continue
+      }
       // Expose derived template fields without mutating the item.
       const ctxItem: FlowItem = {
         ...item,
