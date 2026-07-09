@@ -13,8 +13,8 @@ import {
 } from './jikan.js'
 import * as seriesDb from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { publicRouter, BANNERS_DIR } from './publicRoutes.js'
-import { ensureSeriesBanners } from './banners.js'
+import { publicRouter } from './publicRoutes.js'
+import { ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
@@ -504,6 +504,45 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
   }
 })
 
+// Reconcile the import ledger against the library on disk. `unclaimed` files
+// have no recorded provenance — they predate the ledger or were placed by hand,
+// and they are what a cleanup must quarantine rather than guess about.
+// `missing` rows point at a file that is gone; `rewritten` ones at a file whose
+// inode changed under us (a trim/mux re-encode landing as a copy).
+app.get('/api/library/ledger', requireAuth, requireAdmin, (_req, res) => {
+  const root = process.env.LIBRARY_DIR ?? '/library'
+  const rows = seriesDb.listLibraryFiles()
+  const onDisk = new Set<string>()
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[]
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) walk(p)
+      else if (/\.(mkv|mp4|m4v|avi)$/i.test(e.name)) onDisk.add(path.relative(root, p))
+    }
+  }
+  walk(root)
+
+  const claimed = new Set(rows.map((r) => r.path))
+  const missing: string[] = []
+  const rewritten: string[] = []
+  for (const r of rows) {
+    if (!onDisk.has(r.path)) { missing.push(r.path); continue }
+    try {
+      if (r.inode != null && fs.statSync(path.join(root, r.path)).ino !== r.inode) rewritten.push(r.path)
+    } catch { /* raced with a delete */ }
+  }
+  const unclaimed = [...onDisk].filter((p) => !claimed.has(p)).sort()
+  res.json({
+    root,
+    counts: { onDisk: onDisk.size, recorded: rows.length, unclaimed: unclaimed.length, missing: missing.length, rewritten: rewritten.length },
+    unclaimed,
+    missing,
+    rewritten,
+  })
+})
+
 // Per-episode media facts for the files actually in the library (codec, audio
 // tracks, resolution, size) — what the mux/import produced, not the torrents.
 app.get('/api/series/:id/library', requireAuth, async (req, res) => {
@@ -679,7 +718,6 @@ app.post('/api/series/:id/banners/select', requireAuth, requireAdmin, (req, res)
 })
 
 // Upload a custom banner (raw image bytes; content-type sets the extension).
-const EXT_BY_TYPE: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif' }
 app.post(
   '/api/series/:id/banners/upload',
   requireAuth, requireAdmin,

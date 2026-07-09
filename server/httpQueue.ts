@@ -66,7 +66,9 @@ const DEFAULTS: Record<ServiceKey, QueueConfig> = {
 }
 
 function loadConfig(key: ServiceKey): QueueConfig {
-  const base = DEFAULTS[key]
+  // An unrecognised key would otherwise yield an undefined config, and every
+  // fetch through it dies on a TypeError the caller sees only as a rejection.
+  const base = DEFAULTS[key] ?? DEFAULTS.other
   const raw = process.env[`HTTPQ_${key.toUpperCase()}`]
   if (!raw) return base
   try {

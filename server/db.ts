@@ -168,6 +168,28 @@ export function getDb(): Database.Database {
     -- Dedupe remote candidates by URL; uploads (url NULL) stay distinct since
     -- SQLite treats NULLs as unequal in a UNIQUE index.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_banners_url ON series_banners(mal_id, url);
+
+    -- What sink.library-import placed, and where it came from. Keyed on the
+    -- library-relative path because that is what survives: a file rewritten in
+    -- place (trim-audio writes to the PVC, so the import copies across
+    -- filesystems) gets a fresh inode and loses its hardlink back to the
+    -- torrent. Without this row, a file's season/episode can only be guessed
+    -- back from its content.
+    CREATE TABLE IF NOT EXISTS library_files (
+      path TEXT PRIMARY KEY,
+      mal_id INTEGER,
+      tvdb_id INTEGER,
+      tvdb_season INTEGER,
+      episode INTEGER,
+      torrent_hash TEXT,
+      source_path TEXT,
+      inode INTEGER,
+      size INTEGER,
+      method TEXT,
+      imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_library_files_ep ON library_files(mal_id, tvdb_season, episode);
+    CREATE INDEX IF NOT EXISTS idx_library_files_hash ON library_files(torrent_hash);
   `)
 
   // Additive migration for the richer metadata columns.
@@ -456,6 +478,53 @@ export function addBanner(b: {
       height: b.height ?? null,
     })
   return getBanner(Number(info.lastInsertRowid))!
+}
+
+export interface LibraryFileRow {
+  path: string
+  mal_id: number | null
+  tvdb_id: number | null
+  tvdb_season: number | null
+  episode: number | null
+  torrent_hash: string | null
+  source_path: string | null
+  inode: number | null
+  size: number | null
+  method: string | null
+  imported_at: string
+}
+
+/** Record (or re-record) what a library path holds. Re-importing the same path
+ * overwrites the row, so the ledger always describes the file that is there. */
+export function recordLibraryFile(row: Omit<LibraryFileRow, 'imported_at'>): void {
+  getDb()
+    .prepare(
+      `INSERT INTO library_files (path, mal_id, tvdb_id, tvdb_season, episode, torrent_hash, source_path, inode, size, method, imported_at)
+       VALUES (@path, @mal_id, @tvdb_id, @tvdb_season, @episode, @torrent_hash, @source_path, @inode, @size, @method, datetime('now'))
+       ON CONFLICT(path) DO UPDATE SET
+         mal_id=excluded.mal_id, tvdb_id=excluded.tvdb_id, tvdb_season=excluded.tvdb_season,
+         episode=excluded.episode, torrent_hash=excluded.torrent_hash, source_path=excluded.source_path,
+         inode=excluded.inode, size=excluded.size, method=excluded.method, imported_at=datetime('now')`,
+    )
+    .run(row)
+}
+
+/** Drop a ledger row (the file was removed or superseded under another name). */
+export function forgetLibraryFile(p: string): void {
+  getDb().prepare('DELETE FROM library_files WHERE path = ?').run(p)
+}
+
+export function getLibraryFile(p: string): LibraryFileRow | undefined {
+  return getDb().prepare('SELECT * FROM library_files WHERE path = ?').get(p) as LibraryFileRow | undefined
+}
+
+export function listLibraryFiles(): LibraryFileRow[] {
+  return getDb().prepare('SELECT * FROM library_files ORDER BY path').all() as LibraryFileRow[]
+}
+
+/** Record the on-disk copy of a candidate's art (see banners.ts `cacheBannerFile`). */
+export function setBannerLocalFile(bannerId: number, local_file: string): void {
+  getDb().prepare('UPDATE series_banners SET local_file = ? WHERE id = ?').run(local_file, bannerId)
 }
 
 /** Make one candidate the selected banner for its series (clears the rest). */
