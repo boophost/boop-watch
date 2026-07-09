@@ -92,6 +92,9 @@ export interface SeriesDownloadStatus {
   // True when the qBittorrent query was skipped because every expected episode
   // is already on site — the pipeline is done, so torrent state is moot.
   qbitSkipped?: boolean
+  // Jellyfin Series id for the public portal's /series/:id page, when this
+  // catalog row is actually on the Public collection — null otherwise.
+  portalSeriesId: string | null
 }
 
 function variantTokensForSeries(series: {
@@ -105,11 +108,42 @@ function variantTokensForSeries(series: {
     .filter((t) => t.length > 0)
 }
 
+/** Portal-scoped Series match only (mal_id, then title overlap) — no live
+ * Jellyfin fallback, since a series absent from the Public collection has no
+ * public page to link to. */
+function resolvePortalSeriesId(
+  series: {
+    mal_id?: number | null
+    title: string
+    title_english?: string | null
+    title_japanese?: string | null
+  },
+  portalItems: ReturnType<typeof getAllPortalItems>,
+): string | null {
+  const variantTokens = variantTokensForSeries(series)
+  const seriesItems = portalItems.filter((it) => it.type === 'Series')
+  if (series.mal_id != null) {
+    const byMal = seriesItems.find((it) => it.mal_id === series.mal_id)
+    if (byMal) return byMal.id
+  }
+  let best = 0
+  let bestId: string | null = null
+  for (const it of seriesItems) {
+    const s = bestOverlap(it.name, variantTokens)
+    if (s > best && s >= 0.5) {
+      best = s
+      bestId = it.id
+    }
+  }
+  return bestId
+}
+
 /** Match site episodes + torrents for one series against shared portal/qBit snapshots.
  * When `tvdb_season` is set (a cour in a multi-season franchise), only that JF
  * season's episodes count as on-site — IndexNumber alone collides across seasons. */
 export function matchSeriesDownloads(
   series: {
+    mal_id?: number | null
     title: string
     title_english?: string | null
     title_japanese?: string | null
@@ -129,9 +163,16 @@ export function matchSeriesDownloads(
       siteEpisodes[String(it.index_number)] = it.id
     }
   }
+  const portalSeriesId = resolvePortalSeriesId(series, portalItems)
 
   if (!qbit.configured || rawTorrents == null) {
-    return { qbitConfigured: qbit.configured, qbitError: qbit.error, torrents: [], siteEpisodes }
+    return {
+      qbitConfigured: qbit.configured,
+      qbitError: qbit.error,
+      torrents: [],
+      siteEpisodes,
+      portalSeriesId,
+    }
   }
 
   const torrents: SeriesDownload[] = rawTorrents
@@ -158,7 +199,7 @@ export function matchSeriesDownloads(
     }))
     .sort((a, b) => b.progress - a.progress)
 
-  return { qbitConfigured: true, qbitError: qbit.error, torrents, siteEpisodes }
+  return { qbitConfigured: true, qbitError: qbit.error, torrents, siteEpisodes, portalSeriesId }
 }
 
 export async function getSeriesDownloadStatus(
@@ -174,7 +215,13 @@ export async function getSeriesDownloadStatus(
   const series = getSeriesById(seriesId)
   const portalItems = getAllPortalItems()
   if (!series) {
-    return { qbitConfigured: qbitConfigured(), qbitError: null, torrents: [], siteEpisodes: {} }
+    return {
+      qbitConfigured: qbitConfigured(),
+      qbitError: null,
+      torrents: [],
+      siteEpisodes: {},
+      portalSeriesId: null,
+    }
   }
 
   if (!qbitConfigured()) {
@@ -277,27 +324,12 @@ async function resolveJfSeriesId(series: {
   title_english?: string | null
   title_japanese?: string | null
 }): Promise<string | null> {
-  const variantTokens = [series.title, series.title_english, series.title_japanese]
-    .filter((t): t is string => !!t)
-    .map(tokens)
-    .filter((t) => t.length > 0)
-  const seriesItems = getAllPortalItems().filter((it) => it.type === 'Series')
-  let jfSeriesId =
-    seriesItems.find((it) => it.mal_id != null && it.mal_id === series.mal_id)?.id ?? null
-  if (!jfSeriesId) {
-    let best = 0
-    for (const it of seriesItems) {
-      const s = bestOverlap(it.name, variantTokens)
-      if (s > best && s >= 0.5) {
-        best = s
-        jfSeriesId = it.id
-      }
-    }
-  }
+  const jfSeriesId = resolvePortalSeriesId(series, getAllPortalItems())
   if (jfSeriesId) return jfSeriesId
 
   // Not on the public portal — search the full Jellyfin library by distinctive
   // title tokens (same idea as sink.jellyfin-collection's findJfItemByName).
+  const variantTokens = variantTokensForSeries(series)
   const wanted = variantTokens.flat()
   const searchTerm = [...wanted].sort((a, b) => b.length - a.length)[0]
   if (!searchTerm) return null
