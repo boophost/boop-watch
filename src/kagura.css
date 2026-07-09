@@ -49,7 +49,9 @@
      so it stays pinned to the viewport while the page scrolls; data-collapsed
      on the shell shrinks it to an icon rail. */
   &.shell { display: flex; min-height: 100vh; }
-  & .shell-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  /* inline-size container so the hero can break out of main's centered
+     max-width to the full content-pane width (100cqw) on wide screens. */
+  & .shell-main { flex: 1; min-width: 0; display: flex; flex-direction: column; container-type: inline-size; }
   & .snav { flex: none; width: 232px; border-right: 1px solid var(--border); transition: width .18s ease; }
   &.shell[data-collapsed="true"] .snav { width: 64px; }
   & .snav-inner { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
@@ -501,7 +503,13 @@
   & .panel { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; }
 
   /* Series hero */
+  /* Full-bleed: span the whole content pane (100cqw via .shell-main), not just
+     main's centered 1240px column — the banner reaches both edges on wide
+     screens. Falls back to the old padding-cancel margins without cq support. */
   & .hero { position: relative; height: 300px; margin: -36px -32px 0; overflow: hidden; }
+  @supports (width: 1cqw) {
+    & .hero { margin: -36px calc((100% - 100cqw) / 2) 0; }
+  }
   /* Banner = two stacked paints of the same image (--backdrop-img): a blurred
      cover fill behind, and the sharp banner at full width on top — so wide art
      is never cropped at the sides, and anything it doesn't reach (short
@@ -553,6 +561,9 @@
   @media (max-width: 760px) {
     & main { padding: 28px 18px 100px; }
     & .hero { margin: -28px -18px 0; height: 220px; }
+    @supports (width: 1cqw) {
+      & .hero { margin: -28px calc((100% - 100cqw) / 2) 0; }
+    }
     & .series-head { grid-template-columns: 130px 1fr; gap: 18px; margin-top: -110px; }
     & .series-body { grid-template-columns: 1fr; gap: 20px; }
   }
