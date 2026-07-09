@@ -32,7 +32,7 @@ import { listSeries } from './db.js'
 import { getAllPortalItems } from './portalDb.js'
 import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
 import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
-import type { FlowItem } from './flowNodes.js'
+import type { FlowItem, TriggerKind } from './flowNodes.js'
 
 const DAY_INDEX: Record<WeekDay, number> = {
   sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
@@ -200,20 +200,20 @@ async function fireDueSchedule(): Promise<void> {
   const sched = due[0]
   if (sched.trigger_name) {
     // Name-based: roll the cadence now, then publish — fireTrigger takes the
-    // flow lock per subscribing run itself (so the tick must NOT hold it).
+    // flow lock per subscribing run itself (so the tick must NOT hold it: a
+    // live run can take minutes, and awaiting it here would freeze `ticking`
+    // for that whole time, starving the event watchers below).
     rollSchedule(sched, new Date())
-    await fireTrigger(sched.trigger_name, []).catch((e) =>
+    void fireTrigger(sched.trigger_name, []).catch((e) =>
       console.error(`scheduler: fireTrigger("${sched.trigger_name}") threw`, e),
     )
     return
   }
-  // Legacy flow-id schedule — one flow at a time; back off if a run is in progress.
+  // Legacy flow-id schedule — one flow at a time; back off if a run is in
+  // progress. Lock is acquired synchronously here (so a concurrent watcher
+  // correctly sees it busy), but the run itself must not block the tick.
   if (!acquireFlowLock()) return
-  try {
-    await fireScheduled(sched)
-  } finally {
-    releaseFlowLock()
-  }
+  void fireScheduled(sched).finally(() => releaseFlowLock())
 }
 
 // --- Event-trigger watchers ------------------------------------------------
@@ -221,6 +221,32 @@ async function fireDueSchedule(): Promise<void> {
 // trigger for genuinely-new events. Guarded by subscriber existence so nothing
 // is polled when no flow listens. The first pass per kind seeds current state
 // without firing (so a deploy doesn't fire for the whole existing library).
+//
+// Dispatch is fire-and-forget: a subscribing flow can run for minutes (mux,
+// hardlink, rate-limited torrent search, ...), and the scheduler tick must
+// stay quick (30s cadence) so the *next* tick can still detect further new
+// events instead of being frozen behind an unrelated in-flight run for its
+// whole duration. `dispatchEvent` below tracks one in-flight dispatch per
+// event kind so a still-running previous fire isn't re-detected and re-fired
+// by the next tick before its watermark has advanced.
+
+const dispatchInFlight = new Set<TriggerKind>()
+
+/** Fire an event without blocking the caller; advances the watermark (via
+ * `onDispatched`) once the fire resolves, whether that's this tick or a much
+ * later one. Skips re-firing while a previous dispatch of the same kind is
+ * still in flight — that batch's watermark hasn't advanced yet, so the same
+ * "fresh" items would otherwise be redetected and double-fired every tick. */
+function dispatchEvent(kind: TriggerKind, items: FlowItem[], onDispatched: () => void): void {
+  if (dispatchInFlight.has(kind)) return
+  dispatchInFlight.add(kind)
+  fireEvent(kind, items)
+    .then((dispatched) => {
+      if (dispatched) onDispatched()
+    })
+    .catch((e) => console.error(`scheduler: fireEvent(${kind}) threw`, e))
+    .finally(() => dispatchInFlight.delete(kind))
+}
 
 // New catalog titles (the /manage Catalog = series table) since last seen.
 // Keyed by mal_id under state kind 'catalog-item' — a fresh kind so it seeds
@@ -238,14 +264,12 @@ async function watchNewItems(): Promise<void> {
   const fresh = series.filter((s) => !triggerStateHas('catalog-item', key(s)))
   if (fresh.length === 0) return
   // Advance the watermark only once the event was actually dispatched — if a
-  // subscriber was lock-skipped this tick, leave it un-seen so we retry next
-  // tick (a flow that ran-and-errored still counts as dispatched). Otherwise a
+  // subscriber was lock-skipped, leave it un-seen so a later tick retries it
+  // (a flow that ran-and-errored still counts as dispatched). Otherwise a
   // one-off lock collision would silently drop the item forever.
-  const dispatched = await fireEvent('new-item', fresh as unknown as FlowItem[]).catch((e) => {
-    console.error('scheduler: fireEvent(new-item) threw', e)
-    return true
-  })
-  if (dispatched) triggerStateAdd('catalog-item', fresh.map(key))
+  dispatchEvent('new-item', fresh as unknown as FlowItem[], () =>
+    triggerStateAdd('catalog-item', fresh.map(key)),
+  )
 }
 
 // New public-portal titles (Series/Movie in the Jellyfin collection) since last
@@ -260,11 +284,9 @@ async function watchNewPortalItems(): Promise<void> {
   }
   const fresh = titles.filter((t) => !triggerStateHas('portal-item', t.id))
   if (fresh.length === 0) return
-  const dispatched = await fireEvent('new-portal', fresh as unknown as FlowItem[]).catch((e) => {
-    console.error('scheduler: fireEvent(new-portal) threw', e)
-    return true
-  })
-  if (dispatched) triggerStateAdd('portal-item', fresh.map((t) => t.id))
+  dispatchEvent('new-portal', fresh as unknown as FlowItem[], () =>
+    triggerStateAdd('portal-item', fresh.map((t) => t.id)),
+  )
 }
 
 // qBittorrent torrents that have finished downloading since last seen. Keyed by
@@ -279,14 +301,9 @@ async function watchQbitComplete(): Promise<void> {
   }
   const fresh = done.filter((t) => !triggerStateHas('qbit-done', t.hash))
   if (fresh.length === 0) return
-  const dispatched = await fireEvent(
-    'qbit-complete',
-    fresh.map(qbitToItem) as unknown as FlowItem[],
-  ).catch((e) => {
-    console.error('scheduler: fireEvent(qbit-complete) threw', e)
-    return true
-  })
-  if (dispatched) triggerStateAdd('qbit-done', fresh.map((t) => t.hash))
+  dispatchEvent('qbit-complete', fresh.map(qbitToItem) as unknown as FlowItem[], () =>
+    triggerStateAdd('qbit-done', fresh.map((t) => t.hash)),
+  )
 }
 
 // Library airings whose air time has passed since last seen.
@@ -301,14 +318,15 @@ async function watchReleases(): Promise<void> {
   }
   const fresh = aired.filter((a) => !triggerStateHas('release', a.key))
   if (fresh.length === 0) return
-  // One fire per newly-aired episode so downstream sees a single airing. Mark
-  // each key seen only once its fire was dispatched, so a lock-skip retries it.
+  // One fire per newly-aired episode so downstream sees a single airing. The
+  // shared 'release' in-flight guard means only the first undispatched
+  // episode fires this tick when several land at once; the rest follow on
+  // later ticks once its watermark entry lands — still one at a time, just
+  // spread across ticks instead of blocking this one.
   for (const a of fresh) {
-    const dispatched = await fireEvent('release', [a.item as unknown as FlowItem]).catch((e) => {
-      console.error('scheduler: fireEvent(release) threw', e)
-      return true
-    })
-    if (dispatched) triggerStateAdd('release', [a.key])
+    dispatchEvent('release', [a.item as unknown as FlowItem], () =>
+      triggerStateAdd('release', [a.key]),
+    )
   }
 }
 
