@@ -161,19 +161,6 @@ export default function Title() {
               </div>
             </div>
           ) : null}
-          {(data.related?.length ?? 0) > 0 ? (
-            <div className="panel" style={{ padding: 14, marginBottom: 16 }}>
-              <div className="h-eyebrow">Related</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
-                {data.related!.map((r) => (
-                  <Link key={r.id} className="chip" to={`/series/${r.id}`}>
-                    {r.name}
-                    <span style={{ opacity: 0.55, marginLeft: 6 }}>{r.relation}</span>
-                  </Link>
-                ))}
-              </div>
-            </div>
-          ) : null}
           <div className="ep-head">
             <h2 className="k-h3">Episodes</h2>
             <span className="badge badge-mono">{playableCount}</span>

@@ -89,8 +89,6 @@ export interface SeriesDetail {
   seasons?: number[]
   /** Season whose episodes are listed (defaults to latest when multi-season). */
   season?: number | null
-  /** Jikan-related titles that are also on Public. */
-  related?: Array<{ id: string; name: string; relation: string; mal_id: number }>
   // Catalog series id for the admin-only "Library settings" shortcut; null when
   // the title isn't in the catalog.
   manageId?: number | null
