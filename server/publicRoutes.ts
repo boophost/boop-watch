@@ -124,9 +124,10 @@ publicRouter.get('/api/catalog', async (_req, res) => {
 const releasedAt = (it: JfItem): string | null => it.PremiereDate || it.DateCreated || null
 const releasedTs = (it: JfItem): number => Date.parse(releasedAt(it) || '') || 0
 
-// Home page rail: every recently released watchable, newest first — each
-// episode is its own entry, movies too. Clicking an entry goes straight to
-// /watch/:id, so id is always a *playable* id.
+// Home page rail: recently released watchables, newest first — one entry per
+// *season* (a per-episode rail buries every other title whenever one show drops
+// a batch), plus one per movie. `id` is always a *playable* id (the season's
+// newest episode / the movie itself), so a card can still link into the player.
 publicRouter.get('/api/recent', async (_req, res) => {
   if (!ensureConfigured(res)) return
   try {
@@ -135,44 +136,92 @@ publicRouter.get('/api/recent', async (_req, res) => {
     res.status(502).json({ error: 'Library unavailable' })
     return
   }
-  const epLabel = (ep: JfItem) =>
-    (ep.ParentIndexNumber != null && ep.IndexNumber != null)
-      ? `S${ep.ParentIndexNumber}·E${ep.IndexNumber}`
-      : (ep.IndexNumber != null ? `E${ep.IndexNumber}` : '')
   // Same-day drops share a premiere date; break those ties by episode order
-  // so the furthest-along episode leads.
+  // so the furthest-along episode represents the season.
   const epOrd = (ep: JfItem) => (ep.ParentIndexNumber || 0) * 10000 + (ep.IndexNumber || 0)
 
+  // Newest episode per (series, season), and how many episodes that season has.
+  const newest = new Map<string, JfItem>()
+  const counts = new Map<string, number>()
+  for (const ep of getScopeEpisodes()) {
+    if (!ep.SeriesId) continue
+    const key = `${ep.SeriesId}:${ep.ParentIndexNumber ?? ''}`
+    counts.set(key, (counts.get(key) || 0) + 1)
+    const prev = newest.get(key)
+    if (!prev || releasedTs(ep) > releasedTs(prev) ||
+        (releasedTs(ep) === releasedTs(prev) && epOrd(ep) > epOrd(prev))) {
+      newest.set(key, ep)
+    }
+  }
+
   const entries = [
-    ...getScopeEpisodes().map((ep) => ({
+    ...[...newest].map(([key, ep]) => ({
       t: releasedTs(ep),
-      o: epOrd(ep),
       item: {
         id: ep.Id,
         seriesId: ep.SeriesId || null,
-        type: 'episode' as const,
+        type: 'season' as const,
         name: ep.SeriesName || ep.Name || '',
-        epLabel: epLabel(ep),
-        epName: ep.Name || '',
+        season: ep.ParentIndexNumber ?? null,
+        epLabel: ep.IndexNumber != null ? `E${ep.IndexNumber}` : '',
+        epCount: counts.get(key) || 0,
         addedAt: releasedAt(ep),
       },
     })),
     ...getCollectionItems().filter((it) => it.Type !== 'Series').map((it) => ({
       t: releasedTs(it),
-      o: 0,
       item: {
         id: it.Id,
         seriesId: null,
         type: 'movie' as const,
         name: it.Name || '',
+        season: null,
         epLabel: '',
-        epName: '',
+        epCount: 0,
         addedAt: releasedAt(it),
       },
     })),
   ]
-  entries.sort((a, b) => (b.t - a.t) || (b.o - a.o))
+  entries.sort((a, b) => b.t - a.t)
   res.json({ items: entries.slice(0, 24).map((e) => e.item) })
+})
+
+// Bulk metadata for playable ids, served straight from the in-memory scope
+// cache (no Jellyfin round-trip). The "recently watched" rail resolves a page
+// of history in one call instead of one /api/watch per row. Ids outside the
+// Public collection are simply omitted — same guard as everywhere else.
+publicRouter.get('/api/items/summary', async (req, res) => {
+  if (!ensureConfigured(res)) return
+  try {
+    await ensureScope()
+  } catch {
+    res.status(502).json({ error: 'Library unavailable' })
+    return
+  }
+  const ids = new Set(qStr(req.query.ids).split(',').map((s) => s.trim()).filter(Boolean).slice(0, 60))
+  if (!ids.size) { res.json({ items: [] }); return }
+
+  const items = [
+    ...getScopeEpisodes().filter((ep) => ids.has(ep.Id)).map((ep) => ({
+      id: ep.Id,
+      type: 'episode' as const,
+      seriesId: ep.SeriesId || null,
+      name: ep.SeriesName || ep.Name || '',
+      season: ep.ParentIndexNumber ?? null,
+      epLabel: ep.IndexNumber != null ? `E${ep.IndexNumber}` : '',
+      epName: ep.Name || '',
+    })),
+    ...getCollectionItems().filter((it) => it.Type !== 'Series' && ids.has(it.Id)).map((it) => ({
+      id: it.Id,
+      type: 'movie' as const,
+      seriesId: null,
+      name: it.Name || '',
+      season: null,
+      epLabel: '',
+      epName: '',
+    })),
+  ]
+  res.json({ items })
 })
 
 // Home page spotlight: the five most recently updated titles, with enough
@@ -491,7 +540,9 @@ publicRouter.get('/img/:id/season/:season', async (req, res) => {
   const match = Number.isFinite(n)
     ? (await getSeriesSeasons(id)).find((s) => s.IndexNumber === n)
     : undefined
-  if (!match) {
+  // No season item *or* that season has no poster of its own — Jellyfin 404s
+  // the image rather than substituting one, so fall back here.
+  if (!match?.ImageTags?.Primary) {
     res.redirect(302, `/img/${id}`)
     return
   }

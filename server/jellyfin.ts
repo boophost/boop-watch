@@ -78,7 +78,7 @@ export async function jfItem(id: string, fields = ''): Promise<JfItem> {
 // and its own poster (season item id). Cached like the scope; a failed refresh
 // serves the stale list rather than erroring the caller.
 // ---------------------------------------------------------------------------
-export interface JfSeason { Id: string; Name?: string; IndexNumber?: number }
+export interface JfSeason { Id: string; Name?: string; IndexNumber?: number; ImageTags?: { Primary?: string } }
 const seasonCache = new Map<string, { at: number; items: JfSeason[] }>()
 
 export async function getSeriesSeasons(seriesId: string): Promise<JfSeason[]> {
