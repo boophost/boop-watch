@@ -48,6 +48,8 @@ interface DownloadStatus {
   qbitError: string | null
   torrents: SeriesDownload[]
   siteEpisodes: Record<string, string>
+  /** qBit wasn't queried: every expected episode is already on site. */
+  qbitSkipped?: boolean
   blacklist: BlacklistRow[]
   airedCount?: number
   expectedForPipeline?: number | null
@@ -968,7 +970,11 @@ export default function SeriesDetail() {
               qBittorrent: {dl.qbitError}
             </p>
           ) : dl.torrents.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No active torrents.</p>
+            <p className="text-sm text-muted-foreground">
+              {dl.qbitSkipped
+                ? 'All expected episodes are on site — qBittorrent not queried.'
+                : 'No active torrents.'}
+            </p>
           ) : (
             <ul className="space-y-3">
               {dl.torrents.map((t) => {
