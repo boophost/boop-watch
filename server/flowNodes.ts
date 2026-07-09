@@ -8,13 +8,13 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
-import { listSeries, upsertSeriesMetadata } from './db.js'
+import { listSeries, upsertSeriesMetadata, recordLibraryFile, forgetLibraryFile } from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
-import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
+import { qbitList, qbitToItem, qbitConfigured, parseTorrentTags } from './qbit.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
@@ -859,6 +859,7 @@ interface QbitInfo {
   state: string
   progress: number
   category: string
+  tags?: string
   size: number
   save_path?: string
   content_path?: string
@@ -911,11 +912,14 @@ const qbittorrentSource: NodeImpl = {
         torrent_state: t.state,
         torrent_progress: t.progress,
         torrent_category: t.category,
+        torrent_tags: t.tags ?? '',
         torrent_size: t.size ?? null,
         save_path: remapPath(String(t.save_path ?? ''), from, to),
         content_path: contentPath,
-        torrent_episode: parseEpisode(t.name),
+        // `ep:` from the tag is what we asked for; the name is only a guess.
+        torrent_episode: parseTorrentTags(t.tags).tag_episode ?? parseEpisode(t.name),
         torrent_is_batch: titleIsBatch(t.name),
+        ...parseTorrentTags(t.tags),
       }
     })
     ctx.notes.push(`${items.length} torrent(s)${completedOnly ? ' (completed)' : ''}${category ? ` in "${category}"` : ''}`)
@@ -2049,10 +2053,21 @@ const indexerMatch: NodeImpl = {
       return best.score >= threshold ? best.row : undefined
     }
 
+    // We stamped `mal:<id>` on the torrent when we queued it, so its cour is
+    // known, not inferred. Trust that over token-matching a release name —
+    // "…4th Season - 05" otherwise falls through to the season-1 row.
+    const matchTag = (item: FlowItem): (typeof catalog)[number] | undefined => {
+      const mal = asNumber(item.tag_mal_id)
+      return mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
+    }
+
     const matched: FlowItem[] = []
     const unmatched: FlowItem[] = []
+    let fromTag = 0
     for (const item of allInputs(inputs)) {
-      const hit = mode === 'tokens' ? matchTokens(item) : matchExact(item)
+      const tagged = matchTag(item)
+      if (tagged) fromTag++
+      const hit = tagged ?? (mode === 'tokens' ? matchTokens(item) : matchExact(item))
       const copied = hit ? (hit as unknown as FlowItem)[fromField] : null
       if (hit && copied != null && copied !== '') {
         matched.push({ ...item, [setField]: copied })
@@ -2060,7 +2075,10 @@ const indexerMatch: NodeImpl = {
         unmatched.push(item)
       }
     }
-    ctx.notes.push(`${matched.length}/${matched.length + unmatched.length} matched an indexer title`)
+    ctx.notes.push(
+      `${matched.length}/${matched.length + unmatched.length} matched an indexer title` +
+        (fromTag ? ` (${fromTag} from torrent tags)` : ''),
+    )
     return { matched, unmatched }
   },
 }
@@ -3440,6 +3458,13 @@ const qbittorrentSink: NodeImpl = {
       { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
       { key: 'urlField', label: 'Magnet field', kind: 'text', default: 'torrent_magnet' },
       { key: 'category', label: 'Category', kind: 'text', default: 'anime' },
+      {
+        key: 'tags',
+        label: 'Tags',
+        kind: 'text',
+        default: 'mal:{mal_id},season:{tvdb_season},ep:{torrent_episode}',
+        help: 'Per-torrent qBittorrent tags, {field} filled from the item. Stamps the identity we already decided, so the import reads it back instead of re-guessing the cour from the release name. Tags whose value is empty are dropped. Empty = no tags.',
+      },
       { key: 'savepath', label: 'Save path', kind: 'text', default: '', help: 'Empty = qBittorrent default.' },
       {
         key: 'paused',
@@ -3485,14 +3510,42 @@ const qbittorrentSink: NodeImpl = {
     })
     if (!add.ok) throw new Error(`qBittorrent add failed (${add.status})`)
 
+    // `torrents/add` takes one tag set for the whole batch, but each magnet has
+    // its own identity — so tag per hash, alongside the rename.
+    const tagTpl = str(config, 'tags', 'mal:{mal_id},season:{tvdb_season},ep:{torrent_episode}')
+    /** Drop `key:` pairs whose value didn't resolve — a batch has no single
+     * episode, and a half-filled tag is worse than none. */
+    const tagsFor = (it: FlowItem): string =>
+      fillTemplate(tagTpl, it, 'none')
+        .split(',')
+        .map((t) => t.trim())
+        .filter((t) => /^[^:]+:.+$/.test(t))
+        .join(',')
+
     // Give each torrent the readable name we already have from search, keyed by
     // its info-hash. This makes paused magnets (which can't fetch their own
     // metadata) reviewable instead of showing as a bare hash. Best-effort.
     let renamed = 0
+    let tagged = 0
     for (const it of withMagnet) {
       const hash = String(it.torrent_hash ?? '').toLowerCase()
       const name = String(it.torrent_name ?? '')
-      if (!hash || !name) continue
+      if (!hash) continue
+      const tags = tagTpl ? tagsFor(it) : ''
+      if (tags) {
+        try {
+          const r = await fetch(`${base}/api/v2/torrents/addTags`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+            body: new URLSearchParams({ hashes: hash, tags }),
+            signal: AbortSignal.timeout(10_000),
+          })
+          if (r.ok) tagged++
+        } catch {
+          /* tagging is best-effort; the import still falls back to matching */
+        }
+      }
+      if (!name) continue
       try {
         const r = await fetch(`${base}/api/v2/torrents/rename`, {
           method: 'POST',
@@ -3507,7 +3560,8 @@ const qbittorrentSink: NodeImpl = {
     }
     ctx.notes.push(
       `sent ${withMagnet.length} magnet(s) to qBittorrent${paused ? ' (paused)' : ''}` +
-        (renamed ? `, named ${renamed}` : ''),
+        (renamed ? `, named ${renamed}` : '') +
+        (tagged ? `, tagged ${tagged}` : ''),
     )
     return { sent: withMagnet }
   },
@@ -3808,7 +3862,7 @@ const libraryImport: NodeImpl = {
       // and episode_offset shifts a cour's per-cour episode numbers to their
       // absolute slot within that season (S1 cour 2 → +11). Both fall back to
       // the old behaviour (season 1 / no offset) when unmapped.
-      const knownSeason = item.tvdb_season ?? item.season ?? item.parent_index_number
+      const knownSeason = item.tvdb_season ?? item.tag_season ?? item.season ?? item.parent_index_number
       if (knownSeason == null && isMultiCourFranchise(item.mal_id)) {
         ctx.notes.push(`skipped "${rawShow.slice(0, 60)}" — multi-season franchise with no resolved season`)
         skipped.push({ ...item, import_status: 'unresolved-season' })
@@ -3864,6 +3918,25 @@ const libraryImport: NodeImpl = {
         // from what's already there, so re-runs don't churn (or re-trigger a
         // Jellyfin scan) but a real upgrade does replace the old file.
         if (sameLibraryFile(src, existing)) {
+          // This library file *is* this torrent — free provenance for a file
+          // imported before the ledger existed. Backfill it.
+          if (!ctx.dryRun) {
+            try {
+              const st = fs.statSync(existing)
+              recordLibraryFile({
+                path: path.relative(root, existing),
+                mal_id: asNumber(item.mal_id),
+                tvdb_id: asNumber(item.tvdb_id),
+                tvdb_season: asNumber(season),
+                episode: asNumber(episode),
+                torrent_hash: item.torrent_hash != null ? String(item.torrent_hash) : null,
+                source_path: src,
+                inode: st.ino,
+                size: st.size,
+                method: 'existing',
+              })
+            } catch { /* backfill is best-effort */ }
+          }
           skipped.push({ ...item, library_path: existing, import_status: 'current' })
           continue
         }
@@ -3883,11 +3956,32 @@ const libraryImport: NodeImpl = {
         if (existing && existing !== dest) {
           try {
             fs.rmSync(existing)
+            forgetLibraryFile(path.relative(root, existing))
           } catch (e) {
             ctx.notes.push(
               `could not remove stale duplicate ${path.basename(existing)}: ${e instanceof Error ? e.message : String(e)}`,
             )
           }
+        }
+        // Write down what this file is while we still know. A trimmed/muxed
+        // source lands here as a cross-filesystem copy, so its inode no longer
+        // ties back to the torrent — the row is the only surviving provenance.
+        try {
+          const st = fs.statSync(dest)
+          recordLibraryFile({
+            path: path.relative(root, dest),
+            mal_id: asNumber(item.mal_id),
+            tvdb_id: asNumber(item.tvdb_id),
+            tvdb_season: asNumber(season),
+            episode: asNumber(episode),
+            torrent_hash: item.torrent_hash != null ? String(item.torrent_hash) : null,
+            source_path: src,
+            inode: st.ino,
+            size: st.size,
+            method: used,
+          })
+        } catch (e) {
+          ctx.notes.push(`ledger write failed for ${path.basename(dest)}: ${e instanceof Error ? e.message : String(e)}`)
         }
         if (used === 'copy' && method === 'hardlink') copied++
         const out: FlowItem = { ...item, library_path: dest, import_method: used, import_status: replacing ? 'replaced' : 'new' }
