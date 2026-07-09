@@ -503,6 +503,8 @@
   /* Series hero */
   & .hero { position: relative; height: 300px; margin: -36px -32px 0; overflow: hidden; }
   & .hero .backdrop { position: absolute; inset: 0; background-size: cover; background-position: center 25%; filter: saturate(1.25) brightness(0.9); transform: scale(1.06); }
+  /* Incoming banner layer: preloaded, then faded in over the current one. */
+  & .hero .backdrop-fade { animation: backdrop-in .45s ease forwards; }
   & .hero .scrim { position: absolute; inset: 0; background:
     repeating-linear-gradient(135deg, transparent 0 18px, oklch(1 0 0 / 2.5%) 18px 19px),
     linear-gradient(to bottom, oklch(0.145 0.008 285 / 35%) 0%, var(--bg) 96%); }
@@ -758,6 +760,7 @@ body.fs .player .pbar { display: none; }
 body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 
 @keyframes suggest-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* Next-episode chase status (Title + Watch episode rows) */
 .kagura .ep-status,
