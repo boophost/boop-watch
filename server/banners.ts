@@ -11,7 +11,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fetchAniListBanner } from './anilist.js'
-import { addBanner, getSelectedBanner, listBanners, selectBanner, setBannerLocalFile, BannerRow } from './db.js'
+import { addBanner, getSelectedBanner, listBanners, listSeries, selectBanner, setBannerLocalFile, BannerRow } from './db.js'
 import { limitedFetch } from './httpQueue.js'
 
 /** Banner files (uploads + cached remote art) live under DATA_DIR/banners. */
@@ -124,4 +124,25 @@ export async function ensureSeriesBanners(mal_id: number): Promise<BannerRow[]> 
 
   autoSelect(mal_id)
   return listBanners(mal_id)
+}
+
+/**
+ * Same, for every cour of the franchise. The portal's per-season hero
+ * (`/img/:id/backdrop?season=N`) reads the banner of *that season's* catalog
+ * cour, but a Jellyfin series matches only one cour — so gathering just that
+ * one leaves every other season's art uncached and still hotlinked.
+ */
+export async function ensureFranchiseBanners(mal_id: number): Promise<void> {
+  await ensureSeriesBanners(mal_id)
+  const rows = listSeries()
+  const seed = rows.find((s) => s.mal_id === mal_id)
+  if (seed?.tvdb_id == null) return
+  for (const sibling of rows) {
+    if (sibling.mal_id === mal_id || sibling.tvdb_id !== seed.tvdb_id) continue
+    try {
+      await ensureSeriesBanners(sibling.mal_id)
+    } catch (e) {
+      console.error(`banner gather failed for cour ${sibling.mal_id} —`, e)
+    }
+  }
 }
