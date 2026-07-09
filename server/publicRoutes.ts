@@ -56,7 +56,7 @@ function titleMatchesFranchise(portalName: string, catalog: SeriesRow): boolean 
  * never pick another show that merely shares the same `tvdb_season` number
  * (Slime ?season=2 must not resolve to Mushoku Part 2).
  */
-function catalogCourForSeries(
+export function catalogCourForSeries(
   pItem: { mal_id: number | null; name: string },
   season: number | null,
 ): SeriesRow | null {
@@ -82,8 +82,17 @@ function catalogCourForSeries(
 
   if (season != null && franchise.length > 0) {
     const cour = franchise.find((s) => s.tvdb_season === season)
-    // Season not in catalog (e.g. Slime S1–S3 while only S4 is indexed) → no cour.
-    return cour ?? null
+    if (cour) return cour
+    // No cour matches this season number. That's correct to reject for a mapped
+    // multi-cour franchise (Slime S2's page must not resolve to S4's row) — but
+    // only because those rows *have* seasons. A brand-new title whose mal_id
+    // isn't in the season-mapping datasets yet has a null tvdb_season, so it can
+    // never match any season; its row still *is* this series, and the manage
+    // link is exactly where an admin goes to set the mapping. Fall back to it
+    // when the whole franchise is unmapped (no row has a season) — that can't be
+    // a real multi-cour franchise, so the guard above still holds for those.
+    if (franchise.every((s) => s.tvdb_season == null)) return franchise[0]
+    return null
   }
 
   if (pItem.mal_id != null) return findByMalId(pItem.mal_id) ?? null
