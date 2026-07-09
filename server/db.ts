@@ -158,6 +158,7 @@ export function getDb(): Database.Database {
       mal_id INTEGER NOT NULL,
       source TEXT NOT NULL,
       url TEXT,
+      thumb_url TEXT,
       local_file TEXT,
       width INTEGER,
       height INTEGER,
@@ -209,6 +210,15 @@ export function getDb(): Database.Database {
   if (!suggestionCols.has('status')) {
     instance.exec(`ALTER TABLE suggestions ADD COLUMN status TEXT NOT NULL DEFAULT 'todo'`)
     instance.exec(`UPDATE suggestions SET status = 'done' WHERE resolved = 1`)
+  }
+
+  // Additive migration: `thumb_url` arrived with the provider-artwork sources,
+  // whose candidate lists are far too large to cache in full (see banners.ts).
+  const bannerCols = new Set(
+    (instance.prepare(`PRAGMA table_info(series_banners)`).all() as { name: string }[]).map((c) => c.name),
+  )
+  if (!bannerCols.has('thumb_url')) {
+    instance.exec(`ALTER TABLE series_banners ADD COLUMN thumb_url TEXT`)
   }
 
   db = instance
@@ -414,6 +424,8 @@ export interface BannerRow {
   mal_id: number
   source: string
   url: string | null
+  /** A small preview of `url`, when the source offers one. Never cached to disk. */
+  thumb_url: string | null
   local_file: string | null
   width: number | null
   height: number | null
@@ -453,6 +465,7 @@ export function addBanner(b: {
   mal_id: number
   source: string
   url?: string | null
+  thumb_url?: string | null
   local_file?: string | null
   width?: number | null
   height?: number | null
@@ -466,13 +479,14 @@ export function addBanner(b: {
   }
   const info = db
     .prepare(
-      `INSERT INTO series_banners (mal_id, source, url, local_file, width, height)
-       VALUES (@mal_id, @source, @url, @local_file, @width, @height)`,
+      `INSERT INTO series_banners (mal_id, source, url, thumb_url, local_file, width, height)
+       VALUES (@mal_id, @source, @url, @thumb_url, @local_file, @width, @height)`,
     )
     .run({
       mal_id: b.mal_id,
       source: b.source,
       url: b.url ?? null,
+      thumb_url: b.thumb_url ?? null,
       local_file: b.local_file ?? null,
       width: b.width ?? null,
       height: b.height ?? null,

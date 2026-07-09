@@ -166,6 +166,7 @@ interface Banner {
   width: number | null
   height: number | null
   preview: string
+  thumb: string
 }
 
 interface EpisodeAudio { lang: string; label: string; codec: string; channels: string; def: boolean }
@@ -875,7 +876,10 @@ export default function SeriesDetail() {
         <section>
           <div className="mb-4 flex flex-wrap items-center gap-3">
             <h2 className="text-lg font-semibold">Season banner</h2>
-            <span className="text-xs text-muted-foreground">Shown behind the title on the public page</span>
+            <span className="text-xs text-muted-foreground">
+              Shown behind the title on the public page
+              {banners.length > 0 ? ` · ${banners.length} options` : ''}
+            </span>
             <input
               ref={fileInputRef}
               type="file"
@@ -905,10 +909,11 @@ export default function SeriesDetail() {
             <p className="text-sm text-muted-foreground">Gathering banner options…</p>
           ) : banners.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No banners found from AniList or Kitsu for this title — upload one to set it.
+              No banners found for this title — the artwork sources are keyed on the season mapping,
+              so check this series has a tvdb id, or upload one to set it.
             </p>
           ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid max-h-[36rem] grid-cols-1 gap-3 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
               {banners.map((b) => (
                 <button
                   key={b.id}
@@ -923,7 +928,7 @@ export default function SeriesDetail() {
                   }`}
                 >
                   <img
-                    src={b.preview}
+                    src={b.thumb}
                     alt={`${b.source} banner`}
                     loading="lazy"
                     className="aspect-[16/5] w-full bg-muted object-cover"
@@ -931,6 +936,11 @@ export default function SeriesDetail() {
                   <span className="absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white">
                     {b.source}
                   </span>
+                  {b.width && b.height ? (
+                    <span className="absolute bottom-2 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                      {b.width}×{b.height}
+                    </span>
+                  ) : null}
                   {b.selected ? (
                     <span className="absolute right-2 top-2 flex items-center gap-1 rounded bg-emerald-500 px-1.5 py-0.5 text-[10px] font-medium text-white">
                       <Check className="size-3" />

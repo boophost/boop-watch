@@ -175,6 +175,8 @@ a manual process for now).
   point at the Jellyfin media library dir mounted into the pod (see below)
 - `JIMAKU_API_KEY`, `JIMAKU_URL` — external subtitle fallback (`enrich.fetch-subs`);
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
+- `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free
+  personal key); unset ⇒ that source no-ops, the other three still gather
 - `NODE_ENV=production` — serve the built `dist/`
 - `PORT` — default `3000` (the Dockerfile sets it; the dev backend defaults to `3001`)
 - `POSTHOG_KEY` — PostHog project token for portal analytics (public, exposed via `/config.js`;
