@@ -5,7 +5,7 @@ import {
   countCachedEpisodes, getEpisodeTitles, upsertEpisodes,
 } from './db.js'
 import { searchAnime, pickPosterUrl, fetchAnimeEpisodesPage, episodeNumberFromUrl } from './jikan.js'
-import { ensureSeriesBanners } from './banners.js'
+import { ensureFranchiseBanners } from './banners.js'
 
 const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
 
@@ -78,10 +78,11 @@ export async function syncJellyfinToPortal() {
     const match = matchCatalog(it, dbSeries)
     const displayName = match?.title_english || match?.title || it.Name || ''
 
-    // Gather wide season-banner candidates (AniList/Kitsu) once per series; the
-    // portal serves whichever candidate the admin has selected (see banners.ts).
+    // Gather wide season-banner candidates (AniList/Kitsu) for every cour of the
+    // franchise, not just the one this Jellyfin series matched — the per-season
+    // hero serves the banner of that season's cour (see banners.ts).
     if (match) {
-      try { await ensureSeriesBanners(match.mal_id) } catch (e) { console.error('banner gather failed', e) }
+      try { await ensureFranchiseBanners(match.mal_id) } catch (e) { console.error('banner gather failed', e) }
     }
 
     if (!imageUrl && !it.PrimaryImageAspectRatio) {
