@@ -682,11 +682,12 @@ app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res)
 })
 
 // ---- Season-banner candidates (admin picker + upload) ---------------------
-// Shape a banner row for the client: `preview` is the public image route so an
+// Shape an art row for the client: `preview` is the public image route so an
 // <img> can render it (uploads aren't public URLs).
 function bannerView(b: seriesDb.BannerRow) {
   return {
     id: b.id,
+    kind: b.kind,
     source: b.source,
     selected: b.selected === 1,
     width: b.width,
@@ -696,32 +697,37 @@ function bannerView(b: seriesDb.BannerRow) {
   }
 }
 
-// List candidates (gathering them from remote sources on first view).
+/** `?kind=poster` picks the portrait art; anything else means the wide banner. */
+const artKind = (req: express.Request): seriesDb.ArtKind =>
+  seriesDb.isArtKind(req.query.kind) ? req.query.kind : 'banner'
+
+// List candidates of one kind (gathering them from remote sources on first view).
 app.get('/api/series/:id/banners', requireAuth, async (req, res) => {
   const id = Number(req.params.id)
   const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
   if (!series) { res.status(404).json({ error: 'Series not found' }); return }
-  try { await ensureSeriesBanners(series.mal_id) } catch (e) { console.error('banner gather failed', e) }
-  res.json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
+  try { await ensureSeriesBanners(series.mal_id) } catch (e) { console.error('art gather failed', e) }
+  res.json({ banners: seriesDb.listBanners(series.mal_id, artKind(req)).map(bannerView) })
 })
 
-// Choose which candidate the portal serves.
+// Choose which candidate the portal serves. The kind comes from the row itself.
 app.post('/api/series/:id/banners/select', requireAuth, requireAdmin, async (req, res) => {
   const id = Number(req.params.id)
   const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
   if (!series) { res.status(404).json({ error: 'Series not found' }); return }
   const bannerId = Number((req.body as { bannerId?: unknown })?.bannerId)
-  if (!Number.isFinite(bannerId) || !seriesDb.selectBanner(series.mal_id, bannerId)) {
+  const row = Number.isFinite(bannerId) ? seriesDb.getBanner(bannerId) : undefined
+  if (!row || !seriesDb.selectBanner(series.mal_id, bannerId)) {
     res.status(400).json({ error: 'Unknown banner for this series' })
     return
   }
   // Only the selection is cached, so a newly-picked candidate has to be pulled
   // down now — otherwise the portal hotlinks it until the next gather.
-  try { await cacheSelectedBanner(series.mal_id) } catch (e) { console.error('banner cache failed', e) }
-  res.json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
+  try { await cacheSelectedBanner(series.mal_id, row.kind) } catch (e) { console.error('art cache failed', e) }
+  res.json({ banners: seriesDb.listBanners(series.mal_id, row.kind).map(bannerView) })
 })
 
-// Upload a custom banner (raw image bytes; content-type sets the extension).
+// Upload custom art (raw image bytes; content-type sets the extension).
 app.post(
   '/api/series/:id/banners/upload',
   requireAuth, requireAdmin,
@@ -736,12 +742,13 @@ app.post(
       res.status(400).json({ error: 'Send raw image bytes (jpeg/png/webp/avif/gif)' })
       return
     }
+    const kind = artKind(req)
     const file = `${series.mal_id}-${Date.now()}.${ext}`
     fs.mkdirSync(BANNERS_DIR, { recursive: true })
     fs.writeFileSync(path.join(BANNERS_DIR, file), body)
-    const row = seriesDb.addBanner({ mal_id: series.mal_id, source: 'upload', local_file: file })
+    const row = seriesDb.addBanner({ mal_id: series.mal_id, kind, source: 'upload', local_file: file })
     seriesDb.selectBanner(series.mal_id, row.id)
-    res.status(201).json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
+    res.status(201).json({ banners: seriesDb.listBanners(series.mal_id, kind).map(bannerView) })
   },
 )
 
@@ -756,12 +763,14 @@ app.delete('/api/series/:id/banners/:bannerId', requireAuth, requireAdmin, (req,
   if (removed.local_file) {
     try { fs.unlinkSync(path.join(BANNERS_DIR, path.basename(removed.local_file))) } catch { /* already gone */ }
   }
-  // If we just deleted the selection, promote the next candidate.
-  if (removed.selected === 1) {
-    const next = seriesDb.listBanners(series.mal_id)[0]
+  // Deleting the selected banner promotes the next candidate — the hero must not
+  // go empty. A deleted poster promotes nothing: with none selected the portal
+  // falls back to the season's own Jellyfin poster, which is the better default.
+  if (removed.selected === 1 && removed.kind === 'banner') {
+    const next = seriesDb.listBanners(series.mal_id, 'banner')[0]
     if (next) seriesDb.selectBanner(series.mal_id, next.id)
   }
-  res.json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
+  res.json({ banners: seriesDb.listBanners(series.mal_id, removed.kind).map(bannerView) })
 })
 
 app.get('/api/library/saved', requireAuth, (req, res) => {
