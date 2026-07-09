@@ -54,6 +54,9 @@ interface DownloadStatus {
   airedCount?: number
   expectedForPipeline?: number | null
   nextChase?: EpisodeChase | null
+  /** Jellyfin Series id for the public portal's /series/:id page, when this
+   * series is actually on the Public collection. */
+  portalSeriesId?: string | null
 }
 
 // The best torrent covering a given episode: a batch (covers all) or a
@@ -827,6 +830,14 @@ export default function SeriesDetail() {
                 <Button variant="outline" size="sm" asChild>
                   <a href={mal?.url ?? series.url!} target="_blank" rel="noreferrer">
                     MyAnimeList
+                    <ExternalLink className="ml-1 size-3.5 opacity-70" />
+                  </a>
+                </Button>
+              ) : null}
+              {dl?.portalSeriesId ? (
+                <Button variant="outline" size="sm" asChild>
+                  <a href={`/series/${dl.portalSeriesId}`} target="_blank" rel="noreferrer">
+                    View on site
                     <ExternalLink className="ml-1 size-3.5 opacity-70" />
                   </a>
                 </Button>
