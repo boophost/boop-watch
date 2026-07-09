@@ -2,6 +2,7 @@
 // HLS/subtitle/image proxies, and the schedule. Every content route runs through
 // the scope guard — a request 403s/404s unless the id is in the Public collection.
 import crypto from 'node:crypto'
+import fs from 'node:fs'
 import path from 'node:path'
 import { Router, type Request, type Response } from 'express'
 import {
@@ -13,22 +14,22 @@ import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
 import { getPortalItem, getPortalEpisodes, getPortalSeasonCounts } from './portalDb.js'
 import { getBanner, getSelectedBanner, findByMalId, listSeries, type BannerRow, type SeriesRow } from './db.js'
+import { BANNERS_DIR } from './banners.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
 
 export const publicRouter = Router()
 
-// Uploaded banner files live under DATA_DIR/banners (a mounted volume in prod).
-export const BANNERS_DIR = path.join(process.env.DATA_DIR ?? path.join(process.cwd(), 'data'), 'banners')
-
-// Serve a banner candidate: redirect to its remote URL, or stream the uploaded
-// file. Returns false when the row points at nothing servable.
+// Serve a banner candidate. The cached copy under BANNERS_DIR wins, so art that
+// moves or 404s upstream can't change what the portal shows; the remote URL is
+// only a fallback for a row we haven't managed to cache yet. Returns false when
+// the row points at nothing servable.
 function serveBanner(res: Response, b: Pick<BannerRow, 'url' | 'local_file'>): boolean {
-  if (b.url) { res.redirect(302, b.url); return true }
   if (b.local_file) {
     // basename guards against path traversal; filenames are server-generated.
-    res.sendFile(path.join(BANNERS_DIR, path.basename(b.local_file)))
-    return true
+    const file = path.join(BANNERS_DIR, path.basename(b.local_file))
+    if (fs.existsSync(file)) { res.sendFile(file); return true }
   }
+  if (b.url) { res.redirect(302, b.url); return true }
   return false
 }
 
