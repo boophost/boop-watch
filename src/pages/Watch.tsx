@@ -354,9 +354,15 @@ export default function Watch() {
         legacyWasmUrl: JASSUB_CDN + 'jassub-worker.wasm.js',
         // The fallback font default ('./default.woff2') is relative; inside a blob
         // worker it has no valid base, so point it at the CDN. Our subs name fonts
-        // that aren't embedded (e.g. "Cronos Pro") and fall back to this.
-        availableFonts: { 'liberation sans': JASSUB_CDN + 'default.woff2' },
-        fallbackFont: 'liberation sans',
+        // that aren't embedded (e.g. "Cronos Pro") and fall back to this. Liberation
+        // Sans is Latin-only, so Japanese-only sub tracks (common here — JP audio,
+        // JP-only subs) rendered as tofu boxes. Ship a full-coverage Noto Sans JP
+        // (also covers Latin) as the fallback so CJK glyphs resolve.
+        availableFonts: {
+          'liberation sans': JASSUB_CDN + 'default.woff2',
+          'noto sans jp': `${location.origin}/fonts/NotoSansJP-Regular.woff2`,
+        },
+        fallbackFont: 'noto sans jp',
       })
     }
   }, [data, subsReady, subIndex, videoEl])
