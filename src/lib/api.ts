@@ -77,6 +77,12 @@ export interface SeriesEpisode {
   status?: ChaseState
   airsAt?: string | null
 }
+export interface SeasonInfo {
+  season: number
+  /** Full display name from Jellyfin (e.g. "Season 2", "Final Season"). */
+  name: string
+  episodes: number
+}
 export interface SeriesDetail {
   type: 'series'
   id: string
@@ -87,6 +93,8 @@ export interface SeriesDetail {
   episodes: SeriesEpisode[]
   /** JF season numbers present for this franchise (empty when unknown). */
   seasons?: number[]
+  /** Per-season name + episode count for the season picker cards. */
+  seasonList?: SeasonInfo[]
   /** Season whose episodes are listed (defaults to latest when multi-season). */
   season?: number | null
   // Catalog series id for the admin-only "Library settings" shortcut; null when
@@ -183,6 +191,8 @@ export const getSchedule = (weekParam: string) =>
 
 export const imgUrl = (id: string) => `/img/${encodeURIComponent(id)}`
 export const backdropUrl = (id: string) => `/img/${encodeURIComponent(id)}/backdrop`
+export const seasonImgUrl = (id: string, season: number) =>
+  `/img/${encodeURIComponent(id)}/season/${season}`
 
 export const getSavedAnimes = () => fetchAuth('/api/library/saved').then(r => r.json() as Promise<{ saved: { item_id: string; added_at: string }[] }>)
 export async function saveAnime(id: string): Promise<void> {
