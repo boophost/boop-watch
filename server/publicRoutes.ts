@@ -14,7 +14,6 @@ import { getSchedule } from './schedule.js'
 import { getPortalItem, getPortalEpisodes, getPortalSeasons } from './portalDb.js'
 import { getBanner, getSelectedBanner, findByMalId, listSeries, type BannerRow, type SeriesRow } from './db.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
-import { fetchAnimeFull, relatedAnimeFromFull } from './jikan.js'
 
 export const publicRouter = Router()
 
@@ -298,48 +297,6 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
         }
       }
 
-      // Related seasons/titles from Jikan relations → catalog rows that are on Public.
-      let related: Array<{ id: string; name: string; relation: string; mal_id: number }> = []
-      const malForRelated = manageRow?.mal_id ?? pItem.mal_id
-      if (malForRelated != null) {
-        try {
-          const full = await Promise.race([
-            fetchAnimeFull(malForRelated),
-            new Promise<null>((r) => setTimeout(() => r(null), 2500)),
-          ])
-          if (full) {
-            const links = relatedAnimeFromFull(full)
-            const publicByMal = new Map(
-              getCollectionItems()
-                .map((it) => {
-                  const p = getPortalItem(it.Id)
-                  return p?.mal_id != null ? ([p.mal_id, { id: it.Id, name: p.name || it.Name || '' }] as const) : null
-                })
-                .filter((x): x is readonly [number, { id: string; name: string }] => !!x),
-            )
-            // Also map catalog mal_id → Public JF id via title match when portal mal unset.
-            for (const link of links) {
-              let hit = publicByMal.get(link.mal_id)
-              if (!hit) {
-                const cat = findByMalId(link.mal_id)
-                if (cat) {
-                  const jf = getCollectionItems().find((it) => {
-                    const p = getPortalItem(it.Id)
-                    return p?.mal_id === link.mal_id || (p?.name && cat.title_english && p.name === cat.title_english)
-                  })
-                  if (jf) hit = { id: jf.Id, name: jf.Name || cat.title_english || cat.title }
-                }
-              }
-              if (hit && hit.id !== id) {
-                related.push({ id: hit.id, name: hit.name, relation: link.relation, mal_id: link.mal_id })
-              }
-            }
-          }
-        } catch (e) {
-          console.error('related seasons failed —', e)
-        }
-      }
-
       res.json({
         type: 'series',
         id,
@@ -352,7 +309,6 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
         season,
         manageId,
         nextEpisode,
-        related,
       })
     } else if (pItem) {
       res.json({
