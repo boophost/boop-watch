@@ -21,7 +21,7 @@ import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
 import { searchAnimeAniList } from './anilist.js'
 import { warmScope } from './jellyfin.js'
-import { getSeriesDownloadStatus, getSeriesLibraryMedia } from './downloads.js'
+import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
@@ -482,10 +482,16 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
     return
   }
   try {
-    const status = await getSeriesDownloadStatus(id)
+    // buildSeriesChase already carries the download status (one shared qBit
+    // query — previously this route fetched it twice), and skips qBit entirely
+    // when every expected episode is on site.
     const chase = await buildSeriesChase(id)
     res.json({
-      ...status,
+      qbitConfigured: chase.qbitConfigured,
+      qbitError: chase.qbitError,
+      torrents: chase.torrents,
+      siteEpisodes: chase.siteEpisodes,
+      qbitSkipped: chase.qbitSkipped,
       blacklist: blacklist.listBlacklist(id),
       airedCount: chase.airedCount,
       expectedForPipeline: chase.expectedForPipeline,

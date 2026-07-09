@@ -89,6 +89,9 @@ export interface SeriesDownloadStatus {
   torrents: SeriesDownload[]
   // episode number -> portal watch id (episode is live on the public site)
   siteEpisodes: Record<string, string>
+  // True when the qBittorrent query was skipped because every expected episode
+  // is already on site — the pipeline is done, so torrent state is moot.
+  qbitSkipped?: boolean
 }
 
 function variantTokensForSeries(series: {
@@ -158,7 +161,14 @@ export function matchSeriesDownloads(
   return { qbitConfigured: true, qbitError: qbit.error, torrents, siteEpisodes }
 }
 
-export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesDownloadStatus> {
+export async function getSeriesDownloadStatus(
+  seriesId: number,
+  opts: {
+    /** Expected episode count for the pipeline; when every expected episode is
+     * already on site, the (slow while busy) qBittorrent query is skipped. */
+    expected?: number | null
+  } = {},
+): Promise<SeriesDownloadStatus> {
   const series = getSeriesById(seriesId)
   const portalItems = getAllPortalItems()
   if (!series) {
@@ -167,6 +177,16 @@ export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesD
 
   if (!qbitConfigured()) {
     return matchSeriesDownloads(series, portalItems, null, { configured: false, error: null })
+  }
+
+  // Pipeline already complete (all expected episodes playable) — the portal
+  // match alone answers everything the callers need; don't block on qBit.
+  const expected = opts.expected ?? null
+  if (expected != null && expected > 0) {
+    const stub = matchSeriesDownloads(series, portalItems, null, { configured: true, error: null })
+    if (Object.keys(stub.siteEpisodes).length >= expected) {
+      return { ...stub, torrents: [], qbitSkipped: true }
+    }
   }
 
   let raw: QbitTorrent[] = []
