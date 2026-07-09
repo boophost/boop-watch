@@ -103,7 +103,20 @@ function RecentCard({ it }: { it: RecentItem }) {
   return (
     <Link className="poster-card" to={href}>
       <div className="poster-fallback">{initials(it.name)}</div>
-      <img src={poster} loading="lazy" alt="" onError={(e) => e.currentTarget.remove()} />
+      <img
+        src={poster} loading="lazy" alt=""
+        onError={(e) => {
+          // A season poster can 404 out of a cache poisoned before the server
+          // learned to fall back; try the series poster before giving up.
+          const img = e.currentTarget
+          if (isSeason && it.seriesId && !img.dataset.fallback) {
+            img.dataset.fallback = '1'
+            img.src = imgUrl(it.seriesId)
+            return
+          }
+          img.remove()
+        }}
+      />
       {isSeason
         ? <span className="ep-tag font-mono">{it.season != null ? `S${it.season}` : 'New'}</span>
         : <span className="type-tag"><Icon name="film" size={11} />Movie</span>}
