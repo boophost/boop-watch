@@ -216,10 +216,22 @@ export function upsertSeriesMetadata(
     })
   }
   const cols = Object.keys(meta).filter((k) => (meta as Record<string, unknown>)[k] !== undefined)
-  const assignments = [...cols.map((c) => `${c} = @${c}`), `metadata_updated_at = datetime('now')`]
+  const assignments = [
+    ...cols.map((c) => `${c} = @${c}`),
+    // Fill the base presentation fields when the row is missing them (rows
+    // added by id-only paths — flows, the CLI — have no poster/synopsis until
+    // an enrich runs). Never overwrites an existing value.
+    `synopsis = COALESCE(synopsis, @b_synopsis)`,
+    `image_url = COALESCE(image_url, @b_image_url)`,
+    `url = COALESCE(url, @b_url)`,
+    `metadata_updated_at = datetime('now')`,
+  ]
   db.prepare(`UPDATE series SET ${assignments.join(', ')} WHERE mal_id = @mal_id`).run({
     ...meta,
     mal_id: base.mal_id,
+    b_synopsis: base.synopsis ?? null,
+    b_image_url: base.image_url ?? null,
+    b_url: base.url ?? null,
   })
   return findByMalId(base.mal_id)!
 }
