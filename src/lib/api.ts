@@ -45,16 +45,29 @@ export async function parseAuthJson<T>(r: Response): Promise<T> {
   return (await r.json()) as T
 }
 
-// A "recently added" home-page entry. `id` is always directly playable
-// (episode or movie), so cards link straight to /watch/:id.
+// A "recently updated" home-page entry: one per season, one per movie. `id` is
+// always directly playable (the season's newest episode / the movie), and
+// `epLabel` names that episode.
 export interface RecentItem {
   id: string
   seriesId: string | null
-  type: 'episode' | 'movie'
+  type: 'season' | 'movie'
   name: string
+  season: number | null
+  epLabel: string
+  epCount: number
+  addedAt: string | null
+}
+
+// Scope-cache metadata for a playable id — enough to render a history card.
+export interface ItemSummary {
+  id: string
+  type: 'episode' | 'movie'
+  seriesId: string | null
+  name: string
+  season: number | null
   epLabel: string
   epName: string
-  addedAt: string | null
 }
 
 // A featured-banner slide. `watchId` is directly playable (first episode /
@@ -179,6 +192,10 @@ export const getCatalog = () => getJSON<Catalog>('/api/catalog')
 let catalogPromise: Promise<Catalog> | null = null
 export const loadCatalog = (): Promise<Catalog> => (catalogPromise ??= getCatalog())
 export const getRecent = () => getJSON<{ items: RecentItem[] }>('/api/recent')
+export const getItemSummaries = (ids: string[]) =>
+  ids.length
+    ? getJSON<{ items: ItemSummary[] }>(`/api/items/summary?ids=${encodeURIComponent(ids.join(','))}`)
+    : Promise.resolve({ items: [] as ItemSummary[] })
 export const getFeatured = () => getJSON<{ items: FeaturedItem[] }>('/api/featured')
 export const getTitle = (id: string, season?: number | null) =>
   getJSON<TitleDetail>(

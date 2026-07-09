@@ -69,6 +69,26 @@ export async function loadProgressMap(ids: string[], loggedIn: boolean): Promise
   return out
 }
 
+export interface RecentWatch extends Progress { id: string }
+
+/** The account's most recently touched items, newest first. Rows barely started
+ * (<5% in, never finished) are dropped — an accidental click isn't history. */
+export async function recentlyWatched(limit = 24): Promise<RecentWatch[]> {
+  try {
+    const { data, error } = await supabase
+      .from('watch_progress')
+      .select('item_id, position, duration, watched')
+      .order('updated_at', { ascending: false })
+      .limit(limit)
+    if (error) throw error
+    return (data || [])
+      .map((r) => ({ id: r.item_id, position: r.position, duration: r.duration, watched: r.watched }))
+      .filter((r) => r.watched || (r.duration > 0 && r.position / r.duration > 0.05))
+  } catch {
+    return []
+  }
+}
+
 export async function saveAccountProgress(userId: string, id: string, p: Progress): Promise<void> {
   await supabase.from('watch_progress').upsert({
     user_id: userId,
