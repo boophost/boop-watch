@@ -238,6 +238,13 @@ export async function proxy(
     const v = upstream.headers.get(h)
     if (v) res.set(h, v)
   }
+  // Never cache a failure. Routes set their own long max-age *before* calling
+  // us (posters an hour, subtitles a day), and Jellyfin's error responses carry
+  // no cache-control of their own — so without this an upstream 404/500 gets
+  // stored under that lifetime and the browser keeps serving the error long
+  // after the item is fixed. This is a "no poster for an hour" bug, not a
+  // caching nicety.
+  if (upstream.status >= 400) res.set('cache-control', 'no-store')
   if (!upstream.body) {
     res.end()
     return
