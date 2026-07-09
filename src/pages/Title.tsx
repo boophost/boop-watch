@@ -144,31 +144,24 @@ export default function Title() {
       <PortalLayout crumb={BackCrumb}>
         <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview} manageId={data.manageId}>
           {seasonList.length > 1 ? (
-            <>
-              <div className="ep-head">
-                <h2 className="k-h3">Seasons</h2>
-                <div className="spacer" />
-              </div>
-              <div className="season-strip">
-                {seasonList.map((s) => (
-                  <button
-                    key={s.season}
-                    type="button"
-                    className="season-card"
-                    data-active={season === s.season}
-                    onClick={() => setSearchParams(s.season === seasons[seasons.length - 1] ? {} : { season: String(s.season) })}
-                  >
-                    <span className="season-thumb">
-                      <img src={seasonImgUrl(data.id, s.season)} alt="" loading="lazy" onError={(e) => e.currentTarget.remove()} />
-                    </span>
-                    <span className="season-info">
-                      <span className="season-name">{s.name}</span>
-                      {s.episodes > 0 && <span className="season-eps">{s.episodes} eps</span>}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </>
+            <div className="season-strip">
+              {seasonList.map((s) => (
+                <button
+                  key={s.season}
+                  type="button"
+                  className="season-card"
+                  data-active={season === s.season}
+                  onClick={() => setSearchParams(s.season === seasons[seasons.length - 1] ? {} : { season: String(s.season) })}
+                >
+                  <img src={seasonImgUrl(data.id, s.season)} alt="" loading="lazy" onError={(e) => e.currentTarget.remove()} />
+                  <span className="season-scrim" />
+                  <span className="season-info">
+                    <span className="season-name">{s.name}</span>
+                    {s.episodes > 0 && <span className="season-eps">{s.episodes} eps</span>}
+                  </span>
+                </button>
+              ))}
+            </div>
           ) : null}
           <div className="ep-head">
             <h2 className="k-h3">Episodes</h2>
