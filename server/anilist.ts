@@ -67,18 +67,28 @@ export async function searchAnimeAniList(
   return out
 }
 
-export async function fetchAniListBanner(malId: number): Promise<string | null> {
-  const query = 'query($idMal:Int){ Media(idMal:$idMal, type:ANIME){ bannerImage } }'
+/** AniList's wide `bannerImage` and portrait `coverImage`, in one request. */
+export async function fetchAniListArt(
+  malId: number,
+): Promise<{ banner: string | null; cover: string | null }> {
+  const query =
+    'query($idMal:Int){ Media(idMal:$idMal, type:ANIME){ bannerImage coverImage{ extraLarge large } } }'
   try {
     const res = await limitedFetch('anilist', ANILIST_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ query, variables: { idMal: malId } }),
     })
-    if (!res.ok) return null
-    const json = (await res.json()) as { data?: { Media?: { bannerImage?: string | null } } }
-    return json.data?.Media?.bannerImage ?? null
+    if (!res.ok) return { banner: null, cover: null }
+    const json = (await res.json()) as {
+      data?: { Media?: { bannerImage?: string | null; coverImage?: { extraLarge?: string | null; large?: string | null } } }
+    }
+    const media = json.data?.Media
+    return {
+      banner: media?.bannerImage ?? null,
+      cover: media?.coverImage?.extraLarge || media?.coverImage?.large || null,
+    }
   } catch {
-    return null
+    return { banner: null, cover: null }
   }
 }
