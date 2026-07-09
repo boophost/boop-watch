@@ -139,6 +139,25 @@ filesystems). `link` supports this via its NFS-mount field (added in `n0es/link`
 `ffmpeg`/`ffprobe` are in the image for the probe/extract nodes. The `mcp/` CLI (see `mcp/README.md`)
 drives flows against a port-forwarded staging backend for iteration.
 
+### Flows/schedules live in the DB, not git — promoting code never promotes them
+
+Flow graphs, published components, and schedules are rows in each environment's own `series.sqlite`
+(`flows`, `flow_schedules` tables) — **not** checked into the repo. A `dev` → `main` PR ships *code*
+(node types, server logic); it never touches production's actual flow graphs or schedule cadence.
+If you build/edit a flow on staging (new node, rewired graph, new published component), it exists
+**only on staging** until you manually replicate it on production too — there is no automated sync,
+and this is a deliberate choice (no tooling for it yet — see below), not a bug.
+
+**Manual replication recipe** (e.g. porting a staging-only flow edit to prod):
+1. Port-forward both environments' backends (`kubectl -n link-apps port-forward deploy/boop-watch-dev 3001:3000` and `deploy/boop-watch 3002:3000`), mint a JWT for each from that pod's own `JWT_SECRET` (they differ per environment).
+2. **Fetch the target environment's *current* graph fresh — never blindly copy the source environment's graph.** Environments drift (e.g. prod's `enrich.indexer-match` had a `seasonField` config dev's didn't; prod's `sink.library-import` had no explicit `pathTemplate` override while dev did) — copying wholesale silently clobbers real prod-only config. Diff node-by-node (`id`, `type`, `config`) before touching anything.
+3. Apply the same structural edit (insert/rewire nodes) to the target's own fetched graph, preserving every other node's config untouched.
+4. If the edit references a published component (a `flow.subflow` node's `flowId`), that component must be created + published **separately on the target environment first** — flow IDs are per-database and will not match across environments (e.g. a component published as flow #37 on dev may land as flow #26 on prod).
+5. Save via the `mcp/` CLI (`node mcp/flows-server.mjs save <id> <graph.json>`), then **dry-run it** (`run <id>`, no `--live`) before trusting it — a dry-run against real queued/completed torrents will actually exercise the new logic (ffprobe, matching, etc.) against live data without writing anything, which is a strong correctness signal.
+
+No import/export or diff tooling exists for this yet (discussed and deliberately deferred — this stays
+a manual process for now).
+
 ### Environment variables
 - `JELLYFIN_URL` — base URL (default `http://jellyfin:8096`)
 - `JELLYFIN_API_KEY` — admin key, server-side only. **Required** for the public portal; if unset the
