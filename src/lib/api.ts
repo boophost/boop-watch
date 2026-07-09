@@ -85,6 +85,12 @@ export interface SeriesDetail {
   genres: string[]
   year: number | null
   episodes: SeriesEpisode[]
+  /** JF season numbers present for this franchise (empty when unknown). */
+  seasons?: number[]
+  /** Season whose episodes are listed (defaults to latest when multi-season). */
+  season?: number | null
+  /** Jikan-related titles that are also on Public. */
+  related?: Array<{ id: string; name: string; relation: string; mal_id: number }>
   // Catalog series id for the admin-only "Library settings" shortcut; null when
   // the title isn't in the catalog.
   manageId?: number | null
@@ -168,7 +174,11 @@ let catalogPromise: Promise<Catalog> | null = null
 export const loadCatalog = (): Promise<Catalog> => (catalogPromise ??= getCatalog())
 export const getRecent = () => getJSON<{ items: RecentItem[] }>('/api/recent')
 export const getFeatured = () => getJSON<{ items: FeaturedItem[] }>('/api/featured')
-export const getTitle = (id: string) => getJSON<TitleDetail>(`/api/catalog/${encodeURIComponent(id)}`)
+export const getTitle = (id: string, season?: number | null) =>
+  getJSON<TitleDetail>(
+    `/api/catalog/${encodeURIComponent(id)}` +
+      (season != null && Number.isFinite(season) ? `?season=${season}` : ''),
+  )
 export const getWatch = (id: string) => getJSON<WatchData>(`/api/watch/${encodeURIComponent(id)}`)
 export const getSchedule = (weekParam: string) =>
   getJSON<SchedulePayload>('/api/schedule' + (weekParam ? `?${weekParam}` : ''))

@@ -98,6 +98,10 @@ export type JikanAnimeFull = {
   images: JikanAnimeBrief['images']
   studios?: { name: string }[]
   genres?: { name: string }[]
+  relations?: Array<{
+    relation: string
+    entry: Array<{ mal_id: number; type: string; name: string }>
+  }>
 }
 
 export interface JikanEpisodeRow {
@@ -129,6 +133,34 @@ export async function fetchAnimeFull(malId: number): Promise<JikanAnimeFull> {
   const json = (await res.json()) as { data?: JikanAnimeFull }
   if (!json.data) throw new Error('No anime data from Jikan')
   return json.data
+}
+
+/** Anime entries linked from Jikan relations (sequel / prequel / side story / …). */
+export function relatedAnimeFromFull(
+  full: JikanAnimeFull,
+  opts: { relations?: string[] } = {},
+): Array<{ mal_id: number; name: string; relation: string }> {
+  const allow = new Set(
+    (opts.relations ?? [
+      'Sequel',
+      'Prequel',
+      'Side story',
+      'Parent story',
+      'Alternative version',
+      'Spin-off',
+    ]).map((r) => r.toLowerCase()),
+  )
+  const out: Array<{ mal_id: number; name: string; relation: string }> = []
+  const seen = new Set<number>()
+  for (const rel of full.relations ?? []) {
+    if (!allow.has(rel.relation.toLowerCase())) continue
+    for (const e of rel.entry) {
+      if (e.type !== 'anime' || seen.has(e.mal_id)) continue
+      seen.add(e.mal_id)
+      out.push({ mal_id: e.mal_id, name: e.name, relation: rel.relation })
+    }
+  }
+  return out
 }
 
 export async function fetchAnimeEpisodesPage(
