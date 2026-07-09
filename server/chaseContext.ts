@@ -150,6 +150,7 @@ export async function buildSeriesChase(
   torrents: SeriesDownloadStatus['torrents']
   qbitConfigured: boolean
   qbitError: string | null
+  qbitSkipped?: boolean
 }> {
   const series = getSeriesById(seriesId)
   if (!series) {
@@ -164,7 +165,10 @@ export async function buildSeriesChase(
     }
   }
 
-  const status = await getSeriesDownloadStatus(seriesId)
+  // Expected count is derivable from the local episode cache alone, so the
+  // status fetch can skip the qBittorrent query when everything is on site.
+  const { expected } = resolveExpected(series.episodes, airInfosForSeries(series))
+  const status = await getSeriesDownloadStatus(seriesId, { expected })
   let libraryEpisodes = new Set<number>()
   if (opts.includeLibrary !== false) {
     try {
@@ -201,6 +205,7 @@ export async function buildSeriesChase(
     torrents: status.torrents,
     qbitConfigured: status.qbitConfigured,
     qbitError: status.qbitError,
+    qbitSkipped: status.qbitSkipped,
   }
 }
 
