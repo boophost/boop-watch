@@ -190,7 +190,8 @@ export const getSchedule = (weekParam: string) =>
   getJSON<SchedulePayload>('/api/schedule' + (weekParam ? `?${weekParam}` : ''))
 
 export const imgUrl = (id: string) => `/img/${encodeURIComponent(id)}`
-export const backdropUrl = (id: string) => `/img/${encodeURIComponent(id)}/backdrop`
+export const backdropUrl = (id: string, season?: number | null) =>
+  `/img/${encodeURIComponent(id)}/backdrop` + (season != null ? `?season=${season}` : '')
 export const seasonImgUrl = (id: string, season: number) =>
   `/img/${encodeURIComponent(id)}/season/${season}`
 
