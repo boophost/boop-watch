@@ -14,7 +14,7 @@ import {
 import * as seriesDb from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter } from './publicRoutes.js'
-import { ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
+import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
@@ -692,6 +692,7 @@ function bannerView(b: seriesDb.BannerRow) {
     width: b.width,
     height: b.height,
     preview: `/api/banner/${b.id}/image`,
+    thumb: `/api/banner/${b.id}/image?thumb=1`,
   }
 }
 
@@ -705,7 +706,7 @@ app.get('/api/series/:id/banners', requireAuth, async (req, res) => {
 })
 
 // Choose which candidate the portal serves.
-app.post('/api/series/:id/banners/select', requireAuth, requireAdmin, (req, res) => {
+app.post('/api/series/:id/banners/select', requireAuth, requireAdmin, async (req, res) => {
   const id = Number(req.params.id)
   const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
   if (!series) { res.status(404).json({ error: 'Series not found' }); return }
@@ -714,6 +715,9 @@ app.post('/api/series/:id/banners/select', requireAuth, requireAdmin, (req, res)
     res.status(400).json({ error: 'Unknown banner for this series' })
     return
   }
+  // Only the selection is cached, so a newly-picked candidate has to be pulled
+  // down now — otherwise the portal hotlinks it until the next gather.
+  try { await cacheSelectedBanner(series.mal_id) } catch (e) { console.error('banner cache failed', e) }
   res.json({ banners: seriesDb.listBanners(series.mal_id).map(bannerView) })
 })
 

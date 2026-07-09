@@ -96,6 +96,79 @@ export async function getSeriesSeasons(seriesId: string): Promise<JfSeason[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Remote artwork. Jellyfin fronts whatever image providers it has configured
+// (TheTVDB and TheMovieDb here, plus any provider plugin), so asking it for an
+// item's remote images reaches those catalogs without us holding their keys —
+// and the candidate pool grows on its own when a provider is added to Jellyfin.
+// Season items carry their own, genuinely season-specific backgrounds.
+// ---------------------------------------------------------------------------
+export interface JfRemoteImage {
+  provider: string
+  url: string
+  thumbUrl: string | null
+  width: number | null
+  height: number | null
+}
+
+interface JfRemoteImageRaw {
+  ProviderName?: string
+  Url?: string
+  ThumbnailUrl?: string
+  Width?: number
+  Height?: number
+}
+
+/** Remote artwork candidates Jellyfin's providers offer for one item. */
+export async function jfRemoteImages(itemId: string, type = 'Backdrop'): Promise<JfRemoteImage[]> {
+  const data = await jfJson<{ Images?: JfRemoteImageRaw[] }>(`/Items/${itemId}/RemoteImages`, {
+    type,
+    limit: 60,
+    includeAllLanguages: 'true',
+  })
+  const out: JfRemoteImage[] = []
+  for (const img of data.Images ?? []) {
+    if (!img.Url) continue
+    out.push({
+      provider: img.ProviderName ?? 'jellyfin',
+      url: img.Url,
+      thumbUrl: img.ThumbnailUrl ?? null,
+      width: img.Width ?? null,
+      height: img.Height ?? null,
+    })
+  }
+  return out
+}
+
+// tvdb id -> Jellyfin series id. `AnyProviderIdEquals` is silently ignored by
+// this server (it returns the whole library), so match ProviderIds ourselves.
+const tvdbIndex: { at: number; map: Map<number, string> } = { at: 0, map: new Map() }
+
+export async function jfSeriesIdByTvdb(tvdbId: number): Promise<string | null> {
+  const now = Date.now()
+  if (now - tvdbIndex.at >= SCOPE_TTL_MS) {
+    try {
+      const data = await jfJson<{ Items?: (JfItem & { ProviderIds?: { Tvdb?: string } })[] }>('/Items', {
+        Recursive: 'true',
+        IncludeItemTypes: 'Series',
+        Fields: 'ProviderIds',
+      })
+      const map = new Map<number, string>()
+      for (const it of data.Items ?? []) {
+        const tvdb = Number(it.ProviderIds?.Tvdb)
+        // First match wins: duplicate library entries for one tvdb id (a stray
+        // release dir re-scanned as its own series) must not shadow the real one.
+        if (Number.isFinite(tvdb) && !map.has(tvdb)) map.set(tvdb, it.Id)
+      }
+      tvdbIndex.map = map
+      tvdbIndex.at = now
+    } catch {
+      // Serve the stale index rather than losing every lookup on one hiccup.
+    }
+  }
+  return tvdbIndex.map.get(tvdbId) ?? null
+}
+
+// ---------------------------------------------------------------------------
 // Scope cache: what is publicly viewable, derived from the Public collection.
 //   collectionItems : direct children (movies + series) -> browse/detail
 //   playableIds     : movie ids + every episode id      -> the play guard
