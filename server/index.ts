@@ -21,7 +21,8 @@ import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
 import { searchAnimeAniList } from './anilist.js'
 import { warmScope } from './jellyfin.js'
-import { getSeriesDownloadStatus, getSeriesLibraryMedia } from './downloads.js'
+import { getSeriesLibraryMedia } from './downloads.js'
+import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
@@ -209,9 +210,21 @@ app.get('/api/search/anime', requireAuth, async (req, res) => {
   }
 })
 
-app.get('/api/series', requireAuth, (_req, res) => {
+app.get('/api/series', requireAuth, async (_req, res) => {
   seriesDb.getDb()
-  res.json({ series: seriesDb.listSeries() })
+  const series = seriesDb.listSeries()
+  try {
+    const chases = await buildSeriesListChases(series)
+    res.json({
+      series: series.map((s) => ({
+        ...s,
+        nextChase: chases.get(s.id) ?? null,
+      })),
+    })
+  } catch (e) {
+    console.error('series list chase enrich failed —', e)
+    res.json({ series })
+  }
 })
 
 app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
@@ -227,20 +240,30 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
   }
   try {
     const mal = await fetchAnimeFull(series.mal_id)
-    // Persist the episode count so the episodes API's synthesized fallback can
-    // still render a full 1..N grid (with library/download status) if the
-    // episodes scrape is ever unavailable — otherwise a null count dead-ends.
-    if (typeof mal.episodes === 'number' && mal.episodes > 0 && mal.episodes !== series.episodes) {
-      try {
-        seriesDb.upsertSeriesMetadata(
-          { mal_id: series.mal_id, title: series.title },
-          { episodes: mal.episodes },
-        )
-      } catch (persistErr) {
-        console.error('detail: failed to persist episode count —', persistErr)
+    // Persist episode count + weekly broadcast so chase can estimate next air
+    // times when Jikan hasn't listed the next episode yet.
+    try {
+      const patch: Parameters<typeof seriesDb.upsertSeriesMetadata>[1] = {}
+      if (typeof mal.episodes === 'number' && mal.episodes > 0 && mal.episodes !== series.episodes) {
+        patch.episodes = mal.episodes
       }
+      if (mal.status && mal.status !== series.status) patch.status = mal.status
+      if (mal.broadcast) {
+        const serialized = JSON.stringify({
+          day: mal.broadcast.day ?? null,
+          time: mal.broadcast.time ?? null,
+          timezone: mal.broadcast.timezone ?? null,
+          string: mal.broadcast.string ?? null,
+        })
+        if (serialized !== series.broadcast) patch.broadcast = serialized
+      }
+      if (Object.keys(patch).length) {
+        seriesDb.upsertSeriesMetadata({ mal_id: series.mal_id, title: series.title }, patch)
+      }
+    } catch (persistErr) {
+      console.error('detail: failed to persist metadata —', persistErr)
     }
-    res.json({ series, mal })
+    res.json({ series: seriesDb.getSeriesById(id) ?? series, mal })
   } catch (e) {
     console.error(e)
     res.json({
@@ -459,8 +482,22 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
     return
   }
   try {
-    const status = await getSeriesDownloadStatus(id)
-    res.json({ ...status, blacklist: blacklist.listBlacklist(id) })
+    // buildSeriesChase already carries the download status (one shared qBit
+    // query — previously this route fetched it twice), and skips qBit entirely
+    // when every expected episode is on site.
+    const chase = await buildSeriesChase(id)
+    res.json({
+      qbitConfigured: chase.qbitConfigured,
+      qbitError: chase.qbitError,
+      torrents: chase.torrents,
+      siteEpisodes: chase.siteEpisodes,
+      qbitSkipped: chase.qbitSkipped,
+      blacklist: blacklist.listBlacklist(id),
+      airedCount: chase.airedCount,
+      expectedForPipeline: chase.expectedForPipeline,
+      nextChase: chase.nextChase,
+      portalSeriesId: chase.portalSeriesId,
+    })
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to load downloads' })

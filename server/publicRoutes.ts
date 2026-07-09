@@ -5,14 +5,15 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import { Router, type Request, type Response } from 'express'
 import {
-  jellyfinConfigured, ensureScope, jfItem, jfJson, jfUrl, proxy,
-  getCollectionItems, getScopeEpisodes, getPlayableIds, isCollectionItem, type JfItem,
+  jellyfinConfigured, ensureScope, jfItem, jfJson, jfUrl, proxy, getSeriesSeasons,
+  getCollectionItems, getScopeEpisodes, getPlayableIds, isCollectionItem, type JfItem, type JfSeason,
 } from './jellyfin.js'
 import { buildWatchData, type Segment } from './watch.js'
 import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
-import { getPortalItem, getPortalEpisodes } from './portalDb.js'
-import { getBanner, getSelectedBanner, findByMalId, type BannerRow } from './db.js'
+import { getPortalItem, getPortalEpisodes, getPortalSeasonCounts } from './portalDb.js'
+import { getBanner, getSelectedBanner, findByMalId, listSeries, type BannerRow, type SeriesRow } from './db.js'
+import { buildSeriesChase, toPublicChase } from './chaseContext.js'
 
 export const publicRouter = Router()
 
@@ -32,6 +33,61 @@ function serveBanner(res: Response, b: Pick<BannerRow, 'url' | 'local_file'>): b
 }
 
 const qStr = (v: unknown): string => (typeof v === 'string' ? v : Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '')
+
+const normTitle = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+
+/** True when a catalog title is clearly the same franchise as the portal name. */
+function titleMatchesFranchise(portalName: string, catalog: SeriesRow): boolean {
+  const name = normTitle(portalName)
+  if (!name) return false
+  for (const raw of [catalog.title, catalog.title_english]) {
+    if (!raw) continue
+    const t = normTitle(raw)
+    if (!t) continue
+    if (name === t || name.includes(t) || t.includes(name)) return true
+  }
+  return false
+}
+
+/**
+ * Catalog cour for a Public JF series.
+ * Always anchor to this franchise first (mal_id / title / shared tvdb_id) —
+ * never pick another show that merely shares the same `tvdb_season` number
+ * (Slime ?season=2 must not resolve to Mushoku Part 2).
+ */
+function catalogCourForSeries(
+  pItem: { mal_id: number | null; name: string },
+  season: number | null,
+): SeriesRow | null {
+  const all = listSeries()
+
+  let franchise: SeriesRow[] = []
+  if (pItem.mal_id != null) {
+    const seed = findByMalId(pItem.mal_id)
+    if (seed?.tvdb_id != null) {
+      franchise = all.filter((s) => s.tvdb_id === seed.tvdb_id)
+    } else if (seed) {
+      franchise = [seed]
+    }
+  }
+  if (franchise.length === 0) {
+    franchise = all.filter((s) => titleMatchesFranchise(pItem.name, s))
+    // Expand to every cour sharing a tvdb_id with a title hit.
+    const tvdbIds = new Set(franchise.map((s) => s.tvdb_id).filter((id): id is number => id != null))
+    if (tvdbIds.size > 0) {
+      franchise = all.filter((s) => s.tvdb_id != null && tvdbIds.has(s.tvdb_id))
+    }
+  }
+
+  if (season != null && franchise.length > 0) {
+    const cour = franchise.find((s) => s.tvdb_season === season)
+    // Season not in catalog (e.g. Slime S1–S3 while only S4 is indexed) → no cour.
+    return cour ?? null
+  }
+
+  if (pItem.mal_id != null) return findByMalId(pItem.mal_id) ?? null
+  return franchise[0] ?? null
+}
 
 publicRouter.get('/health', (_req, res) => { res.type('text').send('ok') })
 
@@ -187,14 +243,77 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
   const pItem = getPortalItem(id)
   try {
     if (pItem?.type === 'Series') {
-      const eps = getPortalEpisodes(id)
-      const episodes = eps.map((ep) => ({
+      const seasonCounts = getPortalSeasonCounts(id)
+      const seasons = seasonCounts.map((c) => c.season)
+      const seasonParam = qStr(req.query.season)
+      const seasonNum = seasonParam ? Number(seasonParam) : NaN
+      // Default: latest season when multi-season (franchise page); single-season unchanged.
+      const season =
+        Number.isFinite(seasonNum) && seasons.includes(seasonNum)
+          ? seasonNum
+          : seasons.length > 1
+            ? seasons[seasons.length - 1]
+            : (seasons[0] ?? null)
+
+      // Picker cards: full season names come from the JF season items (custom
+      // names like "Final Season" pass through). Budgeted so a slow Jellyfin
+      // can't stall the page — the "Season N" fallback still renders.
+      let jfSeasons: JfSeason[] = []
+      if (seasons.length > 1) {
+        jfSeasons = await Promise.race([
+          getSeriesSeasons(id),
+          new Promise<JfSeason[]>((r) => setTimeout(() => r([]), 1500)),
+        ])
+      }
+      const seasonList = seasonCounts.map((c) => ({
+        season: c.season,
+        name: jfSeasons.find((s) => s.IndexNumber === c.season)?.Name || `Season ${c.season}`,
+        episodes: c.episodes,
+      }))
+
+      const eps = getPortalEpisodes(id, season)
+      const episodes: Array<{
+        id: string | null
+        name: string
+        num: string
+        status?: string
+        airsAt?: string | null
+      }> = eps.map((ep) => ({
         id: ep.id,
         name: ep.name || 'Episode',
         num: (ep.parent_index_number != null && ep.index_number != null)
           ? `S${ep.parent_index_number}·E${ep.index_number}`
           : (ep.index_number != null ? `E${ep.index_number}` : '·'),
       }))
+
+      const manageRow = catalogCourForSeries(pItem, season)
+      const manageId = manageRow?.id ?? null
+      let nextEpisode: ReturnType<typeof toPublicChase> = null
+      if (manageId != null) {
+        try {
+          const chase = await buildSeriesChase(manageId, {
+            includeLibrary: false,
+            budgetMs: 2500,
+          })
+          nextEpisode = toPublicChase(chase.nextChase)
+          if (nextEpisode) {
+            const stubNum =
+              season != null
+                ? `S${season}·E${nextEpisode.episode}`
+                : `E${nextEpisode.episode}`
+            episodes.push({
+              id: null,
+              name: nextEpisode.title || `Episode ${nextEpisode.episode}`,
+              num: stubNum,
+              status: nextEpisode.state,
+              airsAt: nextEpisode.airsAt,
+            })
+          }
+        } catch (e) {
+          console.error('catalog chase failed —', e)
+        }
+      }
+
       res.json({
         type: 'series',
         id,
@@ -203,9 +322,11 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
         genres: pItem.genres ? JSON.parse(pItem.genres) : [],
         year: pItem.production_year || null,
         episodes,
-        // Catalog id for the admin "Library settings" shortcut (harmless number;
-        // the /manage route is admin-gated). null when this title isn't catalogued.
-        manageId: pItem.mal_id != null ? (findByMalId(pItem.mal_id)?.id ?? null) : null,
+        seasons,
+        seasonList,
+        season,
+        manageId,
+        nextEpisode,
       })
     } else if (pItem) {
       res.json({
@@ -258,7 +379,12 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
   if (item.Type === 'Episode' && item.SeriesId) {
     try {
       const e = await jfJson<{ Items?: JfItem[] }>(`/Shows/${item.SeriesId}/Episodes`)
-      siblings = (e.Items || []).filter((ep) => getPlayableIds().has(ep.Id))
+      const season = item.ParentIndexNumber
+      siblings = (e.Items || []).filter(
+        (ep) =>
+          getPlayableIds().has(ep.Id) &&
+          (season == null || ep.ParentIndexNumber === season),
+      )
     } catch { /* sidebar is optional */ }
   }
 
@@ -292,11 +418,30 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
       return n ? { ...ep, Name: n } : ep
     })
   }
-  // Catalog id for the admin "Library settings" shortcut — from the series
-  // (episodes) or the item itself (movies). null when not catalogued.
-  const manageMal = (item.SeriesId ? getPortalItem(item.SeriesId) : pSelf)?.mal_id
-  const manageId = manageMal != null ? (findByMalId(manageMal)?.id ?? null) : null
-  res.json({ ...buildWatchData(id, item, siblings, segments), manageId })
+  // Catalog id for the admin "Library settings" shortcut — season-scoped for
+  // episodes (same franchise anchoring as the catalog route) so a watched
+  // season that isn't catalogued gets no manageId, which also stops another
+  // season's chase stub from trailing this season's sidebar.
+  let manageId: number | null = null
+  if (item.Type === 'Episode' && item.SeriesId) {
+    const pSeries = getPortalItem(item.SeriesId)
+    if (pSeries) manageId = catalogCourForSeries(pSeries, item.ParentIndexNumber ?? null)?.id ?? null
+  } else if (pSelf?.mal_id != null) {
+    manageId = findByMalId(pSelf.mal_id)?.id ?? null
+  }
+  let nextEpisode: ReturnType<typeof toPublicChase> = null
+  if (manageId != null && item.Type === 'Episode') {
+    try {
+      const chase = await buildSeriesChase(manageId, {
+        includeLibrary: false,
+        budgetMs: 2500,
+      })
+      nextEpisode = toPublicChase(chase.nextChase)
+    } catch (e) {
+      console.error('watch chase failed —', e)
+    }
+  }
+  res.json({ ...buildWatchData(id, item, siblings, segments), manageId, nextEpisode })
 })
 
 // Weekly anime schedule, filtered to the library.
@@ -331,6 +476,29 @@ publicRouter.get('/img/:id', async (req, res) => {
   await proxy(req, res, jfUrl(`/Items/${id}/Images/Primary`, { maxWidth: '400', quality: '90' }))
 })
 
+// Season poster (the picker cards) — the JF season item's own art, falling
+// back to the series poster so a card never renders empty. Guarded by the
+// series id, so only seasons of Public titles are reachable.
+publicRouter.get('/img/:id/season/:season', async (req, res) => {
+  if (!ensureConfigured(res)) return
+  await ensureScope().catch(() => {})
+  const { id } = req.params
+  if (!isCollectionItem(id)) {
+    res.status(404).end()
+    return
+  }
+  const n = Number(req.params.season)
+  const match = Number.isFinite(n)
+    ? (await getSeriesSeasons(id)).find((s) => s.IndexNumber === n)
+    : undefined
+  if (!match) {
+    res.redirect(302, `/img/${id}`)
+    return
+  }
+  res.set('cache-control', 'public, max-age=3600')
+  await proxy(req, res, jfUrl(`/Items/${match.Id}/Images/Primary`, { maxWidth: '300', quality: '90' }))
+})
+
 // Wide banner art (top-level titles only) for the season hero and featured
 // rail. Prefer our AniList banner, then Jellyfin's own backdrop, and only as a
 // last resort the poster — so the hero is never empty but avoids a stretched
@@ -344,6 +512,16 @@ publicRouter.get('/img/:id/backdrop', async (req, res) => {
     return
   }
   const pItem = getPortalItem(id)
+  // ?season= — prefer that cour's admin-selected banner; an uncatalogued
+  // season (or one with no banner picked) falls through to the series chain.
+  const seasonQ = Number(qStr(req.query.season))
+  if (pItem && Number.isFinite(seasonQ)) {
+    const cour = catalogCourForSeries(pItem, seasonQ)
+    if (cour) {
+      const sel = getSelectedBanner(cour.mal_id)
+      if (sel && serveBanner(res, sel)) return
+    }
+  }
   // The admin-selected banner candidate wins (AniList/Kitsu/upload)…
   if (pItem?.mal_id != null) {
     const sel = getSelectedBanner(pItem.mal_id)

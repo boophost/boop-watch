@@ -93,8 +93,42 @@ export function getPortalItem(id: string): PortalItem | undefined {
   return getPortalDb().prepare('SELECT * FROM portal_items WHERE id = ?').get(id) as PortalItem | undefined
 }
 
-export function getPortalEpisodes(seriesId: string): PortalItem[] {
-  return getPortalDb().prepare('SELECT * FROM portal_items WHERE type = ? AND series_id = ? ORDER BY parent_index_number ASC, index_number ASC').all('Episode', seriesId) as PortalItem[]
+export function getPortalEpisodes(seriesId: string, season?: number | null): PortalItem[] {
+  if (season == null) {
+    return getPortalDb()
+      .prepare(
+        'SELECT * FROM portal_items WHERE type = ? AND series_id = ? ORDER BY parent_index_number ASC, index_number ASC',
+      )
+      .all('Episode', seriesId) as PortalItem[]
+  }
+  return getPortalDb()
+    .prepare(
+      'SELECT * FROM portal_items WHERE type = ? AND series_id = ? AND parent_index_number = ? ORDER BY index_number ASC',
+    )
+    .all('Episode', seriesId, season) as PortalItem[]
+}
+
+/** Distinct JF season numbers that have at least one episode for a series. */
+export function getPortalSeasons(seriesId: string): number[] {
+  const rows = getPortalDb()
+    .prepare(
+      `SELECT DISTINCT parent_index_number AS season FROM portal_items
+       WHERE type = 'Episode' AND series_id = ? AND parent_index_number IS NOT NULL
+       ORDER BY parent_index_number ASC`,
+    )
+    .all(seriesId) as { season: number }[]
+  return rows.map((r) => r.season)
+}
+
+/** Episode count per JF season for a series (the season picker cards). */
+export function getPortalSeasonCounts(seriesId: string): Array<{ season: number; episodes: number }> {
+  return getPortalDb()
+    .prepare(
+      `SELECT parent_index_number AS season, COUNT(*) AS episodes FROM portal_items
+       WHERE type = 'Episode' AND series_id = ? AND parent_index_number IS NOT NULL
+       GROUP BY parent_index_number ORDER BY parent_index_number ASC`,
+    )
+    .all(seriesId) as Array<{ season: number; episodes: number }>
 }
 
 export function upsertPortalItem(item: PortalItem) {
@@ -132,4 +166,18 @@ export function upsertPortalItem(item: PortalItem) {
 
 export function setImageUrls(id: string, image_url: string | null, backdrop_url: string | null) {
   getPortalDb().prepare('UPDATE portal_items SET image_url = ?, backdrop_url = ? WHERE id = ?').run(image_url, backdrop_url, id)
+}
+
+/** Drop portal rows whose ids are not in `keepIds` (Public collection sync). */
+export function prunePortalItemsNotIn(keepIds: Set<string>): number {
+  if (keepIds.size === 0) {
+    // Empty Public collection — wipe the portal cache rather than leaving ghosts.
+    const info = getPortalDb().prepare('DELETE FROM portal_items').run()
+    return info.changes
+  }
+  const placeholders = [...keepIds].map(() => '?').join(',')
+  const info = getPortalDb()
+    .prepare(`DELETE FROM portal_items WHERE id NOT IN (${placeholders})`)
+    .run(...keepIds)
+  return info.changes
 }

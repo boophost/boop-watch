@@ -3210,6 +3210,95 @@ const muxTracks: NodeImpl = {
   },
 }
 
+// Drops audio tracks outside a language allow-list (stream copy, no
+// re-encode) — e.g. a BD-batch release bundles an incidental German/French
+// dub we never want in the library. Video and subtitle tracks pass through
+// untouched.
+const trimAudioTracks: NodeImpl = {
+  spec: {
+    type: 'enrich.trim-audio-tracks',
+    label: 'Trim audio tracks',
+    category: 'enrich',
+    description:
+      'Drops audio tracks whose language isn\'t in the keep-list (stream copy, no re-encode) — e.g. strips an incidental German/French dub a batch release bundled in, keeping just jpn/eng. Video and subtitle tracks pass through untouched. Files that already only have wanted languages route to "unchanged" without a re-mux.',
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
+    outputs: [
+      { id: 'trimmed', label: 'trimmed' },
+      { id: 'unchanged', label: 'unchanged' },
+    ],
+    config: [
+      { key: 'fileField', label: 'File field', kind: 'text', default: 'file_path' },
+      {
+        key: 'keepLangs',
+        label: 'Languages to keep',
+        kind: 'text',
+        default: 'jpn,eng',
+        help: 'ISO 639-2 codes, comma-separated. Audio tracks with no language tag are always kept (can\'t be classified).',
+      },
+      { key: 'outDir', label: 'Output dir', kind: 'text', default: '', help: 'Where the trimmed file lands. Empty = DATA_DIR/work.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fileField = str(config, 'fileField', 'file_path')
+    const keep = str(config, 'keepLangs', 'jpn,eng').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    const outDir = str(config, 'outDir', '') || path.join(WORK_DIR(), 'work')
+
+    const trimmed: FlowItem[] = []
+    const unchanged: FlowItem[] = []
+
+    for (const item of allInputs(inputs)) {
+      const file = String(item[fileField] ?? '')
+      if (!file) { unchanged.push(item); continue }
+      try {
+        const { stdout } = await execFileP(
+          'ffprobe',
+          ['-v', 'quiet', '-print_format', 'json', '-show_streams', file],
+          { timeout: 60_000, maxBuffer: 8 * 1024 * 1024 },
+        )
+        const streams = (JSON.parse(stdout).streams ?? []) as ProbeStream[]
+        const drop = streams.filter((s) => {
+          if (s.codec_type !== 'audio') return false
+          const lang = (s.tags?.language ?? '').toLowerCase()
+          if (!lang) return false // unclassified — keep rather than risk dropping the only track
+          return !keep.some((k) => lang === k || lang.startsWith(k))
+        })
+        if (drop.length === 0) { unchanged.push(item); continue }
+
+        const ext = path.extname(file)
+        const base = path.basename(file, ext)
+        const dest = path.join(outDir, `${base}.trimmed${ext}`)
+        if (ctx.dryRun) {
+          trimmed.push({
+            ...item,
+            [fileField]: dest,
+            trimmed_audio_langs: drop.map((s) => s.tags?.language || 'und').join(','),
+          })
+          continue
+        }
+        fs.mkdirSync(outDir, { recursive: true })
+        const args = ['-y', '-v', 'error', '-i', file, '-map', '0']
+        for (const s of drop) args.push('-map', `-0:${s.index}`)
+        args.push('-c', 'copy', dest)
+        await execFileP('ffmpeg', args, { timeout: 300_000 })
+        trimmed.push({
+          ...item,
+          [fileField]: dest,
+          trimmed_audio_langs: drop.map((s) => s.tags?.language || 'und').join(','),
+        })
+      } catch (e) {
+        ctx.notes.push(`trim failed for ${path.basename(file)}: ${e instanceof Error ? e.message : String(e)}`)
+        unchanged.push(item)
+      }
+    }
+    ctx.notes.push(
+      ctx.dryRun
+        ? `dry run — would trim ${trimmed.length} file(s), ${unchanged.length} already clean`
+        : `trimmed ${trimmed.length} file(s), ${unchanged.length} already clean`,
+    )
+    return { trimmed, unchanged }
+  },
+}
+
 const metadataEnrich: NodeImpl = {
   spec: {
     type: 'enrich.metadata',
@@ -3259,6 +3348,14 @@ const metadataEnrich: NodeImpl = {
           aired: a.aired?.string ?? null,
           studios,
           genres,
+          broadcast: a.broadcast
+            ? JSON.stringify({
+                day: a.broadcast.day ?? null,
+                time: a.broadcast.time ?? null,
+                timezone: a.broadcast.timezone ?? null,
+                string: a.broadcast.string ?? null,
+              })
+            : null,
         }
         if (writeDb && !ctx.dryRun) {
           upsertSeriesMetadata(
@@ -3496,6 +3593,20 @@ function sanitizeSegments(rel: string): string {
 
 const LIBRARY_DIR = () => process.env.LIBRARY_DIR ?? '/library'
 
+/** Strip cour/season suffixes from a MAL title so multi-season imports land in
+ * the franchise folder ("… as a Slime Season 4" → "… as a Slime") when we have
+ * a tvdb_season to place under Season N. Leaves single-cour titles alone. */
+function franchiseShowName(show: string, hasTvdbSeason: boolean): string {
+  if (!hasTvdbSeason) return show
+  const stripped = show
+    .replace(
+      /\s*(?:[:\-–—]\s*)?(?:\d+(?:st|nd|rd|th)\s+Season|Season\s+\d+|Part\s+\d+|Cour\s+\d+|第\d+期)\s*$/i,
+      '',
+    )
+    .trim()
+  return stripped || show
+}
+
 // "Is the file already in the library this exact release?" Our imports hardlink,
 // so a re-run's src and the dest it produced share an inode — cheap, exact skip
 // that keeps scheduled runs idempotent. Fall back to size for copy-mode imports
@@ -3510,6 +3621,27 @@ function sameLibraryFile(src: string, dest: string): boolean {
   } catch {
     return false
   }
+}
+
+const VIDEO_EXTS = new Set(['.mkv', '.mp4', '.m4v', '.avi', '.webm'])
+
+/** Find an already-imported video for this season/episode by its SxxExx
+ * marker, regardless of the rest of the filename — so a `pathTemplate` edit
+ * (or a differently-named legacy import) still finds the old release instead
+ * of treating it as new and leaving two files for one episode. */
+function findSiblingEpisodeFile(destDir: string, marker: string, excludeBasename: string): string | null {
+  let entries: string[]
+  try {
+    entries = fs.readdirSync(destDir)
+  } catch {
+    return null
+  }
+  for (const name of entries) {
+    if (name === excludeBasename) continue
+    if (!VIDEO_EXTS.has(path.extname(name).toLowerCase())) continue
+    if (name.includes(marker)) return path.join(destDir, name)
+  }
+  return null
 }
 
 const libraryImport: NodeImpl = {
@@ -3590,9 +3722,16 @@ const libraryImport: NodeImpl = {
     let copied = 0
     for (const item of allInputs(inputs)) {
       const src = String(item[fileField] ?? '')
-      const show = String(item[showField] ?? item.title ?? item.name ?? item.series_name ?? '').trim()
-      if (!src || !show) {
+      const rawShow = String(item[showField] ?? item.title ?? item.name ?? item.series_name ?? '').trim()
+      if (!src || !rawShow) {
         ctx.notes.push(`skipped an item missing file or show name`)
+        skipped.push(item)
+        continue
+      }
+      // Never create a library folder from a torrent release name — that becomes
+      // a junk Jellyfin "series" (Erai-raws / Yameii folders) and can leak into Public.
+      if (looksLikeReleaseName(rawShow) && item.tvdb_season == null && !item.title_english && !item.title) {
+        ctx.notes.push(`skipped release-named show folder: ${rawShow.slice(0, 80)}`)
         skipped.push(item)
         continue
       }
@@ -3603,6 +3742,7 @@ const libraryImport: NodeImpl = {
       // absolute slot within that season (S1 cour 2 → +11). Both fall back to
       // the old behaviour (season 1 / no offset) when unmapped.
       const season = item.tvdb_season ?? item.season ?? item.parent_index_number ?? defaultSeason
+      const show = franchiseShowName(rawShow, item.tvdb_season != null)
       const baseEp = item.torrent_episode ?? item.index_number
       const offset = Number(item.episode_offset ?? 0)
       const epNum = Number(baseEp)
@@ -3622,30 +3762,57 @@ const libraryImport: NodeImpl = {
         continue
       }
       const dest = path.join(root, rel + ext)
+      const destDir = path.dirname(dest)
+      // Match any existing file for this episode by its SxxExx marker, not
+      // just the exact templated name — a `pathTemplate` edit (or a
+      // differently-named legacy import) must still find the old release, or
+      // it gets left behind as a second file Jellyfin indexes as a duplicate
+      // episode.
+      const seasonNum = asNumber(season)
+      const episodeNum = asNumber(episode)
+      const marker =
+        seasonNum != null && episodeNum != null
+          ? `S${String(Math.trunc(seasonNum)).padStart(2, '0')}E${String(Math.trunc(episodeNum)).padStart(2, '0')}`
+          : null
+      const destBasename = path.basename(dest)
+      let existing = fs.existsSync(dest) ? dest : null
+      if (!existing && marker) existing = findSiblingEpisodeFile(destDir, marker, destBasename)
 
-      if (fs.existsSync(dest)) {
+      if (existing) {
         // Nothing there to upgrade → honour the plain skip.
         if (!overwrite) {
-          skipped.push({ ...item, library_path: dest, import_status: 'exists' })
+          skipped.push({ ...item, library_path: existing, import_status: 'exists' })
           continue
         }
         // Overwrite mode: only re-place when the incoming file actually differs
         // from what's already there, so re-runs don't churn (or re-trigger a
         // Jellyfin scan) but a real upgrade does replace the old file.
-        if (sameLibraryFile(src, dest)) {
-          skipped.push({ ...item, library_path: dest, import_status: 'current' })
+        if (sameLibraryFile(src, existing)) {
+          skipped.push({ ...item, library_path: existing, import_status: 'current' })
           continue
         }
       }
-      // dest still present here (with overwrite) means we're replacing a
+      // existing still set here (with overwrite) means we're replacing a
       // superseded release, e.g. swapping the sub-only file for a dual-audio one.
-      const replacing = fs.existsSync(dest)
+      const replacing = !!existing
       if (ctx.dryRun) {
         imported.push({ ...item, library_path: dest, import_method: method, import_status: replacing ? 'replaced' : 'new' })
         continue
       }
       try {
         const used = place(src, dest)
+        // A stale sibling under a different name (an earlier import that used
+        // an older path template) must go once the new file is safely placed,
+        // or it lingers as a permanent duplicate episode.
+        if (existing && existing !== dest) {
+          try {
+            fs.rmSync(existing)
+          } catch (e) {
+            ctx.notes.push(
+              `could not remove stale duplicate ${path.basename(existing)}: ${e instanceof Error ? e.message : String(e)}`,
+            )
+          }
+        }
         if (used === 'copy' && method === 'hardlink') copied++
         const out: FlowItem = { ...item, library_path: dest, import_method: used, import_status: replacing ? 'replaced' : 'new' }
         // Bring subtitle + font sidecars next to the video (same basename).
@@ -3715,6 +3882,19 @@ const jellyfinScan: NodeImpl = {
   },
 }
 
+/** True when a Jellyfin/folder name looks like a torrent release, not a show title.
+ * Those must never be added to Public or treated as franchise folders. */
+export function looksLikeReleaseName(name: string): boolean {
+  const n = name.trim()
+  if (!n) return false
+  if (/^\[[^\]]+\]/.test(n)) return true // [Group] …
+  if (/\b(1080p|720p|480p|2160p|WEB-?DL|WEBRip|BDRip|BluRay|HEVC|x264|x265|AV1|MultiSub|Dual-?Audio)\b/i.test(n)) {
+    return true
+  }
+  if (/\[[0-9A-F]{8}\]/i.test(n)) return true // CRC tag
+  return false
+}
+
 // Resolve a show name to a Jellyfin item id by searching + token-matching. The
 // scan is async, so callers poll until it surfaces.
 async function findJfItemByName(
@@ -3739,10 +3919,13 @@ async function findJfItemByName(
   }
   let best: { id: string; name: string; score: number } | null = null
   for (const it of res.Items ?? []) {
-    const hay = norm(it.Name)
+    const jfName = it.Name || ''
+    // Never promote a release-folder "series" into the Public collection.
+    if (looksLikeReleaseName(jfName)) continue
+    const hay = norm(jfName)
     const present = wanted.filter((t) => hay.includes(t)).length
     const score = present / wanted.length
-    if (!best || score > best.score) best = { id: it.Id, name: it.Name || '', score }
+    if (!best || score > best.score) best = { id: it.Id, name: jfName, score }
   }
   return best && best.score >= threshold ? { id: best.id, name: best.name } : null
 }
@@ -4278,6 +4461,7 @@ const IMPLS: NodeImpl[] = [
   extractSubs,
   fetchSubs,
   muxTracks,
+  trimAudioTracks,
   metadataEnrich,
   dedupe,
   limit,
