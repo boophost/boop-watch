@@ -154,6 +154,7 @@ export async function buildSeriesChase(
   qbitConfigured: boolean
   qbitError: string | null
   qbitSkipped?: boolean
+  portalSeriesId: string | null
 }> {
   const series = getSeriesById(seriesId)
   if (!series) {
@@ -165,6 +166,7 @@ export async function buildSeriesChase(
       torrents: [],
       qbitConfigured: false,
       qbitError: null,
+      portalSeriesId: null,
     }
   }
 
@@ -223,6 +225,7 @@ export async function buildSeriesChase(
     qbitConfigured: status.qbitConfigured,
     qbitError: status.qbitError,
     qbitSkipped: status.qbitSkipped,
+    portalSeriesId: status.portalSeriesId,
   }
 }
 

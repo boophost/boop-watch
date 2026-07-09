@@ -496,6 +496,7 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
       airedCount: chase.airedCount,
       expectedForPipeline: chase.expectedForPipeline,
       nextChase: chase.nextChase,
+      portalSeriesId: chase.portalSeriesId,
     })
   } catch (e) {
     console.error(e)
