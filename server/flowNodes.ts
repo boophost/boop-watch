@@ -3210,6 +3210,95 @@ const muxTracks: NodeImpl = {
   },
 }
 
+// Drops audio tracks outside a language allow-list (stream copy, no
+// re-encode) — e.g. a BD-batch release bundles an incidental German/French
+// dub we never want in the library. Video and subtitle tracks pass through
+// untouched.
+const trimAudioTracks: NodeImpl = {
+  spec: {
+    type: 'enrich.trim-audio-tracks',
+    label: 'Trim audio tracks',
+    category: 'enrich',
+    description:
+      'Drops audio tracks whose language isn\'t in the keep-list (stream copy, no re-encode) — e.g. strips an incidental German/French dub a batch release bundled in, keeping just jpn/eng. Video and subtitle tracks pass through untouched. Files that already only have wanted languages route to "unchanged" without a re-mux.',
+    inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
+    outputs: [
+      { id: 'trimmed', label: 'trimmed' },
+      { id: 'unchanged', label: 'unchanged' },
+    ],
+    config: [
+      { key: 'fileField', label: 'File field', kind: 'text', default: 'file_path' },
+      {
+        key: 'keepLangs',
+        label: 'Languages to keep',
+        kind: 'text',
+        default: 'jpn,eng',
+        help: 'ISO 639-2 codes, comma-separated. Audio tracks with no language tag are always kept (can\'t be classified).',
+      },
+      { key: 'outDir', label: 'Output dir', kind: 'text', default: '', help: 'Where the trimmed file lands. Empty = DATA_DIR/work.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fileField = str(config, 'fileField', 'file_path')
+    const keep = str(config, 'keepLangs', 'jpn,eng').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    const outDir = str(config, 'outDir', '') || path.join(WORK_DIR(), 'work')
+
+    const trimmed: FlowItem[] = []
+    const unchanged: FlowItem[] = []
+
+    for (const item of allInputs(inputs)) {
+      const file = String(item[fileField] ?? '')
+      if (!file) { unchanged.push(item); continue }
+      try {
+        const { stdout } = await execFileP(
+          'ffprobe',
+          ['-v', 'quiet', '-print_format', 'json', '-show_streams', file],
+          { timeout: 60_000, maxBuffer: 8 * 1024 * 1024 },
+        )
+        const streams = (JSON.parse(stdout).streams ?? []) as ProbeStream[]
+        const drop = streams.filter((s) => {
+          if (s.codec_type !== 'audio') return false
+          const lang = (s.tags?.language ?? '').toLowerCase()
+          if (!lang) return false // unclassified — keep rather than risk dropping the only track
+          return !keep.some((k) => lang === k || lang.startsWith(k))
+        })
+        if (drop.length === 0) { unchanged.push(item); continue }
+
+        const ext = path.extname(file)
+        const base = path.basename(file, ext)
+        const dest = path.join(outDir, `${base}.trimmed${ext}`)
+        if (ctx.dryRun) {
+          trimmed.push({
+            ...item,
+            [fileField]: dest,
+            trimmed_audio_langs: drop.map((s) => s.tags?.language || 'und').join(','),
+          })
+          continue
+        }
+        fs.mkdirSync(outDir, { recursive: true })
+        const args = ['-y', '-v', 'error', '-i', file, '-map', '0']
+        for (const s of drop) args.push('-map', `-0:${s.index}`)
+        args.push('-c', 'copy', dest)
+        await execFileP('ffmpeg', args, { timeout: 300_000 })
+        trimmed.push({
+          ...item,
+          [fileField]: dest,
+          trimmed_audio_langs: drop.map((s) => s.tags?.language || 'und').join(','),
+        })
+      } catch (e) {
+        ctx.notes.push(`trim failed for ${path.basename(file)}: ${e instanceof Error ? e.message : String(e)}`)
+        unchanged.push(item)
+      }
+    }
+    ctx.notes.push(
+      ctx.dryRun
+        ? `dry run — would trim ${trimmed.length} file(s), ${unchanged.length} already clean`
+        : `trimmed ${trimmed.length} file(s), ${unchanged.length} already clean`,
+    )
+    return { trimmed, unchanged }
+  },
+}
+
 const metadataEnrich: NodeImpl = {
   spec: {
     type: 'enrich.metadata',
@@ -4372,6 +4461,7 @@ const IMPLS: NodeImpl[] = [
   extractSubs,
   fetchSubs,
   muxTracks,
+  trimAudioTracks,
   metadataEnrich,
   dedupe,
   limit,
