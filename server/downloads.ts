@@ -217,15 +217,15 @@ export interface EpisodeMedia {
   runtimeMin: number | null
 }
 
-/** Media facts for every library episode of a series, keyed for the manage page.
- * Sourced from Jellyfin (one /Shows/{id}/Episodes call with stream fields). */
-export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMedia[]> {
-  if (!jellyfinConfigured) return []
-  const series = getSeriesById(seriesId)
-  if (!series) return []
-
-  // Find the Jellyfin series id: prefer the catalogued portal Series item
-  // (mal_id-tagged by the sync), else the best title-token match.
+/** Resolve a Jellyfin Series id for a catalog row. Prefer portal (mal_id / title),
+ * then fall back to a Jellyfin library search — needed when the show is in the
+ * media library but not (yet) in the Public collection / portal cache. */
+async function resolveJfSeriesId(series: {
+  mal_id: number
+  title: string
+  title_english?: string | null
+  title_japanese?: string | null
+}): Promise<string | null> {
   const variantTokens = [series.title, series.title_english, series.title_japanese]
     .filter((t): t is string => !!t)
     .map(tokens)
@@ -237,9 +237,45 @@ export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMe
     let best = 0
     for (const it of seriesItems) {
       const s = bestOverlap(it.name, variantTokens)
-      if (s > best && s >= 0.5) { best = s; jfSeriesId = it.id }
+      if (s > best && s >= 0.5) {
+        best = s
+        jfSeriesId = it.id
+      }
     }
   }
+  if (jfSeriesId) return jfSeriesId
+
+  // Not on the public portal — search the full Jellyfin library by distinctive
+  // title tokens (same idea as sink.jellyfin-collection's findJfItemByName).
+  const wanted = variantTokens.flat()
+  const searchTerm = [...wanted].sort((a, b) => b.length - a.length)[0]
+  if (!searchTerm) return null
+  try {
+    const res = await jfJson<{ Items?: JfItem[] }>('/Items', {
+      Recursive: 'true',
+      IncludeItemTypes: 'Series',
+      SearchTerm: searchTerm,
+      Limit: 25,
+    })
+    let best: { id: string; score: number } | null = null
+    for (const it of res.Items ?? []) {
+      const s = bestOverlap(it.Name ?? '', variantTokens)
+      if (!best || s > best.score) best = { id: it.Id, score: s }
+    }
+    return best && best.score >= 0.5 ? best.id : null
+  } catch {
+    return null
+  }
+}
+
+/** Media facts for every library episode of a series, keyed for the manage page.
+ * Sourced from Jellyfin (one /Shows/{id}/Episodes call with stream fields). */
+export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMedia[]> {
+  if (!jellyfinConfigured) return []
+  const series = getSeriesById(seriesId)
+  if (!series) return []
+
+  const jfSeriesId = await resolveJfSeriesId(series)
   if (!jfSeriesId) return []
 
   let episodes: JfItem[] = []
@@ -250,6 +286,13 @@ export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMe
     episodes = r.Items ?? []
   } catch {
     return []
+  }
+
+  // Multi-season franchise: a cour catalog row (tvdb_season set) only wants that
+  // season's episodes — IndexNumber alone collides across seasons (S1E1 vs S4E1).
+  const season = series.tvdb_season
+  if (season != null) {
+    episodes = episodes.filter((ep) => ep.ParentIndexNumber === season)
   }
 
   const out: EpisodeMedia[] = episodes.map((ep) => {

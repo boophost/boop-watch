@@ -3504,6 +3504,20 @@ function sanitizeSegments(rel: string): string {
 
 const LIBRARY_DIR = () => process.env.LIBRARY_DIR ?? '/library'
 
+/** Strip cour/season suffixes from a MAL title so multi-season imports land in
+ * the franchise folder ("… as a Slime Season 4" → "… as a Slime") when we have
+ * a tvdb_season to place under Season N. Leaves single-cour titles alone. */
+function franchiseShowName(show: string, hasTvdbSeason: boolean): string {
+  if (!hasTvdbSeason) return show
+  const stripped = show
+    .replace(
+      /\s*(?:[:\-–—]\s*)?(?:\d+(?:st|nd|rd|th)\s+Season|Season\s+\d+|Part\s+\d+|Cour\s+\d+|第\d+期)\s*$/i,
+      '',
+    )
+    .trim()
+  return stripped || show
+}
+
 // "Is the file already in the library this exact release?" Our imports hardlink,
 // so a re-run's src and the dest it produced share an inode — cheap, exact skip
 // that keeps scheduled runs idempotent. Fall back to size for copy-mode imports
@@ -3598,8 +3612,8 @@ const libraryImport: NodeImpl = {
     let copied = 0
     for (const item of allInputs(inputs)) {
       const src = String(item[fileField] ?? '')
-      const show = String(item[showField] ?? item.title ?? item.name ?? item.series_name ?? '').trim()
-      if (!src || !show) {
+      const rawShow = String(item[showField] ?? item.title ?? item.name ?? item.series_name ?? '').trim()
+      if (!src || !rawShow) {
         ctx.notes.push(`skipped an item missing file or show name`)
         skipped.push(item)
         continue
@@ -3611,6 +3625,7 @@ const libraryImport: NodeImpl = {
       // absolute slot within that season (S1 cour 2 → +11). Both fall back to
       // the old behaviour (season 1 / no offset) when unmapped.
       const season = item.tvdb_season ?? item.season ?? item.parent_index_number ?? defaultSeason
+      const show = franchiseShowName(rawShow, item.tvdb_season != null)
       const baseEp = item.torrent_episode ?? item.index_number
       const offset = Number(item.episode_offset ?? 0)
       const epNum = Number(baseEp)
