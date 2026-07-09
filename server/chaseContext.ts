@@ -12,9 +12,12 @@ import {
   getSeriesDownloadStatus,
   getSeriesDownloadStatusBatch,
   getSeriesLibraryMedia,
+  matchSeriesDownloads,
   type SeriesDownloadStatus,
 } from './downloads.js'
+import { getAllPortalItems } from './portalDb.js'
 import {
+  resolveChaseTarget,
   resolveExpected,
   resolveNextChase,
   toPublicChase,
@@ -165,10 +168,24 @@ export async function buildSeriesChase(
     }
   }
 
-  // Expected count is derivable from the local episode cache alone, so the
-  // status fetch can skip the qBittorrent query when everything is on site.
-  const { expected } = resolveExpected(series.episodes, airInfosForSeries(series))
-  const status = await getSeriesDownloadStatus(seriesId, { expected })
+  // Whether there's a due chase target is derivable from the local episode
+  // cache + portal match alone (no qBit needed), so the status fetch can skip
+  // the (slow while busy) qBittorrent query when nothing is chase-worthy —
+  // but only then: a cached episode with no MAL air date (e.g. a mis-totaled
+  // season) can still be a legitimate, currently-downloading target, so the
+  // gate must check the actual next-chase target, not just a raw episode count.
+  const airInfos = airInfosForSeries(series)
+  const siteStub = matchSeriesDownloads(series, getAllPortalItems(), null, {
+    configured: true,
+    error: null,
+  })
+  const target = resolveChaseTarget({
+    episodes: airInfos,
+    siteEpisodes: siteStub.siteEpisodes,
+    malEpisodes: series.episodes,
+    broadcast: parseStoredBroadcast(series.broadcast),
+  })
+  const status = await getSeriesDownloadStatus(seriesId, { skipQbit: !target || !target.due })
   let libraryEpisodes = new Set<number>()
   if (opts.includeLibrary !== false) {
     try {
