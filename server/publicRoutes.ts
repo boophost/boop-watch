@@ -11,9 +11,10 @@ import {
 import { buildWatchData, type Segment } from './watch.js'
 import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
-import { getPortalItem, getPortalEpisodes } from './portalDb.js'
-import { getBanner, getSelectedBanner, findByMalId, type BannerRow } from './db.js'
+import { getPortalItem, getPortalEpisodes, getPortalSeasons } from './portalDb.js'
+import { getBanner, getSelectedBanner, findByMalId, listSeries, type BannerRow, type SeriesRow } from './db.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
+import { fetchAnimeFull, relatedAnimeFromFull } from './jikan.js'
 
 export const publicRouter = Router()
 
@@ -33,6 +34,32 @@ function serveBanner(res: Response, b: Pick<BannerRow, 'url' | 'local_file'>): b
 }
 
 const qStr = (v: unknown): string => (typeof v === 'string' ? v : Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '')
+
+/** Catalog cour for a Public JF series: prefer tvdb_season match, else any title/mal hit. */
+function catalogCourForSeries(
+  pItem: { mal_id: number | null; name: string },
+  season: number | null,
+): SeriesRow | null {
+  const all = listSeries()
+  if (season != null) {
+    const bySeason = all.filter((s) => s.tvdb_season === season)
+    if (pItem.mal_id != null) {
+      const hit = bySeason.find((s) => s.mal_id === pItem.mal_id)
+      if (hit) return hit
+    }
+    // Title overlap against cours mapped to this season.
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    const name = norm(pItem.name)
+    const titled = bySeason.find((s) => {
+      const titles = [s.title, s.title_english].filter(Boolean).map((t) => norm(String(t)))
+      return titles.some((t) => t && (name.includes(t) || t.includes(name)))
+    })
+    if (titled) return titled
+    if (bySeason.length === 1) return bySeason[0]
+  }
+  if (pItem.mal_id != null) return findByMalId(pItem.mal_id) ?? null
+  return null
+}
 
 publicRouter.get('/health', (_req, res) => { res.type('text').send('ok') })
 
@@ -188,7 +215,18 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
   const pItem = getPortalItem(id)
   try {
     if (pItem?.type === 'Series') {
-      const eps = getPortalEpisodes(id)
+      const seasons = getPortalSeasons(id)
+      const seasonParam = qStr(req.query.season)
+      const seasonNum = seasonParam ? Number(seasonParam) : NaN
+      // Default: latest season when multi-season (franchise page); single-season unchanged.
+      const season =
+        Number.isFinite(seasonNum) && seasons.includes(seasonNum)
+          ? seasonNum
+          : seasons.length > 1
+            ? seasons[seasons.length - 1]
+            : (seasons[0] ?? null)
+
+      const eps = getPortalEpisodes(id, season)
       const episodes: Array<{
         id: string | null
         name: string
@@ -202,13 +240,12 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
           ? `S${ep.parent_index_number}·E${ep.index_number}`
           : (ep.index_number != null ? `E${ep.index_number}` : '·'),
       }))
-      const manageRow = pItem.mal_id != null ? findByMalId(pItem.mal_id) : null
+
+      const manageRow = catalogCourForSeries(pItem, season)
       const manageId = manageRow?.id ?? null
       let nextEpisode: ReturnType<typeof toPublicChase> = null
       if (manageId != null) {
         try {
-          // Public path: skip Jellyfin library probe + budget Jikan so a cold
-          // broadcast fetch can't stall / drop the title page (NetworkError).
           const chase = await buildSeriesChase(manageId, {
             includeLibrary: false,
             budgetMs: 2500,
@@ -216,8 +253,8 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
           nextEpisode = toPublicChase(chase.nextChase)
           if (nextEpisode) {
             const stubNum =
-              eps[0]?.parent_index_number != null
-                ? `S${eps[0].parent_index_number}·E${nextEpisode.episode}`
+              season != null
+                ? `S${season}·E${nextEpisode.episode}`
                 : `E${nextEpisode.episode}`
             episodes.push({
               id: null,
@@ -231,6 +268,49 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
           console.error('catalog chase failed —', e)
         }
       }
+
+      // Related seasons/titles from Jikan relations → catalog rows that are on Public.
+      let related: Array<{ id: string; name: string; relation: string; mal_id: number }> = []
+      const malForRelated = manageRow?.mal_id ?? pItem.mal_id
+      if (malForRelated != null) {
+        try {
+          const full = await Promise.race([
+            fetchAnimeFull(malForRelated),
+            new Promise<null>((r) => setTimeout(() => r(null), 2500)),
+          ])
+          if (full) {
+            const links = relatedAnimeFromFull(full)
+            const publicByMal = new Map(
+              getCollectionItems()
+                .map((it) => {
+                  const p = getPortalItem(it.Id)
+                  return p?.mal_id != null ? ([p.mal_id, { id: it.Id, name: p.name || it.Name || '' }] as const) : null
+                })
+                .filter((x): x is readonly [number, { id: string; name: string }] => !!x),
+            )
+            // Also map catalog mal_id → Public JF id via title match when portal mal unset.
+            for (const link of links) {
+              let hit = publicByMal.get(link.mal_id)
+              if (!hit) {
+                const cat = findByMalId(link.mal_id)
+                if (cat) {
+                  const jf = getCollectionItems().find((it) => {
+                    const p = getPortalItem(it.Id)
+                    return p?.mal_id === link.mal_id || (p?.name && cat.title_english && p.name === cat.title_english)
+                  })
+                  if (jf) hit = { id: jf.Id, name: jf.Name || cat.title_english || cat.title }
+                }
+              }
+              if (hit && hit.id !== id) {
+                related.push({ id: hit.id, name: hit.name, relation: link.relation, mal_id: link.mal_id })
+              }
+            }
+          }
+        } catch (e) {
+          console.error('related seasons failed —', e)
+        }
+      }
+
       res.json({
         type: 'series',
         id,
@@ -239,8 +319,11 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
         genres: pItem.genres ? JSON.parse(pItem.genres) : [],
         year: pItem.production_year || null,
         episodes,
+        seasons,
+        season,
         manageId,
         nextEpisode,
+        related,
       })
     } else if (pItem) {
       res.json({
@@ -293,7 +376,12 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
   if (item.Type === 'Episode' && item.SeriesId) {
     try {
       const e = await jfJson<{ Items?: JfItem[] }>(`/Shows/${item.SeriesId}/Episodes`)
-      siblings = (e.Items || []).filter((ep) => getPlayableIds().has(ep.Id))
+      const season = item.ParentIndexNumber
+      siblings = (e.Items || []).filter(
+        (ep) =>
+          getPlayableIds().has(ep.Id) &&
+          (season == null || ep.ParentIndexNumber === season),
+      )
     } catch { /* sidebar is optional */ }
   }
 
