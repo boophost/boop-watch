@@ -28,9 +28,10 @@ interface FanartTvResponse {
   seasonthumb?: FanartArt[]
 }
 
-// fanart.tv serves a downscaled copy of every asset under /preview.
+// fanart.tv mirrors every asset as a ~10KB thumbnail: assets.fanart.tv/fanart/x.jpg
+// is served at assets.fanart.tv/preview/x.jpg. (It ignores resize query params.)
 function previewUrl(url: string): string | null {
-  return url.includes('/fanart/') ? url.replace('/fanart/', '/preview/fanart/') : null
+  return url.includes('/fanart/') ? url.replace('/fanart/', '/preview/') : null
 }
 
 function toImages(art: FanartArt[] | undefined, seasonScoped: boolean): FanartImage[] {
