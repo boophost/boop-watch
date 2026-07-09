@@ -3534,6 +3534,27 @@ function sameLibraryFile(src: string, dest: string): boolean {
   }
 }
 
+const VIDEO_EXTS = new Set(['.mkv', '.mp4', '.m4v', '.avi', '.webm'])
+
+/** Find an already-imported video for this season/episode by its SxxExx
+ * marker, regardless of the rest of the filename — so a `pathTemplate` edit
+ * (or a differently-named legacy import) still finds the old release instead
+ * of treating it as new and leaving two files for one episode. */
+function findSiblingEpisodeFile(destDir: string, marker: string, excludeBasename: string): string | null {
+  let entries: string[]
+  try {
+    entries = fs.readdirSync(destDir)
+  } catch {
+    return null
+  }
+  for (const name of entries) {
+    if (name === excludeBasename) continue
+    if (!VIDEO_EXTS.has(path.extname(name).toLowerCase())) continue
+    if (name.includes(marker)) return path.join(destDir, name)
+  }
+  return null
+}
+
 const libraryImport: NodeImpl = {
   spec: {
     type: 'sink.library-import',
@@ -3652,30 +3673,57 @@ const libraryImport: NodeImpl = {
         continue
       }
       const dest = path.join(root, rel + ext)
+      const destDir = path.dirname(dest)
+      // Match any existing file for this episode by its SxxExx marker, not
+      // just the exact templated name — a `pathTemplate` edit (or a
+      // differently-named legacy import) must still find the old release, or
+      // it gets left behind as a second file Jellyfin indexes as a duplicate
+      // episode.
+      const seasonNum = asNumber(season)
+      const episodeNum = asNumber(episode)
+      const marker =
+        seasonNum != null && episodeNum != null
+          ? `S${String(Math.trunc(seasonNum)).padStart(2, '0')}E${String(Math.trunc(episodeNum)).padStart(2, '0')}`
+          : null
+      const destBasename = path.basename(dest)
+      let existing = fs.existsSync(dest) ? dest : null
+      if (!existing && marker) existing = findSiblingEpisodeFile(destDir, marker, destBasename)
 
-      if (fs.existsSync(dest)) {
+      if (existing) {
         // Nothing there to upgrade → honour the plain skip.
         if (!overwrite) {
-          skipped.push({ ...item, library_path: dest, import_status: 'exists' })
+          skipped.push({ ...item, library_path: existing, import_status: 'exists' })
           continue
         }
         // Overwrite mode: only re-place when the incoming file actually differs
         // from what's already there, so re-runs don't churn (or re-trigger a
         // Jellyfin scan) but a real upgrade does replace the old file.
-        if (sameLibraryFile(src, dest)) {
-          skipped.push({ ...item, library_path: dest, import_status: 'current' })
+        if (sameLibraryFile(src, existing)) {
+          skipped.push({ ...item, library_path: existing, import_status: 'current' })
           continue
         }
       }
-      // dest still present here (with overwrite) means we're replacing a
+      // existing still set here (with overwrite) means we're replacing a
       // superseded release, e.g. swapping the sub-only file for a dual-audio one.
-      const replacing = fs.existsSync(dest)
+      const replacing = !!existing
       if (ctx.dryRun) {
         imported.push({ ...item, library_path: dest, import_method: method, import_status: replacing ? 'replaced' : 'new' })
         continue
       }
       try {
         const used = place(src, dest)
+        // A stale sibling under a different name (an earlier import that used
+        // an older path template) must go once the new file is safely placed,
+        // or it lingers as a permanent duplicate episode.
+        if (existing && existing !== dest) {
+          try {
+            fs.rmSync(existing)
+          } catch (e) {
+            ctx.notes.push(
+              `could not remove stale duplicate ${path.basename(existing)}: ${e instanceof Error ? e.message : String(e)}`,
+            )
+          }
+        }
         if (used === 'copy' && method === 'hardlink') copied++
         const out: FlowItem = { ...item, library_path: dest, import_method: used, import_status: replacing ? 'replaced' : 'new' }
         // Bring subtitle + font sidecars next to the video (same basename).
