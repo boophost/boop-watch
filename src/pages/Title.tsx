@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
@@ -96,13 +96,18 @@ function DetailShell({
 
 export default function Title() {
   const { id = '' } = useParams()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const seasonQ = searchParams.get('season')
+  const seasonParam = seasonQ != null && seasonQ !== '' ? Number(seasonQ) : null
   const [data, setData] = useState<TitleDetail | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
     setData(null); setError('')
-    getTitle(id).then(setData).catch((e: Error) => setError(e.message))
-  }, [id])
+    getTitle(id, seasonParam != null && Number.isFinite(seasonParam) ? seasonParam : null)
+      .then(setData)
+      .catch((e: Error) => setError(e.message))
+  }, [id, seasonParam])
 
   if (error) {
     return <PortalLayout crumb={BackCrumb}><main><p className="empty">{error}</p></main></PortalLayout>
@@ -118,9 +123,14 @@ export default function Title() {
 
   if (data.type === 'series') {
     const playableCount = data.episodes.filter((ep) => ep.id).length
+    const seasons = data.seasons ?? []
+    const season = data.season ?? null
     const badges = (
       <>
         <span className="badge"><span className="dot dot-info" />Series</span>
+        {season != null ? (
+          <span className="badge badge-mono badge-square">S{season}</span>
+        ) : null}
         <span className="badge badge-mono badge-square">{playableCount} eps</span>
         {data.nextEpisode ? (
           <span className="badge ep-chase">
@@ -132,6 +142,38 @@ export default function Title() {
     return (
       <PortalLayout crumb={BackCrumb}>
         <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview} manageId={data.manageId}>
+          {seasons.length > 1 ? (
+            <div className="ep-head" style={{ marginBottom: 8 }}>
+              <h2 className="k-h3">Season</h2>
+              <div className="spacer" />
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {seasons.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`btn ${season === s ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ padding: '4px 12px', fontSize: 13 }}
+                    onClick={() => setSearchParams(s === seasons[seasons.length - 1] ? {} : { season: String(s) })}
+                  >
+                    S{s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {(data.related?.length ?? 0) > 0 ? (
+            <div className="panel" style={{ padding: 14, marginBottom: 16 }}>
+              <div className="h-eyebrow">Related</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                {data.related!.map((r) => (
+                  <Link key={r.id} className="chip" to={`/series/${r.id}`}>
+                    {r.name}
+                    <span style={{ opacity: 0.55, marginLeft: 6 }}>{r.relation}</span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="ep-head">
             <h2 className="k-h3">Episodes</h2>
             <span className="badge badge-mono">{playableCount}</span>

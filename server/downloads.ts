@@ -59,6 +59,17 @@ function parseEpisode(name: string): number | null {
   return null
 }
 
+/** Season from a release name ("S04E01", "Season 4"). Null when unmarked. */
+function parseSeason(name: string): number | null {
+  let m = name.match(/\bS(\d{1,2})\s*E\d{1,4}\b/i)
+  if (m) return Number(m[1])
+  m = name.match(/\bSeason\s*(\d{1,2})\b/i)
+  if (m) return Number(m[1])
+  m = name.match(/\b(\d{1,2})(?:st|nd|rd|th)\s+Season\b/i)
+  if (m) return Number(m[1])
+  return null
+}
+
 export interface SeriesDownload {
   hash: string
   name: string
@@ -91,17 +102,26 @@ function variantTokensForSeries(series: {
     .filter((t) => t.length > 0)
 }
 
-/** Match site episodes + torrents for one series against shared portal/qBit snapshots. */
+/** Match site episodes + torrents for one series against shared portal/qBit snapshots.
+ * When `tvdb_season` is set (a cour in a multi-season franchise), only that JF
+ * season's episodes count as on-site — IndexNumber alone collides across seasons. */
 export function matchSeriesDownloads(
-  series: { title: string; title_english?: string | null; title_japanese?: string | null },
+  series: {
+    title: string
+    title_english?: string | null
+    title_japanese?: string | null
+    tvdb_season?: number | null
+  },
   portalItems: ReturnType<typeof getAllPortalItems>,
   rawTorrents: QbitTorrent[] | null,
   qbit: { configured: boolean; error: string | null },
 ): SeriesDownloadStatus {
   const variantTokens = variantTokensForSeries(series)
+  const season = series.tvdb_season ?? null
   const siteEpisodes: Record<string, string> = {}
   for (const it of portalItems) {
     if (it.type !== 'Episode' || it.index_number == null) continue
+    if (season != null && it.parent_index_number !== season) continue
     if (bestOverlap(it.series_name ?? it.name, variantTokens) >= 0.5) {
       siteEpisodes[String(it.index_number)] = it.id
     }
@@ -112,7 +132,15 @@ export function matchSeriesDownloads(
   }
 
   const torrents: SeriesDownload[] = rawTorrents
-    .filter((t) => bestOverlap(t.name, variantTokens) >= 0.6)
+    .filter((t) => {
+      if (bestOverlap(t.name, variantTokens) < 0.6) return false
+      // Cour rows: drop releases tagged for a different season (S03 vs S04).
+      if (season != null) {
+        const s = parseSeason(t.name)
+        if (s != null && s !== season) return false
+      }
+      return true
+    })
     .map((t) => ({
       hash: t.hash,
       name: t.name,
@@ -154,7 +182,13 @@ export async function getSeriesDownloadStatus(seriesId: number): Promise<SeriesD
 
 /** One portal scan + one qBit list, then per-series matches (for list chase chips). */
 export async function getSeriesDownloadStatusBatch(
-  seriesList: Array<{ id: number; title: string; title_english?: string | null; title_japanese?: string | null }>,
+  seriesList: Array<{
+    id: number
+    title: string
+    title_english?: string | null
+    title_japanese?: string | null
+    tvdb_season?: number | null
+  }>,
 ): Promise<Map<number, SeriesDownloadStatus>> {
   const portalItems = getAllPortalItems()
   const out = new Map<number, SeriesDownloadStatus>()

@@ -3618,6 +3618,13 @@ const libraryImport: NodeImpl = {
         skipped.push(item)
         continue
       }
+      // Never create a library folder from a torrent release name — that becomes
+      // a junk Jellyfin "series" (Erai-raws / Yameii folders) and can leak into Public.
+      if (looksLikeReleaseName(rawShow) && item.tvdb_season == null && !item.title_english && !item.title) {
+        ctx.notes.push(`skipped release-named show folder: ${rawShow.slice(0, 80)}`)
+        skipped.push(item)
+        continue
+      }
       const ext = path.extname(src)
       // Multi-season placement: tvdb_season (set by enrich.metadata from the
       // season-map dataset) is the Jellyfin season number this cour belongs to,
@@ -3738,6 +3745,19 @@ const jellyfinScan: NodeImpl = {
   },
 }
 
+/** True when a Jellyfin/folder name looks like a torrent release, not a show title.
+ * Those must never be added to Public or treated as franchise folders. */
+export function looksLikeReleaseName(name: string): boolean {
+  const n = name.trim()
+  if (!n) return false
+  if (/^\[[^\]]+\]/.test(n)) return true // [Group] …
+  if (/\b(1080p|720p|480p|2160p|WEB-?DL|WEBRip|BDRip|BluRay|HEVC|x264|x265|AV1|MultiSub|Dual-?Audio)\b/i.test(n)) {
+    return true
+  }
+  if (/\[[0-9A-F]{8}\]/i.test(n)) return true // CRC tag
+  return false
+}
+
 // Resolve a show name to a Jellyfin item id by searching + token-matching. The
 // scan is async, so callers poll until it surfaces.
 async function findJfItemByName(
@@ -3762,10 +3782,13 @@ async function findJfItemByName(
   }
   let best: { id: string; name: string; score: number } | null = null
   for (const it of res.Items ?? []) {
-    const hay = norm(it.Name)
+    const jfName = it.Name || ''
+    // Never promote a release-folder "series" into the Public collection.
+    if (looksLikeReleaseName(jfName)) continue
+    const hay = norm(jfName)
     const present = wanted.filter((t) => hay.includes(t)).length
     const score = present / wanted.length
-    if (!best || score > best.score) best = { id: it.Id, name: it.Name || '', score }
+    if (!best || score > best.score) best = { id: it.Id, name: jfName, score }
   }
   return best && best.score >= threshold ? { id: best.id, name: best.name } : null
 }
