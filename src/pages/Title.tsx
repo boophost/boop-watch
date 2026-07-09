@@ -11,9 +11,20 @@ import { track } from '@/lib/analytics'
 const initials = (n: string) =>
   String(n || '?').split(/[^a-z0-9]/i).filter(Boolean).slice(0, 2).map((s) => s[0]).join('').toUpperCase()
 
+// Poster image that hides itself on error but recovers when the src changes
+// (a removed element would leave the fallback stuck across season swaps).
+function PosterImg({ src }: { src: string }) {
+  const [ok, setOk] = useState(true)
+  useEffect(() => { setOk(true) }, [src])
+  return ok ? <img src={src} alt="" onError={() => setOk(false)} /> : null
+}
+
 function DetailShell({
-  id, name, badges, sub, overview, manageId, children,
-}: { id: string; name: string; badges: ReactNode; sub?: string; overview?: string; manageId?: number | null; children: ReactNode }) {
+  id, name, badges, sub, overview, manageId, poster, backdrop, children,
+}: {
+  id: string; name: string; badges: ReactNode; sub?: string; overview?: string
+  manageId?: number | null; poster?: string; backdrop?: string; children: ReactNode
+}) {
   const { user } = useAuth()
   const isAdmin = user?.isAdmin ?? false
   const [isSaved, setIsSaved] = useState(false)
@@ -49,7 +60,7 @@ function DetailShell({
   return (
     <main>
       <div className="hero">
-        <div className="backdrop" style={{ backgroundImage: `url('${backdropUrl(id)}')` }} />
+        <div className="backdrop" style={{ backgroundImage: `url('${backdrop ?? backdropUrl(id)}')` }} />
         <div className="scrim" />
       </div>
       <div className="series-head">
@@ -57,7 +68,7 @@ function DetailShell({
           <div className="poster-fallback" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', fontFamily: 'var(--font-mono)', color: 'oklch(1 0 0 / 55%)' }}>
             {initials(name)}
           </div>
-          <img src={imgUrl(id)} alt="" onError={(e) => e.currentTarget.remove()} />
+          <PosterImg src={poster ?? imgUrl(id)} />
         </div>
         <div style={{ paddingBottom: 6 }}>
           <div className="series-meta-row">{badges}</div>
@@ -100,13 +111,22 @@ export default function Title() {
   const seasonQ = searchParams.get('season')
   const seasonParam = seasonQ != null && seasonQ !== '' ? Number(seasonQ) : null
   const [data, setData] = useState<TitleDetail | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // Only a title change blanks the page; a season swap keeps the current data
+  // on screen (dimmed) while the new season loads, so nothing unmounts — the
+  // hero, poster, and the save button's state all stay put.
+  useEffect(() => { setData(null) }, [id])
+
   useEffect(() => {
-    setData(null); setError('')
+    let cancelled = false
+    setLoading(true); setError('')
     getTitle(id, seasonParam != null && Number.isFinite(seasonParam) ? seasonParam : null)
-      .then(setData)
-      .catch((e: Error) => setError(e.message))
+      .then((d) => { if (!cancelled) setData(d) })
+      .catch((e: Error) => { if (!cancelled) setError(e.message) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [id, seasonParam])
 
   if (error) {
@@ -140,10 +160,15 @@ export default function Title() {
         ) : null}
       </>
     )
+    const multiSeason = seasonList.length > 1
     return (
       <PortalLayout crumb={BackCrumb}>
-        <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview} manageId={data.manageId}>
-          {seasonList.length > 1 ? (
+        <DetailShell
+          id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview} manageId={data.manageId}
+          poster={multiSeason && season != null ? seasonImgUrl(data.id, season) : undefined}
+          backdrop={multiSeason && season != null ? backdropUrl(data.id, season) : undefined}
+        >
+          {multiSeason ? (
             <div className="season-strip">
               {seasonList.map((s) => (
                 <button
@@ -168,7 +193,7 @@ export default function Title() {
             <span className="badge badge-mono">{playableCount}</span>
             <div className="spacer" />
           </div>
-          <div className="panel" style={{ overflow: 'hidden' }}>
+          <div className="panel" style={{ overflow: 'hidden', opacity: loading ? 0.55 : 1, transition: 'opacity .15s' }}>
             <div className="eplist">
               {data.episodes.length === 0
                 ? <p className="empty">No episodes found.</p>
