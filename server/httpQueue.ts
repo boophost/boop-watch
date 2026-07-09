@@ -48,6 +48,7 @@ type ServiceKey =
   | 'tosho'
   | 'anilist'
   | 'kitsu'
+  | 'fanart'
   | 'jimaku'
   | 'aniskip'
   | 'other'
@@ -60,6 +61,7 @@ const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   anilist: { minGapMs: 350, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   kitsu: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
+  fanart: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   jimaku: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 2 },
   aniskip: { minGapMs: 350, concurrency: 2, timeoutMs: 5_000, retries: 1 },
   other: { minGapMs: 250, concurrency: 2, timeoutMs: 20_000, retries: 1 },
@@ -216,6 +218,7 @@ const HOST_KEYS: Array<[RegExp, ServiceKey]> = [
   [/(^|\.)animetosho\.\w+$/i, 'tosho'],
   [/(^|\.)anilist\.co$/i, 'anilist'],
   [/(^|\.)kitsu\.(io|app)$/i, 'kitsu'],
+  [/(^|\.)fanart\.tv$/i, 'fanart'],
   [/(^|\.)jimaku\.cc$/i, 'jimaku'],
   [/(^|\.)aniskip\.com$/i, 'aniskip'],
 ]
