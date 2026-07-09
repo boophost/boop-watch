@@ -504,6 +504,45 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
   }
 })
 
+// Reconcile the import ledger against the library on disk. `unclaimed` files
+// have no recorded provenance — they predate the ledger or were placed by hand,
+// and they are what a cleanup must quarantine rather than guess about.
+// `missing` rows point at a file that is gone; `rewritten` ones at a file whose
+// inode changed under us (a trim/mux re-encode landing as a copy).
+app.get('/api/library/ledger', requireAuth, requireAdmin, (_req, res) => {
+  const root = process.env.LIBRARY_DIR ?? '/library'
+  const rows = seriesDb.listLibraryFiles()
+  const onDisk = new Set<string>()
+  const walk = (dir: string) => {
+    let entries: fs.Dirent[]
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) walk(p)
+      else if (/\.(mkv|mp4|m4v|avi)$/i.test(e.name)) onDisk.add(path.relative(root, p))
+    }
+  }
+  walk(root)
+
+  const claimed = new Set(rows.map((r) => r.path))
+  const missing: string[] = []
+  const rewritten: string[] = []
+  for (const r of rows) {
+    if (!onDisk.has(r.path)) { missing.push(r.path); continue }
+    try {
+      if (r.inode != null && fs.statSync(path.join(root, r.path)).ino !== r.inode) rewritten.push(r.path)
+    } catch { /* raced with a delete */ }
+  }
+  const unclaimed = [...onDisk].filter((p) => !claimed.has(p)).sort()
+  res.json({
+    root,
+    counts: { onDisk: onDisk.size, recorded: rows.length, unclaimed: unclaimed.length, missing: missing.length, rewritten: rewritten.length },
+    unclaimed,
+    missing,
+    rewritten,
+  })
+})
+
 // Per-episode media facts for the files actually in the library (codec, audio
 // tracks, resolution, size) — what the mux/import produced, not the torrents.
 app.get('/api/series/:id/library', requireAuth, async (req, res) => {
