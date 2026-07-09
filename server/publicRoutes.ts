@@ -35,30 +35,59 @@ function serveBanner(res: Response, b: Pick<BannerRow, 'url' | 'local_file'>): b
 
 const qStr = (v: unknown): string => (typeof v === 'string' ? v : Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '')
 
-/** Catalog cour for a Public JF series: prefer tvdb_season match, else any title/mal hit. */
+const normTitle = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+
+/** True when a catalog title is clearly the same franchise as the portal name. */
+function titleMatchesFranchise(portalName: string, catalog: SeriesRow): boolean {
+  const name = normTitle(portalName)
+  if (!name) return false
+  for (const raw of [catalog.title, catalog.title_english]) {
+    if (!raw) continue
+    const t = normTitle(raw)
+    if (!t) continue
+    if (name === t || name.includes(t) || t.includes(name)) return true
+  }
+  return false
+}
+
+/**
+ * Catalog cour for a Public JF series.
+ * Always anchor to this franchise first (mal_id / title / shared tvdb_id) —
+ * never pick another show that merely shares the same `tvdb_season` number
+ * (Slime ?season=2 must not resolve to Mushoku Part 2).
+ */
 function catalogCourForSeries(
   pItem: { mal_id: number | null; name: string },
   season: number | null,
 ): SeriesRow | null {
   const all = listSeries()
-  if (season != null) {
-    const bySeason = all.filter((s) => s.tvdb_season === season)
-    if (pItem.mal_id != null) {
-      const hit = bySeason.find((s) => s.mal_id === pItem.mal_id)
-      if (hit) return hit
+
+  let franchise: SeriesRow[] = []
+  if (pItem.mal_id != null) {
+    const seed = findByMalId(pItem.mal_id)
+    if (seed?.tvdb_id != null) {
+      franchise = all.filter((s) => s.tvdb_id === seed.tvdb_id)
+    } else if (seed) {
+      franchise = [seed]
     }
-    // Title overlap against cours mapped to this season.
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-    const name = norm(pItem.name)
-    const titled = bySeason.find((s) => {
-      const titles = [s.title, s.title_english].filter(Boolean).map((t) => norm(String(t)))
-      return titles.some((t) => t && (name.includes(t) || t.includes(name)))
-    })
-    if (titled) return titled
-    if (bySeason.length === 1) return bySeason[0]
   }
+  if (franchise.length === 0) {
+    franchise = all.filter((s) => titleMatchesFranchise(pItem.name, s))
+    // Expand to every cour sharing a tvdb_id with a title hit.
+    const tvdbIds = new Set(franchise.map((s) => s.tvdb_id).filter((id): id is number => id != null))
+    if (tvdbIds.size > 0) {
+      franchise = all.filter((s) => s.tvdb_id != null && tvdbIds.has(s.tvdb_id))
+    }
+  }
+
+  if (season != null && franchise.length > 0) {
+    const cour = franchise.find((s) => s.tvdb_season === season)
+    // Season not in catalog (e.g. Slime S1–S3 while only S4 is indexed) → no cour.
+    return cour ?? null
+  }
+
   if (pItem.mal_id != null) return findByMalId(pItem.mal_id) ?? null
-  return null
+  return franchise[0] ?? null
 }
 
 publicRouter.get('/health', (_req, res) => { res.type('text').send('ok') })
