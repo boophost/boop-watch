@@ -506,7 +506,7 @@
   /* Full-bleed: span the whole content pane (100cqw via .shell-main), not just
      main's centered 1240px column — the banner reaches both edges on wide
      screens. Falls back to the old padding-cancel margins without cq support. */
-  & .hero { position: relative; height: 300px; margin: -36px -32px 0; overflow: hidden; }
+  & .hero { position: relative; height: 380px; margin: -36px -32px 0; overflow: hidden; }
   @supports (width: 1cqw) {
     & .hero { margin: -36px calc((100% - 100cqw) / 2) 0; }
   }
@@ -525,7 +525,6 @@
   /* Incoming banner layer: preloaded, then faded in over the current one. */
   & .hero .backdrop-fade { animation: backdrop-in .45s ease forwards; }
   & .hero .scrim { position: absolute; inset: 0; background:
-    repeating-linear-gradient(135deg, transparent 0 18px, oklch(1 0 0 / 2.5%) 18px 19px),
     linear-gradient(to bottom, oklch(0.145 0.008 285 / 35%) 0%, var(--bg) 96%); }
   & .series-head { display: grid; grid-template-columns: 200px 1fr; gap: 28px; align-items: end; margin: -150px 0 28px; position: relative; }
   & .series-poster { position: relative; aspect-ratio: 2/3; border-radius: 12px; overflow: hidden;
@@ -560,7 +559,7 @@
   }
   @media (max-width: 760px) {
     & main { padding: 28px 18px 100px; }
-    & .hero { margin: -28px -18px 0; height: 220px; }
+    & .hero { margin: -28px -18px 0; height: 280px; }
     @supports (width: 1cqw) {
       & .hero { margin: -28px calc((100% - 100cqw) / 2) 0; }
     }
