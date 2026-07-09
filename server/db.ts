@@ -458,6 +458,11 @@ export function addBanner(b: {
   return getBanner(Number(info.lastInsertRowid))!
 }
 
+/** Record the on-disk copy of a candidate's art (see banners.ts `cacheBannerFile`). */
+export function setBannerLocalFile(bannerId: number, local_file: string): void {
+  getDb().prepare('UPDATE series_banners SET local_file = ? WHERE id = ?').run(local_file, bannerId)
+}
+
 /** Make one candidate the selected banner for its series (clears the rest). */
 export function selectBanner(mal_id: number, bannerId: number): boolean {
   const db = getDb()
