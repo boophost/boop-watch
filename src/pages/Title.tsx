@@ -30,12 +30,12 @@ function CrossfadeBackdrop({ src }: { src: string }) {
 
   return (
     <>
-      <div className="backdrop" style={{ backgroundImage: `url('${shown}')` }} />
+      <div className="backdrop" style={{ '--backdrop-img': `url('${shown}')` } as React.CSSProperties} />
       {incoming != null && (
         <div
           key={incoming}
           className="backdrop backdrop-fade"
-          style={{ backgroundImage: `url('${incoming}')` }}
+          style={{ '--backdrop-img': `url('${incoming}')` } as React.CSSProperties}
           onAnimationEnd={() => { setShown(incoming); setIncoming(null) }}
         />
       )}

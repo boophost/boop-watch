@@ -502,7 +502,18 @@
 
   /* Series hero */
   & .hero { position: relative; height: 300px; margin: -36px -32px 0; overflow: hidden; }
-  & .hero .backdrop { position: absolute; inset: 0; background-size: cover; background-position: center 25%; filter: saturate(1.25) brightness(0.9); transform: scale(1.06); }
+  /* Banner = two stacked paints of the same image (--backdrop-img): a blurred
+     cover fill behind, and the sharp banner at full width on top — so wide art
+     is never cropped at the sides, and anything it doesn't reach (short
+     banners, portrait fallbacks) shows the blur instead of a hard edge. */
+  & .hero .backdrop { position: absolute; inset: 0; }
+  & .hero .backdrop::before { content: ""; position: absolute; inset: 0;
+    background-image: var(--backdrop-img); background-size: cover; background-position: center 25%;
+    filter: blur(28px) saturate(1.3) brightness(0.55); transform: scale(1.15); }
+  & .hero .backdrop::after { content: ""; position: absolute; inset: 0;
+    background-image: var(--backdrop-img); background-size: 100% auto;
+    background-position: center top; background-repeat: no-repeat;
+    filter: saturate(1.25) brightness(0.9); }
   /* Incoming banner layer: preloaded, then faded in over the current one. */
   & .hero .backdrop-fade { animation: backdrop-in .45s ease forwards; }
   & .hero .scrim { position: absolute; inset: 0; background:
