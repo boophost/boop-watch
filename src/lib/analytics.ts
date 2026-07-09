@@ -1,4 +1,10 @@
 import posthog from 'posthog-js'
+// Bundle the replay recorder instead of letting posthog-js lazy-load
+// `/ingest/static/posthog-recorder.js` — filter lists match that filename
+// regardless of origin, so Firefox/Opera never recorded. Must be this path:
+// `dist/recorder` registers only rrweb, and the SDK fetches unless
+// `initSessionRecording` is registered too.
+import 'posthog-js/dist/posthog-recorder'
 import { isTrackedPortalPath, pathnameOf } from './analyticsPaths'
 
 const env = (window as { ENV?: Record<string, string> }).ENV || {}
