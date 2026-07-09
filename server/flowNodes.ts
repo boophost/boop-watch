@@ -3644,6 +3644,58 @@ function findSiblingEpisodeFile(destDir: string, marker: string, excludeBasename
   return null
 }
 
+/**
+ * Two imports of the same show can render different folder names: `{show}
+ * ({production_year})` carries the *cour's* year onto a *franchise* folder, so
+ * Slime S1 wants "… Slime (2018)" and S4 wants "… Slime (2026)" — and when the
+ * metadata hasn't resolved, `sanitizeSegments` drops the empty "()" and yields a
+ * third variant. `Season {season:2}` likewise renders "Season 04" where an older
+ * import wrote "Season 4". Normalising those away lets us reuse the directory
+ * that already holds the show instead of splitting it in two.
+ */
+function normalizeDirName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\s*\((?:19|20)\d{2}\)\s*$/, '')
+    .replace(/^season\s*0*(\d+)$/, 'season $1')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** The directory to use for one templated segment: an existing directory that
+ * differs only by a `(year)` suffix or season padding, else `wanted` itself. */
+function resolveDirSegment(parent: string, wanted: string): string {
+  if (fs.existsSync(path.join(parent, wanted))) return wanted
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(parent, { withFileTypes: true })
+  } catch {
+    return wanted
+  }
+  const target = normalizeDirName(wanted)
+  // Sorted so the choice is deterministic while a duplicate pair still exists;
+  // the un-suffixed legacy name sorts before its "… (2026)" twin.
+  const matches = entries
+    .filter((e) => e.isDirectory() && normalizeDirName(e.name) === target)
+    .map((e) => e.name)
+    .sort()
+  return matches[0] ?? wanted
+}
+
+/** Re-point a templated relative path at the directories already on disk. */
+function resolveExistingPath(root: string, rel: string): string {
+  const parts = rel.split('/')
+  const file = parts.pop() as string
+  let dir = root
+  const resolved: string[] = []
+  for (const seg of parts) {
+    const use = resolveDirSegment(dir, seg)
+    resolved.push(use)
+    dir = path.join(dir, use)
+  }
+  return [...resolved, file].join('/')
+}
+
 const libraryImport: NodeImpl = {
   spec: {
     type: 'sink.library-import',
@@ -3717,6 +3769,21 @@ const libraryImport: NodeImpl = {
       }
     }
 
+    // One catalog read per run, not per item.
+    let catalogRows: ReturnType<typeof listSeries> | null = null
+    const catalog = () => (catalogRows ??= listSeries())
+
+    /** True when this mal_id is one cour of a multi-season franchise (siblings
+     * share its tvdb_id). Guessing Season 1 for such a file buries a later
+     * cour's episodes under the wrong season — better to skip and say so. */
+    const isMultiCourFranchise = (malId: unknown): boolean => {
+      const mal = asNumber(malId)
+      if (mal == null) return false
+      const row = catalog().find((s) => s.mal_id === mal)
+      if (!row || row.tvdb_id == null) return false
+      return catalog().filter((s) => s.tvdb_id === row.tvdb_id).length > 1
+    }
+
     const imported: FlowItem[] = []
     const skipped: FlowItem[] = []
     let copied = 0
@@ -3741,7 +3808,13 @@ const libraryImport: NodeImpl = {
       // and episode_offset shifts a cour's per-cour episode numbers to their
       // absolute slot within that season (S1 cour 2 → +11). Both fall back to
       // the old behaviour (season 1 / no offset) when unmapped.
-      const season = item.tvdb_season ?? item.season ?? item.parent_index_number ?? defaultSeason
+      const knownSeason = item.tvdb_season ?? item.season ?? item.parent_index_number
+      if (knownSeason == null && isMultiCourFranchise(item.mal_id)) {
+        ctx.notes.push(`skipped "${rawShow.slice(0, 60)}" — multi-season franchise with no resolved season`)
+        skipped.push({ ...item, import_status: 'unresolved-season' })
+        continue
+      }
+      const season = knownSeason ?? defaultSeason
       const show = franchiseShowName(rawShow, item.tvdb_season != null)
       const baseEp = item.torrent_episode ?? item.index_number
       const offset = Number(item.episode_offset ?? 0)
@@ -3755,12 +3828,15 @@ const libraryImport: NodeImpl = {
         season,
         torrent_episode: episode,
       }
-      const rel = sanitizeSegments(fillPathTemplate(tpl, ctxItem))
-      if (!rel) {
+      const templated = sanitizeSegments(fillPathTemplate(tpl, ctxItem))
+      if (!templated) {
         ctx.notes.push(`skipped "${show}" — template produced an empty path`)
         skipped.push(item)
         continue
       }
+      // Land in the folder that already holds this show/season rather than the
+      // one the template happens to name today.
+      const rel = resolveExistingPath(root, templated)
       const dest = path.join(root, rel + ext)
       const destDir = path.dirname(dest)
       // Match any existing file for this episode by its SxxExx marker, not
