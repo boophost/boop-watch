@@ -20,9 +20,32 @@ export interface QbitTorrent {
   num_leechs: number
   eta: number
   category: string
+  tags?: string
   added_on: number
   content_path?: string
   save_path?: string
+}
+
+/**
+ * Identity we stamped on the torrent when we queued it (`mal:59970`, `season:4`,
+ * `ep:5`). Reading it back beats re-deriving the cour from a release name — that
+ * is how "…4th Season - 05" ended up matched to the season-1 catalog row.
+ */
+export function parseTorrentTags(tags: string | undefined): {
+  tag_mal_id: number | null
+  tag_season: number | null
+  tag_episode: number | null
+} {
+  const out = { tag_mal_id: null as number | null, tag_season: null as number | null, tag_episode: null as number | null }
+  for (const raw of (tags ?? '').split(',')) {
+    const [k, v] = raw.trim().split(':')
+    const n = Number(v)
+    if (!Number.isFinite(n)) continue
+    if (k === 'mal') out.tag_mal_id = n
+    else if (k === 'season') out.tag_season = n
+    else if (k === 'ep') out.tag_episode = n
+  }
+  return out
 }
 
 /** Map a qBittorrent torrent to the flow-item shape source.qbittorrent emits, so
@@ -35,9 +58,11 @@ export function qbitToItem(t: QbitTorrent): Record<string, unknown> {
     torrent_state: t.state,
     torrent_progress: t.progress,
     torrent_category: t.category,
+    torrent_tags: t.tags ?? '',
     torrent_size: t.size ?? null,
     save_path: t.save_path ?? '',
     content_path: t.content_path ?? '',
+    ...parseTorrentTags(t.tags),
   }
 }
 
