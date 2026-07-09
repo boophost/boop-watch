@@ -1,18 +1,25 @@
 // Season-banner candidate gathering. Wide banner art doesn't come from MAL/Jikan,
-// so we pull it from several keyless sources (AniList bannerImage, Kitsu
-// coverImage), store each as a candidate alongside any admin uploads, and
+// so we pull it from four sources — AniList `bannerImage`, Kitsu `coverImage`,
+// every image provider Jellyfin has configured (TheTVDB / TheMovieDb today), and
+// fanart.tv — store each as a candidate alongside any admin uploads, and
 // auto-select a default. Admins pick among them on the series page.
 //
-// Candidates are *additive and durable*: every remote image is copied into
-// BANNERS_DIR and served from there, so remote art that later moves or 404s
-// can't change what the portal shows. Re-gathering only ever inserts new URLs —
-// it never deletes a candidate or moves the admin's selection.
+// Candidates are *additive*: re-gathering only ever inserts new URLs — it never
+// deletes a candidate or moves the admin's selection.
+//
+// Only the **selected** candidate is copied into BANNERS_DIR, so the art the
+// portal serves can't move or 404 under us. The rest stay as remote URLs the
+// picker hotlinks: the provider catalogs run to dozens of images per cour, and
+// caching all of them would run the (1Gi, shared with series.sqlite) data volume
+// out of space.
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fetchAniListBanner } from './anilist.js'
-import { addBanner, getSelectedBanner, listBanners, listSeries, selectBanner, setBannerLocalFile, BannerRow } from './db.js'
+import { fetchFanartArt } from './fanart.js'
+import { addBanner, getSelectedBanner, listBanners, listSeries, selectBanner, setBannerLocalFile, BannerRow, SeriesRow } from './db.js'
 import { limitedFetch } from './httpQueue.js'
+import { getSeriesSeasons, jellyfinConfigured, jfRemoteImages, jfSeriesIdByTvdb } from './jellyfin.js'
 
 /** Banner files (uploads + cached remote art) live under DATA_DIR/banners. */
 export const BANNERS_DIR = path.join(process.env.DATA_DIR ?? path.join(process.cwd(), 'data'), 'banners')
@@ -43,16 +50,98 @@ async function fetchKitsuCover(malId: number): Promise<{ url: string; width: num
   }
 }
 
-// Pick the default when nothing is selected yet: prefer AniList, then Kitsu,
-// then whatever's first (e.g. an upload).
+// Jellyfin names its providers for humans; we want a short, filename-safe tag.
+const PROVIDER_SLUGS: Record<string, string> = { thetvdb: 'tvdb', themoviedb: 'tmdb' }
+
+function providerSource(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '')
+  return PROVIDER_SLUGS[slug] ?? slug
+}
+
+// TheMovieDb returns no ThumbnailUrl and its backdrops run to 4K (~1.3MB each),
+// so drawing a picker of twenty would fetch ~30MB of full-size art. Its CDN
+// renders a size per path segment; w780 is ~105KB. TheTVDB gives us a real
+// ThumbnailUrl, so only TMDB needs this.
+const TMDB_ORIGINAL = 'https://image.tmdb.org/t/p/original/'
+
+function deriveThumb(url: string): string | null {
+  return url.startsWith(TMDB_ORIGINAL) ? url.replace('/t/p/original/', '/t/p/w780/') : null
+}
+
+// Auto-select preference. AniList's banner stays first: it is the only source
+// drawn as a true wide banner rather than a 16:9 still, and keeping it on top
+// means adding the provider catalogs doesn't silently restyle every cour's hero.
+// An unranked source sorts last — `indexOf` would have sorted it *first* (-1).
+const SOURCE_RANK: Record<string, number> = { anilist: 0, kitsu: 1, tvdb: 2, tmdb: 3, fanart: 4, upload: 5 }
+const sourceRank = (source: string): number => SOURCE_RANK[source] ?? 90
+
+// Pick the default when nothing is selected yet. Ties keep insertion order
+// (a stable sort over listBanners' `id ASC`), so season-specific art — gathered
+// before the show-wide pool — wins over its own source's series backdrops.
 function autoSelect(mal_id: number): void {
   if (getSelectedBanner(mal_id)) return
   const rows = listBanners(mal_id)
   if (rows.length === 0) return
-  const order = ['anilist', 'kitsu', 'upload']
-  const pick =
-    rows.slice().sort((a, b) => order.indexOf(a.source) - order.indexOf(b.source))[0] ?? rows[0]
+  const pick = rows.slice().sort((a, b) => sourceRank(a.source) - sourceRank(b.source))[0]
   selectBanner(mal_id, pick.id)
+}
+
+interface Candidate {
+  source: string
+  url: string
+  thumb_url: string | null
+  width: number | null
+  height: number | null
+}
+
+/**
+ * Wide art from the artwork databases keyed by tvdb id: everything Jellyfin's
+ * own image providers offer, plus fanart.tv. Season-scoped art is returned
+ * first so it outranks the show-wide pool.
+ *
+ * Best-effort per source — one catalog being down still yields the other's art.
+ */
+async function gatherProviderArt(row: SeriesRow, tvdbId: number): Promise<Candidate[]> {
+  const season = row.tvdb_season
+  const out: Candidate[] = []
+
+  if (jellyfinConfigured) {
+    try {
+      const seriesId = await jfSeriesIdByTvdb(tvdbId)
+      if (seriesId) {
+        const items: string[] = []
+        if (season != null) {
+          const seasonItem = (await getSeriesSeasons(seriesId)).find((s) => s.IndexNumber === season)
+          if (seasonItem) items.push(seasonItem.Id)
+        }
+        items.push(seriesId)
+        for (const itemId of items) {
+          for (const img of await jfRemoteImages(itemId)) {
+            out.push({
+              source: providerSource(img.provider),
+              url: img.url,
+              thumb_url: img.thumbUrl ?? deriveThumb(img.url),
+              width: img.width,
+              height: img.height,
+            })
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`jellyfin banner gather failed for tvdb ${tvdbId} —`, e)
+    }
+  }
+
+  const fanart = await fetchFanartArt(tvdbId)
+  const fanartRows = [
+    ...(season == null ? [] : fanart.seasonThumbs.filter((i) => i.season === season)),
+    ...fanart.backgrounds,
+  ]
+  for (const img of fanartRows) {
+    out.push({ source: 'fanart', url: img.url, thumb_url: img.thumbUrl, width: null, height: null })
+  }
+
+  return out
 }
 
 const MAX_BANNER_BYTES = 12 * 1024 * 1024
@@ -105,24 +194,36 @@ function due(mal_id: number, source: string): boolean {
   return true
 }
 
+/** Copy the art the portal actually serves onto the data volume. */
+export async function cacheSelectedBanner(mal_id: number): Promise<void> {
+  const selected = getSelectedBanner(mal_id)
+  if (selected) await cacheBannerFile(selected)
+}
+
 /**
- * Ensure a series has its banner candidates gathered and cached on disk.
- * Idempotent, additive, and best-effort: each source failure is ignored, no
- * candidate is ever removed, and the admin's selection is never reassigned.
- * Returns the current candidate list.
+ * Ensure a series has its banner candidates gathered, and its selected one
+ * cached on disk. Idempotent, additive, and best-effort: each source failure is
+ * ignored, no candidate is ever removed, and the admin's selection is never
+ * reassigned. Returns the current candidate list.
  */
 export async function ensureSeriesBanners(mal_id: number): Promise<BannerRow[]> {
-  const [anilist, kitsu] = await Promise.all([
+  const row = listSeries().find((s) => s.mal_id === mal_id)
+  const tvdbId = row?.tvdb_id ?? null
+
+  // `due` records the attempt, so it must be reached only when we'd really try.
+  const [anilist, kitsu, providers] = await Promise.all([
     due(mal_id, 'anilist') ? fetchAniListBanner(mal_id).catch(() => null) : null,
     due(mal_id, 'kitsu') ? fetchKitsuCover(mal_id).catch(() => null) : null,
+    row && tvdbId != null && due(mal_id, 'providers')
+      ? gatherProviderArt(row, tvdbId).catch(() => [] as Candidate[])
+      : ([] as Candidate[]),
   ])
   if (anilist) addBanner({ mal_id, source: 'anilist', url: anilist })
   if (kitsu) addBanner({ mal_id, source: 'kitsu', url: kitsu.url, width: kitsu.width, height: kitsu.height })
-
-  // Cache anything not yet on disk — including rows added before this existed.
-  for (const row of listBanners(mal_id)) await cacheBannerFile(row)
+  for (const c of providers) addBanner({ mal_id, ...c })
 
   autoSelect(mal_id)
+  await cacheSelectedBanner(mal_id)
   return listBanners(mal_id)
 }
 

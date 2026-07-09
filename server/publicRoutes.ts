@@ -593,7 +593,12 @@ publicRouter.get('/img/:id/backdrop', async (req, res) => {
 publicRouter.get('/api/banner/:bannerId/image', (req, res) => {
   const bid = Number(req.params.bannerId)
   const b = Number.isFinite(bid) ? getBanner(bid) : undefined
-  if (!b || !serveBanner(res, b)) res.status(404).end()
+  if (!b) { res.status(404).end(); return }
+  // `?thumb=1` is the picker's grid: a cour can carry dozens of provider
+  // candidates, and only the selected one is ever cached locally, so fetching
+  // each at full size to draw a 300px card would be gratuitous.
+  if (req.query.thumb && b.thumb_url && !b.local_file) { res.redirect(302, b.thumb_url); return }
+  if (!serveBanner(res, b)) res.status(404).end()
 })
 
 // HLS entry point: build the master playlist request with transcode params.
