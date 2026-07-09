@@ -519,6 +519,11 @@ publicRouter.get('/img/:id', async (req, res) => {
     return
   }
   const pItem = getPortalItem(id)
+  // An admin-selected poster for this title's own cour wins, as with the hero.
+  if (pItem?.mal_id != null) {
+    const sel = getSelectedBanner(pItem.mal_id, 'poster')
+    if (sel && serveBanner(res, sel)) return
+  }
   if (pItem?.image_url) {
     res.redirect(302, pItem.image_url)
     return
@@ -526,9 +531,10 @@ publicRouter.get('/img/:id', async (req, res) => {
   await proxy(req, res, jfUrl(`/Items/${id}/Images/Primary`, { maxWidth: '400', quality: '90' }))
 })
 
-// Season poster (the picker cards) — the JF season item's own art, falling
-// back to the series poster so a card never renders empty. Guarded by the
-// series id, so only seasons of Public titles are reachable.
+// Season poster (the picker cards) — that cour's admin-selected poster, else the
+// JF season item's own art, falling back to the series poster so a card never
+// renders empty. Guarded by the series id, so only seasons of Public titles are
+// reachable.
 publicRouter.get('/img/:id/season/:season', async (req, res) => {
   if (!ensureConfigured(res)) return
   await ensureScope().catch(() => {})
@@ -538,9 +544,17 @@ publicRouter.get('/img/:id/season/:season', async (req, res) => {
     return
   }
   const n = Number(req.params.season)
-  const match = Number.isFinite(n)
-    ? (await getSeriesSeasons(id)).find((s) => s.IndexNumber === n)
-    : undefined
+  if (!Number.isFinite(n)) {
+    res.redirect(302, `/img/${id}`)
+    return
+  }
+  const pItem = getPortalItem(id)
+  const cour = pItem ? catalogCourForSeries(pItem, n) : undefined
+  if (cour) {
+    const sel = getSelectedBanner(cour.mal_id, 'poster')
+    if (sel && serveBanner(res, sel)) return
+  }
+  const match = (await getSeriesSeasons(id)).find((s) => s.IndexNumber === n)
   // No season item *or* that season has no poster of its own — Jellyfin 404s
   // the image rather than substituting one, so fall back here.
   if (!match?.ImageTags?.Primary) {

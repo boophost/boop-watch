@@ -149,13 +149,15 @@ export function getDb(): Database.Database {
       PRIMARY KEY (mal_id, number)
     );
 
-    -- Candidate season-banner images per series, gathered from multiple sources
-    -- plus admin uploads. Exactly one row per mal_id is 'selected' (the one the
+    -- Candidate season art per series, gathered from multiple sources plus admin
+    -- uploads. "kind" splits the wide hero ('banner') from the portrait poster
+    -- ('poster'); at most one row per (mal_id, kind) is 'selected' (the one the
     -- portal serves). Remote candidates store a url; uploads store a local_file
     -- under DATA_DIR/banners.
     CREATE TABLE IF NOT EXISTS series_banners (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       mal_id INTEGER NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'banner',
       source TEXT NOT NULL,
       url TEXT,
       thumb_url TEXT,
@@ -166,9 +168,9 @@ export function getDb(): Database.Database {
       added_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_banners_mal ON series_banners(mal_id);
-    -- Dedupe remote candidates by URL; uploads (url NULL) stay distinct since
-    -- SQLite treats NULLs as unequal in a UNIQUE index.
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_banners_url ON series_banners(mal_id, url);
+    -- Dedupe remote candidates by URL within a kind; uploads (url NULL) stay
+    -- distinct since SQLite treats NULLs as unequal in a UNIQUE index.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_banners_url ON series_banners(mal_id, kind, url);
 
     -- What sink.library-import placed, and where it came from. Keyed on the
     -- library-relative path because that is what survives: a file rewritten in
@@ -219,6 +221,14 @@ export function getDb(): Database.Database {
   )
   if (!bannerCols.has('thumb_url')) {
     instance.exec(`ALTER TABLE series_banners ADD COLUMN thumb_url TEXT`)
+  }
+  // `kind` splits banners from posters. The dedupe index has to widen with it,
+  // or a poster could never share a URL with its series' banner. An existing DB
+  // still carries the two-column index under the same name, so replace it.
+  if (!bannerCols.has('kind')) {
+    instance.exec(`ALTER TABLE series_banners ADD COLUMN kind TEXT NOT NULL DEFAULT 'banner'`)
+    instance.exec(`DROP INDEX IF EXISTS idx_banners_url`)
+    instance.exec(`CREATE UNIQUE INDEX idx_banners_url ON series_banners(mal_id, kind, url)`)
   }
 
   db = instance
@@ -419,9 +429,15 @@ export function getCachedEpisodes(mal_id: number): EpisodeRow[] {
     .all(mal_id) as EpisodeRow[]
 }
 
+/** The two art kinds a cour can carry: the wide hero and the portrait poster. */
+export type ArtKind = 'banner' | 'poster'
+
+export const isArtKind = (v: unknown): v is ArtKind => v === 'banner' || v === 'poster'
+
 export interface BannerRow {
   id: number
   mal_id: number
+  kind: ArtKind
   source: string
   url: string | null
   /** A small preview of `url`, when the source offers one. Never cached to disk. */
@@ -433,36 +449,30 @@ export interface BannerRow {
   added_at: string
 }
 
-export function listBanners(mal_id: number): BannerRow[] {
+export function listBanners(mal_id: number, kind: ArtKind = 'banner'): BannerRow[] {
   return getDb()
-    .prepare('SELECT * FROM series_banners WHERE mal_id = ? ORDER BY selected DESC, id ASC')
-    .all(mal_id) as BannerRow[]
-}
-
-export function countBanners(mal_id: number): number {
-  return (
-    getDb().prepare('SELECT COUNT(*) AS c FROM series_banners WHERE mal_id = ?').get(mal_id) as {
-      c: number
-    }
-  ).c
+    .prepare('SELECT * FROM series_banners WHERE mal_id = ? AND kind = ? ORDER BY selected DESC, id ASC')
+    .all(mal_id, kind) as BannerRow[]
 }
 
 export function getBanner(id: number): BannerRow | undefined {
   return getDb().prepare('SELECT * FROM series_banners WHERE id = ?').get(id) as BannerRow | undefined
 }
 
-export function getSelectedBanner(mal_id: number): BannerRow | undefined {
+export function getSelectedBanner(mal_id: number, kind: ArtKind = 'banner'): BannerRow | undefined {
   return getDb()
-    .prepare('SELECT * FROM series_banners WHERE mal_id = ? AND selected = 1 LIMIT 1')
-    .get(mal_id) as BannerRow | undefined
+    .prepare('SELECT * FROM series_banners WHERE mal_id = ? AND kind = ? AND selected = 1 LIMIT 1')
+    .get(mal_id, kind) as BannerRow | undefined
 }
 
 /**
- * Add a banner candidate. Remote candidates dedupe by URL (returns the existing
- * row); uploads (no url) always insert. Never changes the current selection.
+ * Add an art candidate. Remote candidates dedupe by URL within their kind
+ * (returns the existing row); uploads (no url) always insert. Never changes the
+ * current selection.
  */
 export function addBanner(b: {
   mal_id: number
+  kind?: ArtKind
   source: string
   url?: string | null
   thumb_url?: string | null
@@ -471,19 +481,21 @@ export function addBanner(b: {
   height?: number | null
 }): BannerRow {
   const db = getDb()
+  const kind = b.kind ?? 'banner'
   if (b.url) {
     const existing = db
-      .prepare('SELECT * FROM series_banners WHERE mal_id = ? AND url = ?')
-      .get(b.mal_id, b.url) as BannerRow | undefined
+      .prepare('SELECT * FROM series_banners WHERE mal_id = ? AND kind = ? AND url = ?')
+      .get(b.mal_id, kind, b.url) as BannerRow | undefined
     if (existing) return existing
   }
   const info = db
     .prepare(
-      `INSERT INTO series_banners (mal_id, source, url, thumb_url, local_file, width, height)
-       VALUES (@mal_id, @source, @url, @thumb_url, @local_file, @width, @height)`,
+      `INSERT INTO series_banners (mal_id, kind, source, url, thumb_url, local_file, width, height)
+       VALUES (@mal_id, @kind, @source, @url, @thumb_url, @local_file, @width, @height)`,
     )
     .run({
       mal_id: b.mal_id,
+      kind,
       source: b.source,
       url: b.url ?? null,
       thumb_url: b.thumb_url ?? null,
@@ -541,15 +553,18 @@ export function setBannerLocalFile(bannerId: number, local_file: string): void {
   getDb().prepare('UPDATE series_banners SET local_file = ? WHERE id = ?').run(local_file, bannerId)
 }
 
-/** Make one candidate the selected banner for its series (clears the rest). */
+/**
+ * Make one candidate the selected art for its series. Clears only the rest of
+ * *its own kind* — a series' banner and poster are selected independently.
+ */
 export function selectBanner(mal_id: number, bannerId: number): boolean {
   const db = getDb()
   const row = db
-    .prepare('SELECT id FROM series_banners WHERE id = ? AND mal_id = ?')
-    .get(bannerId, mal_id) as { id: number } | undefined
+    .prepare('SELECT id, kind FROM series_banners WHERE id = ? AND mal_id = ?')
+    .get(bannerId, mal_id) as { id: number; kind: ArtKind } | undefined
   if (!row) return false
   const tx = db.transaction(() => {
-    db.prepare('UPDATE series_banners SET selected = 0 WHERE mal_id = ?').run(mal_id)
+    db.prepare('UPDATE series_banners SET selected = 0 WHERE mal_id = ? AND kind = ?').run(mal_id, row.kind)
     db.prepare('UPDATE series_banners SET selected = 1 WHERE id = ?').run(bannerId)
   })
   tx()
