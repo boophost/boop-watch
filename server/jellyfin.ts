@@ -118,11 +118,15 @@ interface JfRemoteImageRaw {
   Height?: number
 }
 
-/** Remote artwork candidates Jellyfin's providers offer for one item. */
-export async function jfRemoteImages(itemId: string, type = 'Backdrop'): Promise<JfRemoteImage[]> {
+/**
+ * Remote artwork candidates Jellyfin's providers offer for one item. Jellyfin
+ * returns them best-first, so `limit` trims the tail — worth capping, as a
+ * popular series has ~125 remote posters.
+ */
+export async function jfRemoteImages(itemId: string, type = 'Backdrop', limit = 60): Promise<JfRemoteImage[]> {
   const data = await jfJson<{ Images?: JfRemoteImageRaw[] }>(`/Items/${itemId}/RemoteImages`, {
     type,
-    limit: 60,
+    limit,
     includeAllLanguages: 'true',
   })
   const out: JfRemoteImage[] = []
