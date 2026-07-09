@@ -11,6 +11,38 @@ import { track } from '@/lib/analytics'
 const initials = (n: string) =>
   String(n || '?').split(/[^a-z0-9]/i).filter(Boolean).slice(0, 2).map((s) => s[0]).join('').toUpperCase()
 
+// Hero banner that never blanks: the current image stays put while the next
+// one preloads off-screen, then fades in on a stacked layer. (Swapping a CSS
+// background-image directly drops the old paint before the new fetch lands.)
+function CrossfadeBackdrop({ src }: { src: string }) {
+  const [shown, setShown] = useState(src)
+  const [incoming, setIncoming] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (src === shown) { setIncoming(null); return }
+    let cancelled = false
+    const img = new Image()
+    // On error still promote the new src — the scrim + bg color cover it.
+    img.onload = img.onerror = () => { if (!cancelled) setIncoming(src) }
+    img.src = src
+    return () => { cancelled = true }
+  }, [src, shown])
+
+  return (
+    <>
+      <div className="backdrop" style={{ backgroundImage: `url('${shown}')` }} />
+      {incoming != null && (
+        <div
+          key={incoming}
+          className="backdrop backdrop-fade"
+          style={{ backgroundImage: `url('${incoming}')` }}
+          onAnimationEnd={() => { setShown(incoming); setIncoming(null) }}
+        />
+      )}
+    </>
+  )
+}
+
 // Poster image that hides itself on error but recovers when the src changes
 // (a removed element would leave the fallback stuck across season swaps).
 function PosterImg({ src }: { src: string }) {
@@ -60,7 +92,7 @@ function DetailShell({
   return (
     <main>
       <div className="hero">
-        <div className="backdrop" style={{ backgroundImage: `url('${backdrop ?? backdropUrl(id)}')` }} />
+        <CrossfadeBackdrop src={backdrop ?? backdropUrl(id)} />
         <div className="scrim" />
       </div>
       <div className="series-head">
