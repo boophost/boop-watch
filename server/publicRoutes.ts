@@ -5,13 +5,13 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import { Router, type Request, type Response } from 'express'
 import {
-  jellyfinConfigured, ensureScope, jfItem, jfJson, jfUrl, proxy,
-  getCollectionItems, getScopeEpisodes, getPlayableIds, isCollectionItem, type JfItem,
+  jellyfinConfigured, ensureScope, jfItem, jfJson, jfUrl, proxy, getSeriesSeasons,
+  getCollectionItems, getScopeEpisodes, getPlayableIds, isCollectionItem, type JfItem, type JfSeason,
 } from './jellyfin.js'
 import { buildWatchData, type Segment } from './watch.js'
 import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
-import { getPortalItem, getPortalEpisodes, getPortalSeasons } from './portalDb.js'
+import { getPortalItem, getPortalEpisodes, getPortalSeasonCounts } from './portalDb.js'
 import { getBanner, getSelectedBanner, findByMalId, listSeries, type BannerRow, type SeriesRow } from './db.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
 
@@ -243,7 +243,8 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
   const pItem = getPortalItem(id)
   try {
     if (pItem?.type === 'Series') {
-      const seasons = getPortalSeasons(id)
+      const seasonCounts = getPortalSeasonCounts(id)
+      const seasons = seasonCounts.map((c) => c.season)
       const seasonParam = qStr(req.query.season)
       const seasonNum = seasonParam ? Number(seasonParam) : NaN
       // Default: latest season when multi-season (franchise page); single-season unchanged.
@@ -253,6 +254,22 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
           : seasons.length > 1
             ? seasons[seasons.length - 1]
             : (seasons[0] ?? null)
+
+      // Picker cards: full season names come from the JF season items (custom
+      // names like "Final Season" pass through). Budgeted so a slow Jellyfin
+      // can't stall the page — the "Season N" fallback still renders.
+      let jfSeasons: JfSeason[] = []
+      if (seasons.length > 1) {
+        jfSeasons = await Promise.race([
+          getSeriesSeasons(id),
+          new Promise<JfSeason[]>((r) => setTimeout(() => r([]), 1500)),
+        ])
+      }
+      const seasonList = seasonCounts.map((c) => ({
+        season: c.season,
+        name: jfSeasons.find((s) => s.IndexNumber === c.season)?.Name || `Season ${c.season}`,
+        episodes: c.episodes,
+      }))
 
       const eps = getPortalEpisodes(id, season)
       const episodes: Array<{
@@ -306,6 +323,7 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
         year: pItem.production_year || null,
         episodes,
         seasons,
+        seasonList,
         season,
         manageId,
         nextEpisode,
@@ -400,10 +418,17 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
       return n ? { ...ep, Name: n } : ep
     })
   }
-  // Catalog id for the admin "Library settings" shortcut — from the series
-  // (episodes) or the item itself (movies). null when not catalogued.
-  const manageMal = (item.SeriesId ? getPortalItem(item.SeriesId) : pSelf)?.mal_id
-  const manageId = manageMal != null ? (findByMalId(manageMal)?.id ?? null) : null
+  // Catalog id for the admin "Library settings" shortcut — season-scoped for
+  // episodes (same franchise anchoring as the catalog route) so a watched
+  // season that isn't catalogued gets no manageId, which also stops another
+  // season's chase stub from trailing this season's sidebar.
+  let manageId: number | null = null
+  if (item.Type === 'Episode' && item.SeriesId) {
+    const pSeries = getPortalItem(item.SeriesId)
+    if (pSeries) manageId = catalogCourForSeries(pSeries, item.ParentIndexNumber ?? null)?.id ?? null
+  } else if (pSelf?.mal_id != null) {
+    manageId = findByMalId(pSelf.mal_id)?.id ?? null
+  }
   let nextEpisode: ReturnType<typeof toPublicChase> = null
   if (manageId != null && item.Type === 'Episode') {
     try {
@@ -449,6 +474,29 @@ publicRouter.get('/img/:id', async (req, res) => {
     return
   }
   await proxy(req, res, jfUrl(`/Items/${id}/Images/Primary`, { maxWidth: '400', quality: '90' }))
+})
+
+// Season poster (the picker cards) — the JF season item's own art, falling
+// back to the series poster so a card never renders empty. Guarded by the
+// series id, so only seasons of Public titles are reachable.
+publicRouter.get('/img/:id/season/:season', async (req, res) => {
+  if (!ensureConfigured(res)) return
+  await ensureScope().catch(() => {})
+  const { id } = req.params
+  if (!isCollectionItem(id)) {
+    res.status(404).end()
+    return
+  }
+  const n = Number(req.params.season)
+  const match = Number.isFinite(n)
+    ? (await getSeriesSeasons(id)).find((s) => s.IndexNumber === n)
+    : undefined
+  if (!match) {
+    res.redirect(302, `/img/${id}`)
+    return
+  }
+  res.set('cache-control', 'public, max-age=3600')
+  await proxy(req, res, jfUrl(`/Items/${match.Id}/Images/Primary`, { maxWidth: '300', quality: '90' }))
 })
 
 // Wide banner art (top-level titles only) for the season hero and featured

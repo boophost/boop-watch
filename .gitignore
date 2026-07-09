@@ -24,3 +24,4 @@ mcp/*.env
 mcp/.secrets.json
 
 .superpowers/
+.playwright-cli/

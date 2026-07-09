@@ -374,6 +374,23 @@
   & .chip:hover { color: var(--fg); border-color: var(--border-strong); }
   & .chip[data-active="true"] { background: var(--accent-soft); color: var(--accent-soft-fg); border-color: transparent; }
 
+  /* Season picker — poster + full-name cards on multi-season title pages */
+  & .season-strip { display: flex; gap: 10px; overflow-x: auto; margin-bottom: 22px; padding-bottom: 4px;
+    scrollbar-width: thin; }
+  & .season-card { flex: none; display: flex; align-items: center; gap: 11px; padding: 6px; padding-right: 16px;
+    border-radius: 12px; background: var(--bg-elev); border: 1px solid var(--border); color: var(--fg-muted);
+    font: 13px var(--font-sans); text-align: left; cursor: pointer;
+    transition: background .14s, color .14s, border-color .14s; }
+  & .season-card:hover { background: var(--bg-hover); color: var(--fg); border-color: var(--border-strong); }
+  & .season-card[data-active="true"] { background: var(--accent-soft); color: var(--fg); border-color: var(--accent-deep); }
+  & .season-card .season-thumb { position: relative; width: 44px; height: 62px; border-radius: 8px; overflow: hidden;
+    background: linear-gradient(135deg, oklch(0.26 0.06 310) 0%, oklch(0.16 0.03 285) 100%); }
+  & .season-card .season-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+  & .season-card .season-info { display: flex; flex-direction: column; gap: 3px; }
+  & .season-card .season-name { font-weight: 600; white-space: nowrap; }
+  & .season-card .season-eps { font: 10.5px var(--font-mono); color: var(--fg-subtle); }
+  & .season-card[data-active="true"] .season-eps { color: var(--accent-soft-fg); }
+
   /* Poster grid */
   & .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 14px; }
   & .poster-card {

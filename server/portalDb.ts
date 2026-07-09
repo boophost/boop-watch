@@ -120,6 +120,17 @@ export function getPortalSeasons(seriesId: string): number[] {
   return rows.map((r) => r.season)
 }
 
+/** Episode count per JF season for a series (the season picker cards). */
+export function getPortalSeasonCounts(seriesId: string): Array<{ season: number; episodes: number }> {
+  return getPortalDb()
+    .prepare(
+      `SELECT parent_index_number AS season, COUNT(*) AS episodes FROM portal_items
+       WHERE type = 'Episode' AND series_id = ? AND parent_index_number IS NOT NULL
+       GROUP BY parent_index_number ORDER BY parent_index_number ASC`,
+    )
+    .all(seriesId) as Array<{ season: number; episodes: number }>
+}
+
 export function upsertPortalItem(item: PortalItem) {
   const stmt = getPortalDb().prepare(`
     INSERT INTO portal_items (

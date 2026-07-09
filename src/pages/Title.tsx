@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
-import { getTitle, imgUrl, backdropUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
+import { getTitle, imgUrl, backdropUrl, seasonImgUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
 import type { ChaseState } from '@/lib/chase'
 import { useAuth } from '@/lib/AuthContext'
 import { track } from '@/lib/analytics'
@@ -125,6 +125,7 @@ export default function Title() {
     const playableCount = data.episodes.filter((ep) => ep.id).length
     const seasons = data.seasons ?? []
     const season = data.season ?? null
+    const seasonList = data.seasonList ?? seasons.map((s) => ({ season: s, name: `Season ${s}`, episodes: 0 }))
     const badges = (
       <>
         <span className="badge"><span className="dot dot-info" />Series</span>
@@ -142,24 +143,32 @@ export default function Title() {
     return (
       <PortalLayout crumb={BackCrumb}>
         <DetailShell id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview} manageId={data.manageId}>
-          {seasons.length > 1 ? (
-            <div className="ep-head" style={{ marginBottom: 8 }}>
-              <h2 className="k-h3">Season</h2>
-              <div className="spacer" />
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {seasons.map((s) => (
+          {seasonList.length > 1 ? (
+            <>
+              <div className="ep-head">
+                <h2 className="k-h3">Seasons</h2>
+                <div className="spacer" />
+              </div>
+              <div className="season-strip">
+                {seasonList.map((s) => (
                   <button
-                    key={s}
+                    key={s.season}
                     type="button"
-                    className={`btn ${season === s ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ padding: '4px 12px', fontSize: 13 }}
-                    onClick={() => setSearchParams(s === seasons[seasons.length - 1] ? {} : { season: String(s) })}
+                    className="season-card"
+                    data-active={season === s.season}
+                    onClick={() => setSearchParams(s.season === seasons[seasons.length - 1] ? {} : { season: String(s.season) })}
                   >
-                    S{s}
+                    <span className="season-thumb">
+                      <img src={seasonImgUrl(data.id, s.season)} alt="" loading="lazy" onError={(e) => e.currentTarget.remove()} />
+                    </span>
+                    <span className="season-info">
+                      <span className="season-name">{s.name}</span>
+                      {s.episodes > 0 && <span className="season-eps">{s.episodes} eps</span>}
+                    </span>
                   </button>
                 ))}
               </div>
-            </div>
+            </>
           ) : null}
           <div className="ep-head">
             <h2 className="k-h3">Episodes</h2>

@@ -16,7 +16,8 @@
 - Keep one Jellyfin show folder with `Season N` (season-map / Library import).
 - Catalog: one `/manage` row per MAL cour; `tvdb_season` scopes pipeline + chase to that JF season.
 - Portal: one Public JF series; browse shows franchise poster → season picker. Recent entries keep `S·E` labels for the exact cour. (No Jikan “related” strip.)
-- Watch sidebar / title episode list: only the current season’s episodes.
+- Season picker: poster cards (JF season art via `/img/:id/season/:n`) with the full season name + episode count, not bare `S·N` chips.
+- Watch sidebar / title episode list: only the current season’s episodes. Watch `manageId`/chase are season-scoped like the catalog route, so an uncatalogued season never shows another cour’s chase stub.
 - Sync: prune portal items not in the current Public collection; refuse release-looking folder names in import + collection add.
 
 ## Non-goals
