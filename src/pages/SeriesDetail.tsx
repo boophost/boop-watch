@@ -77,12 +77,15 @@ function formatBytes(n: number): string {
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
 }
 
-// qBittorrent states → short label + tone.
+function isSeedingState(state: string): boolean {
+  return state.includes('UP') || state === 'uploading' || state === 'stalledUP'
+}
+
+// qBittorrent states → short label + tone (Downloads list: torrent truth only).
 function stateLabel(state: string, progress: number): { text: string; tone: string } {
   if (progress >= 1) {
-    if (state.includes('UP') || state === 'uploading' || state === 'stalledUP')
-      return { text: 'Complete · seeding', tone: 'text-emerald-500' }
-    return { text: 'Complete', tone: 'text-emerald-500' }
+    if (isSeedingState(state)) return { text: 'Downloaded · seeding', tone: 'text-sky-500' }
+    return { text: 'Downloaded', tone: 'text-sky-500' }
   }
   if (state.startsWith('stalled')) return { text: 'Stalled (no peers)', tone: 'text-amber-500' }
   if (state.includes('DL') || state === 'downloading')
@@ -92,6 +95,25 @@ function stateLabel(state: string, progress: number): { text: string; tone: stri
   if (state === 'error' || state === 'missingFiles')
     return { text: 'Error', tone: 'text-destructive' }
   return { text: state, tone: 'text-muted-foreground' }
+}
+
+// Episode-row Download column: "Complete · seeding" only when the ep is on site
+// (pipeline ready). A finished torrent that isn't imported yet is "Downloaded".
+function episodeDownloadLabel(
+  state: string,
+  progress: number,
+  opts: { inLibrary: boolean; onSite: boolean },
+): { text: string; tone: string } {
+  if (progress < 1) return stateLabel(state, progress)
+  if (opts.onSite) {
+    if (isSeedingState(state)) return { text: 'Complete · seeding', tone: 'text-emerald-500' }
+    return { text: 'Complete', tone: 'text-emerald-500' }
+  }
+  if (opts.inLibrary) {
+    return { text: 'Downloaded · in library', tone: 'text-sky-500' }
+  }
+  if (isSeedingState(state)) return { text: 'Downloaded · seeding', tone: 'text-sky-500' }
+  return { text: 'Downloaded', tone: 'text-sky-500' }
 }
 
 interface MalImages {
@@ -1212,7 +1234,10 @@ export default function SeriesDetail() {
                       {(() => {
                         const t = episodeDownload(ep.episode, dl?.torrents ?? [])
                         if (!t) return <span className="text-muted-foreground">—</span>
-                        const st = stateLabel(t.state, t.progress)
+                        const onSite = !!dl?.siteEpisodes[String(ep.episode)]
+                        const inLibrary =
+                          ep.episode != null && libMedia.has(ep.episode)
+                        const st = episodeDownloadLabel(t.state, t.progress, { inLibrary, onSite })
                         return (
                           <div className="min-w-0">
                             <span className={`text-xs ${st.tone}`}>
@@ -1282,7 +1307,13 @@ export default function SeriesDetail() {
                   const t = episodeDownload(ep.episode, dl?.torrents ?? [])
                   const watchId = dl?.siteEpisodes[String(ep.episode)]
                   if (!t && !watchId) return null
-                  const st = t ? stateLabel(t.state, t.progress) : null
+                  const inLibrary = ep.episode != null && libMedia.has(ep.episode)
+                  const st = t
+                    ? episodeDownloadLabel(t.state, t.progress, {
+                        inLibrary,
+                        onSite: !!watchId,
+                      })
+                    : null
                   return (
                     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                       {watchId ? (
@@ -1296,8 +1327,7 @@ export default function SeriesDetail() {
                       ) : null}
                       {t && st ? (
                         <span className={st.tone}>
-                          {t.progress >= 1 ? st.text : `Downloading ${(t.progress * 100).toFixed(0)}%`}
-                        </span>
+                          {t.progress >= 1 ? st.text : `Downloading ${(t.progress * 100).toFixed(0)}%`}                        </span>
                       ) : null}
                     </div>
                   )
