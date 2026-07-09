@@ -216,15 +216,26 @@ function torrentsForEpisode(torrents: ChaseTorrent[], episode: number): ChaseTor
   return torrents.filter((t) => t.episode === episode || (t.isBatch && t.episode == null))
 }
 
-export function resolveNextChase(args: {
+export interface ChaseTarget {
+  episode: number
+  title?: string | null
+  airsAt: string | null
+  /** A confirmed-or-estimated air time at or before `now` — worth checking
+   * download state for. False for future/unknown-timed episodes, where
+   * nothing could legitimately be downloading yet. */
+  due: boolean
+}
+
+/** Picks the next chase-worthy episode and its air time, independent of
+ * torrent/library state — cheap enough to call before deciding whether a
+ * (possibly slow) qBittorrent query is even worth making. */
+export function resolveChaseTarget(args: {
   episodes: EpisodeAirInfo[]
   siteEpisodes: Record<string, string>
-  libraryEpisodes: Set<number>
-  torrents: ChaseTorrent[]
   malEpisodes?: number | null
   broadcast?: MalBroadcast | null
   now?: number
-}): EpisodeChase | null {
+}): ChaseTarget | null {
   const now = args.now ?? Date.now()
   const onSite = (n: number) => !!args.siteEpisodes[String(n)]
   const next = pickNextEpisode(
@@ -247,35 +258,54 @@ export function resolveNextChase(args: {
   }
 
   const airMs = airsAt ? Date.parse(airsAt) : NaN
-  const future = Number.isFinite(airMs) && airMs > now
-  const knownPast = Number.isFinite(airMs) && airMs <= now
+  const due = Number.isFinite(airMs) && airMs <= now
 
-  const epTorrents = torrentsForEpisode(args.torrents, next.episode)
+  return { episode: next.episode, title: next.title ?? null, airsAt, due }
+}
+
+export function resolveNextChase(args: {
+  episodes: EpisodeAirInfo[]
+  siteEpisodes: Record<string, string>
+  libraryEpisodes: Set<number>
+  torrents: ChaseTorrent[]
+  malEpisodes?: number | null
+  broadcast?: MalBroadcast | null
+  now?: number
+}): EpisodeChase | null {
+  const now = args.now ?? Date.now()
+  const target = resolveChaseTarget({
+    episodes: args.episodes,
+    siteEpisodes: args.siteEpisodes,
+    malEpisodes: args.malEpisodes,
+    broadcast: args.broadcast,
+    now,
+  })
+  if (!target) return null
+
+  const epTorrents = torrentsForEpisode(args.torrents, target.episode)
   const active = epTorrents.filter((t) => t.progress < 1)
   const complete = epTorrents.filter((t) => t.progress >= 1)
-  const inLib = args.libraryEpisodes.has(next.episode)
+  const inLib = args.libraryEpisodes.has(target.episode)
 
   let state: ChaseState
   let progress: number | null = null
-  if (future) {
+  if (!target.due) {
+    // Future air, or timing unknown — nothing could legitimately be
+    // downloading yet.
     state = 'waiting'
   } else if (active.length) {
     state = 'downloading'
     progress = Math.max(...active.map((t) => t.progress))
   } else if (complete.length || inLib) {
     state = 'importing'
-  } else if (knownPast) {
-    // Past air with nothing in flight.
-    state = 'searching'
   } else {
-    // Synthesized / undated next ep — show as upcoming until we know it aired.
-    state = 'waiting'
+    state = 'searching'
   }
 
   return {
-    episode: next.episode,
-    title: next.title ?? null,
-    airsAt,
+    episode: target.episode,
+    title: target.title ?? null,
+    airsAt: target.airsAt,
     state,
     progress,
   }

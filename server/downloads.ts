@@ -164,9 +164,11 @@ export function matchSeriesDownloads(
 export async function getSeriesDownloadStatus(
   seriesId: number,
   opts: {
-    /** Expected episode count for the pipeline; when every expected episode is
-     * already on site, the (slow while busy) qBittorrent query is skipped. */
-    expected?: number | null
+    /** Skip the (slow while busy) qBittorrent query — the caller has already
+     * determined nothing is chase-worthy right now (e.g. every episode is on
+     * site, or the next one isn't due yet), so the portal match alone answers
+     * everything callers need. */
+    skipQbit?: boolean
   } = {},
 ): Promise<SeriesDownloadStatus> {
   const series = getSeriesById(seriesId)
@@ -179,14 +181,9 @@ export async function getSeriesDownloadStatus(
     return matchSeriesDownloads(series, portalItems, null, { configured: false, error: null })
   }
 
-  // Pipeline already complete (all expected episodes playable) — the portal
-  // match alone answers everything the callers need; don't block on qBit.
-  const expected = opts.expected ?? null
-  if (expected != null && expected > 0) {
+  if (opts.skipQbit) {
     const stub = matchSeriesDownloads(series, portalItems, null, { configured: true, error: null })
-    if (Object.keys(stub.siteEpisodes).length >= expected) {
-      return { ...stub, torrents: [], qbitSkipped: true }
-    }
+    return { ...stub, torrents: [], qbitSkipped: true }
   }
 
   let raw: QbitTorrent[] = []
