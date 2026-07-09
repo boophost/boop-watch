@@ -1,5 +1,10 @@
 // Typed client for the public portal JSON APIs (server/publicRoutes.ts).
 
+import type { ChaseState, EpisodeChase } from '@/lib/chase'
+import { supabase } from './supabase'
+
+export type { ChaseState, EpisodeChase }
+
 export interface CatalogItem {
   id: string
   type?: string
@@ -11,8 +16,6 @@ export interface Catalog {
   items: CatalogItem[]
   genres: string[]
 }
-
-import { supabase } from './supabase'
 
 export async function fetchAuth(url: string, options: RequestInit = {}) {
   const { data: { session } } = await supabase.auth.getSession()
@@ -67,7 +70,19 @@ export interface FeaturedItem {
   watchId: string
 }
 
-export interface SeriesEpisode { id: string; name: string; num: string }
+export interface SeriesEpisode {
+  id: string | null
+  name: string
+  num: string
+  status?: ChaseState
+  airsAt?: string | null
+}
+export interface SeasonInfo {
+  season: number
+  /** Full display name from Jellyfin (e.g. "Season 2", "Final Season"). */
+  name: string
+  episodes: number
+}
 export interface SeriesDetail {
   type: 'series'
   id: string
@@ -76,9 +91,16 @@ export interface SeriesDetail {
   genres: string[]
   year: number | null
   episodes: SeriesEpisode[]
+  /** JF season numbers present for this franchise (empty when unknown). */
+  seasons?: number[]
+  /** Per-season name + episode count for the season picker cards. */
+  seasonList?: SeasonInfo[]
+  /** Season whose episodes are listed (defaults to latest when multi-season). */
+  season?: number | null
   // Catalog series id for the admin-only "Library settings" shortcut; null when
   // the title isn't in the catalog.
   manageId?: number | null
+  nextEpisode?: EpisodeChase | null
 }
 export interface MovieDetail {
   type: 'movie'
@@ -110,6 +132,7 @@ export interface WatchData {
   segments: Segment[]
   // Catalog series id for the admin-only "Library settings" shortcut.
   manageId?: number | null
+  nextEpisode?: EpisodeChase | null
 }
 
 export interface ScheduleEvent {
@@ -129,14 +152,25 @@ export interface SchedulePayload {
   stats: { total: number; today: number; aired: number; upcoming: number }
 }
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url)
-  if (!res.ok) {
-    let msg = `Request failed (${res.status})`
-    try { msg = ((await res.json()) as { error?: string }).error || msg } catch { /* non-JSON */ }
-    throw new Error(msg)
+async function getJSON<T>(url: string, attempt = 0): Promise<T> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) {
+      let msg = `Request failed (${res.status})`
+      try { msg = ((await res.json()) as { error?: string }).error || msg } catch { /* non-JSON */ }
+      throw new Error(msg)
+    }
+    return (await res.json()) as T
+  } catch (e) {
+    // Deploy cutovers / brief ingress blips surface as TypeError("NetworkError…")
+    // in Firefox. Retry once before failing the page.
+    const msg = e instanceof Error ? e.message : String(e)
+    if (attempt < 1 && /networkerror|failed to fetch|load failed/i.test(msg)) {
+      await new Promise((r) => setTimeout(r, 400))
+      return getJSON<T>(url, attempt + 1)
+    }
+    throw e instanceof Error ? e : new Error(msg)
   }
-  return (await res.json()) as T
 }
 
 export const getCatalog = () => getJSON<Catalog>('/api/catalog')
@@ -146,13 +180,20 @@ let catalogPromise: Promise<Catalog> | null = null
 export const loadCatalog = (): Promise<Catalog> => (catalogPromise ??= getCatalog())
 export const getRecent = () => getJSON<{ items: RecentItem[] }>('/api/recent')
 export const getFeatured = () => getJSON<{ items: FeaturedItem[] }>('/api/featured')
-export const getTitle = (id: string) => getJSON<TitleDetail>(`/api/catalog/${encodeURIComponent(id)}`)
+export const getTitle = (id: string, season?: number | null) =>
+  getJSON<TitleDetail>(
+    `/api/catalog/${encodeURIComponent(id)}` +
+      (season != null && Number.isFinite(season) ? `?season=${season}` : ''),
+  )
 export const getWatch = (id: string) => getJSON<WatchData>(`/api/watch/${encodeURIComponent(id)}`)
 export const getSchedule = (weekParam: string) =>
   getJSON<SchedulePayload>('/api/schedule' + (weekParam ? `?${weekParam}` : ''))
 
 export const imgUrl = (id: string) => `/img/${encodeURIComponent(id)}`
-export const backdropUrl = (id: string) => `/img/${encodeURIComponent(id)}/backdrop`
+export const backdropUrl = (id: string, season?: number | null) =>
+  `/img/${encodeURIComponent(id)}/backdrop` + (season != null ? `?season=${season}` : '')
+export const seasonImgUrl = (id: string, season: number) =>
+  `/img/${encodeURIComponent(id)}/season/${season}`
 
 export const getSavedAnimes = () => fetchAuth('/api/library/saved').then(r => r.json() as Promise<{ saved: { item_id: string; added_at: string }[] }>)
 export async function saveAnime(id: string): Promise<void> {

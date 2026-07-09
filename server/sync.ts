@@ -1,5 +1,5 @@
 import { jfJson, JfItem } from './jellyfin.js'
-import { getPortalDb, upsertPortalItem, PortalItem, getPortalItem } from './portalDb.js'
+import { upsertPortalItem, prunePortalItemsNotIn, PortalItem, getPortalItem } from './portalDb.js'
 import {
   listSeries, SeriesRow, EpisodeRow,
   countCachedEpisodes, getEpisodeTitles, upsertEpisodes,
@@ -62,8 +62,13 @@ export async function syncJellyfinToPortal() {
 
   const items = children.Items || []
   const dbSeries = listSeries()
+  // Every id we upsert this pass (series/movies + their episodes). Anything
+  // else left in portal.sqlite is a ghost from a removed Public member or a
+  // deleted release-folder "series" — prune after the upsert loop.
+  const keepIds = new Set<string>()
 
   for (const it of items) {
+    keepIds.add(it.Id)
     const existing = getPortalItem(it.Id)
     let imageUrl = existing?.image_url || null
     let backdropUrl = existing?.backdrop_url || null
@@ -122,11 +127,18 @@ export async function syncJellyfinToPortal() {
       const epTitles = match ? await ensureEpisodeTitles(match.mal_id) : new Map<number, string>()
       const eps = await jfJson<{ Items?: JfItem[] }>(`/Shows/${it.Id}/Episodes`, { Fields: 'Overview,DateCreated,PremiereDate,RunTimeTicks' })
       for (const ep of eps.Items || []) {
+        keepIds.add(ep.Id)
         const epExisting = getPortalItem(ep.Id)
-        // Absolute MAL numbering lines up with the main season; leave specials
-        // (season 0) and any unmapped number on Jellyfin's name.
-        const mainSeason = ep.ParentIndexNumber == null || ep.ParentIndexNumber === 1
-        const malTitle = mainSeason && ep.IndexNumber != null ? epTitles.get(ep.IndexNumber) : undefined
+        // Prefer MAL titles for the cour that matches this catalog row's
+        // tvdb_season; otherwise fall back to Jellyfin's name (other seasons
+        // of a franchise share the same JF series id).
+        const courSeason = match?.tvdb_season
+        const useMalTitle =
+          ep.IndexNumber != null &&
+          (courSeason == null
+            ? ep.ParentIndexNumber == null || ep.ParentIndexNumber === 1
+            : ep.ParentIndexNumber === courSeason)
+        const malTitle = useMalTitle ? epTitles.get(ep.IndexNumber!) : undefined
         const pEp: PortalItem = {
           id: ep.Id,
           type: ep.Type || 'Episode',
@@ -151,4 +163,7 @@ export async function syncJellyfinToPortal() {
       }
     }
   }
+
+  const pruned = prunePortalItemsNotIn(keepIds)
+  if (pruned > 0) console.log(`portal sync: pruned ${pruned} stale item(s)`)
 }

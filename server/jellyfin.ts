@@ -74,6 +74,28 @@ export async function jfItem(id: string, fields = ''): Promise<JfItem> {
 }
 
 // ---------------------------------------------------------------------------
+// Season items per series — the picker cards need each season's display name
+// and its own poster (season item id). Cached like the scope; a failed refresh
+// serves the stale list rather than erroring the caller.
+// ---------------------------------------------------------------------------
+export interface JfSeason { Id: string; Name?: string; IndexNumber?: number }
+const seasonCache = new Map<string, { at: number; items: JfSeason[] }>()
+
+export async function getSeriesSeasons(seriesId: string): Promise<JfSeason[]> {
+  const hit = seasonCache.get(seriesId)
+  const now = Date.now()
+  if (hit && now - hit.at < SCOPE_TTL_MS) return hit.items
+  try {
+    const data = await jfJson<{ Items?: JfSeason[] }>(`/Shows/${seriesId}/Seasons`)
+    const items = (data.Items || []).filter((s) => s.IndexNumber != null)
+    seasonCache.set(seriesId, { at: now, items })
+    return items
+  } catch {
+    return hit?.items ?? []
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Scope cache: what is publicly viewable, derived from the Public collection.
 //   collectionItems : direct children (movies + series) -> browse/detail
 //   playableIds     : movie ids + every episode id      -> the play guard

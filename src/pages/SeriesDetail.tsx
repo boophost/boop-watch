@@ -15,6 +15,12 @@ import {
 import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
+import {
+  adminChaseChipLabel,
+  formatAirShort,
+  formatCountdown,
+  type EpisodeChase,
+} from '@/lib/chase'
 
 interface SeriesDownload {
   hash: string
@@ -42,7 +48,15 @@ interface DownloadStatus {
   qbitError: string | null
   torrents: SeriesDownload[]
   siteEpisodes: Record<string, string>
+  /** qBit wasn't queried: every expected episode is already on site. */
+  qbitSkipped?: boolean
   blacklist: BlacklistRow[]
+  airedCount?: number
+  expectedForPipeline?: number | null
+  nextChase?: EpisodeChase | null
+  /** Jellyfin Series id for the public portal's /series/:id page, when this
+   * series is actually on the Public collection. */
+  portalSeriesId?: string | null
 }
 
 // The best torrent covering a given episode: a batch (covers all) or a
@@ -68,12 +82,15 @@ function formatBytes(n: number): string {
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
 }
 
-// qBittorrent states → short label + tone.
+function isSeedingState(state: string): boolean {
+  return state.includes('UP') || state === 'uploading' || state === 'stalledUP'
+}
+
+// qBittorrent states → short label + tone (Downloads list: torrent truth only).
 function stateLabel(state: string, progress: number): { text: string; tone: string } {
   if (progress >= 1) {
-    if (state.includes('UP') || state === 'uploading' || state === 'stalledUP')
-      return { text: 'Complete · seeding', tone: 'text-emerald-500' }
-    return { text: 'Complete', tone: 'text-emerald-500' }
+    if (isSeedingState(state)) return { text: 'Downloaded · seeding', tone: 'text-sky-500' }
+    return { text: 'Downloaded', tone: 'text-sky-500' }
   }
   if (state.startsWith('stalled')) return { text: 'Stalled (no peers)', tone: 'text-amber-500' }
   if (state.includes('DL') || state === 'downloading')
@@ -83,6 +100,25 @@ function stateLabel(state: string, progress: number): { text: string; tone: stri
   if (state === 'error' || state === 'missingFiles')
     return { text: 'Error', tone: 'text-destructive' }
   return { text: state, tone: 'text-muted-foreground' }
+}
+
+// Episode-row Download column: "Complete · seeding" only when the ep is on site
+// (pipeline ready). A finished torrent that isn't imported yet is "Downloaded".
+function episodeDownloadLabel(
+  state: string,
+  progress: number,
+  opts: { inLibrary: boolean; onSite: boolean },
+): { text: string; tone: string } {
+  if (progress < 1) return stateLabel(state, progress)
+  if (opts.onSite) {
+    if (isSeedingState(state)) return { text: 'Complete · seeding', tone: 'text-emerald-500' }
+    return { text: 'Complete', tone: 'text-emerald-500' }
+  }
+  if (opts.inLibrary) {
+    return { text: 'Downloaded · in library', tone: 'text-sky-500' }
+  }
+  if (isSeedingState(state)) return { text: 'Downloaded · seeding', tone: 'text-sky-500' }
+  return { text: 'Downloaded', tone: 'text-sky-500' }
 }
 
 interface MalImages {
@@ -292,6 +328,92 @@ function PipelineStrip(props: {
           ) : null}
         </div>
       ))}
+    </div>
+  )
+}
+
+function chaseStepActive(
+  state: EpisodeChase['state'],
+  step: 'waiting' | 'download' | 'library' | 'onsite',
+): 'done' | 'on' | 'pending' {
+  if (step === 'waiting') {
+    if (state === 'waiting' || state === 'searching') return 'on'
+    return 'done'
+  }
+  if (step === 'download') {
+    if (state === 'downloading') return 'on'
+    if (state === 'importing' || state === 'ready') return 'done'
+    return 'pending'
+  }
+  if (step === 'library') {
+    if (state === 'importing') return 'on'
+    if (state === 'ready') return 'done'
+    return 'pending'
+  }
+  return state === 'ready' ? 'done' : 'pending'
+}
+
+function EpisodeChasePanel({ chase }: { chase: EpisodeChase }) {
+  const timing =
+    chase.state === 'waiting'
+      ? [formatAirShort(chase.airsAt), formatCountdown(chase.airsAt)].filter(Boolean).join(' · ')
+      : formatCountdown(chase.airsAt) ?? adminChaseChipLabel(chase)
+
+  const steps: Array<{ key: 'waiting' | 'download' | 'library' | 'onsite'; label: string }> = [
+    {
+      key: 'waiting',
+      label:
+        chase.state === 'waiting'
+          ? 'Waiting for release'
+          : chase.state === 'searching'
+            ? 'Searching for release'
+            : 'Released',
+    },
+    {
+      key: 'download',
+      label:
+        chase.state === 'downloading' && chase.progress != null
+          ? `Downloading ${Math.round(chase.progress * 100)}%`
+          : chase.state === 'searching'
+            ? 'Download'
+            : chase.state === 'downloading'
+              ? 'Downloading'
+              : 'Download',
+    },
+    { key: 'library', label: chase.state === 'importing' ? 'Importing' : 'Library' },
+    { key: 'onsite', label: 'On site' },
+  ]
+
+  return (
+    <div className="rounded-lg border border-border bg-card px-4 py-3">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="text-sm font-semibold">Next episode · Ep {chase.episode}</div>
+        <div className="text-xs text-muted-foreground">{timing}</div>
+      </div>
+      <div className="flex flex-wrap items-center gap-1 text-xs">
+        {steps.map((s, i) => {
+          const tone = chaseStepActive(chase.state, s.key)
+          const cls =
+            tone === 'on'
+              ? 'rounded bg-sky-500/15 px-2 py-1 text-sky-400'
+              : tone === 'done'
+                ? 'px-2 py-1 text-emerald-400'
+                : 'px-2 py-1 text-muted-foreground'
+          return (
+            <div key={s.key} className="flex items-center gap-1">
+              <span className={cls}>
+                {tone === 'on' && (chase.state === 'downloading' || chase.state === 'importing') ? (
+                  <Loader2 className="mr-1 inline size-3 animate-spin" />
+                ) : null}
+                {s.label}
+              </span>
+              {i < steps.length - 1 ? (
+                <ChevronRight className="size-3.5 text-muted-foreground/40" />
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -712,6 +834,14 @@ export default function SeriesDetail() {
                   </a>
                 </Button>
               ) : null}
+              {dl?.portalSeriesId ? (
+                <Button variant="outline" size="sm" asChild>
+                  <a href={`/series/${dl.portalSeriesId}`} target="_blank" rel="noreferrer">
+                    View on site
+                    <ExternalLink className="ml-1 size-3.5 opacity-70" />
+                  </a>
+                </Button>
+              ) : null}
             </div>
 
             {malError ? (
@@ -729,13 +859,18 @@ export default function SeriesDetail() {
           </div>
         </section>
 
-        <PipelineStrip
-          expected={mal?.episodes ?? series.episodes ?? null}
-          libCount={libMedia.size}
-          torrents={dl?.torrents ?? []}
-          onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
-          qbitConfigured={dl?.qbitConfigured ?? false}
-        />
+        <div className="space-y-2">
+          <PipelineStrip
+            expected={dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null}
+            libCount={libMedia.size}
+            torrents={dl?.torrents ?? []}
+            onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
+            qbitConfigured={dl?.qbitConfigured ?? false}
+          />
+          {dl?.nextChase && dl.nextChase.state !== 'ready' ? (
+            <EpisodeChasePanel chase={dl.nextChase} />
+          ) : null}
+        </div>
 
         <section>
           <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -846,7 +981,11 @@ export default function SeriesDetail() {
               qBittorrent: {dl.qbitError}
             </p>
           ) : dl.torrents.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No active torrents.</p>
+            <p className="text-sm text-muted-foreground">
+              {dl.qbitSkipped
+                ? 'All expected episodes are on site — qBittorrent not queried.'
+                : 'No active torrents.'}
+            </p>
           ) : (
             <ul className="space-y-3">
               {dl.torrents.map((t) => {
@@ -1112,7 +1251,10 @@ export default function SeriesDetail() {
                       {(() => {
                         const t = episodeDownload(ep.episode, dl?.torrents ?? [])
                         if (!t) return <span className="text-muted-foreground">—</span>
-                        const st = stateLabel(t.state, t.progress)
+                        const onSite = !!dl?.siteEpisodes[String(ep.episode)]
+                        const inLibrary =
+                          ep.episode != null && libMedia.has(ep.episode)
+                        const st = episodeDownloadLabel(t.state, t.progress, { inLibrary, onSite })
                         return (
                           <div className="min-w-0">
                             <span className={`text-xs ${st.tone}`}>
@@ -1182,7 +1324,13 @@ export default function SeriesDetail() {
                   const t = episodeDownload(ep.episode, dl?.torrents ?? [])
                   const watchId = dl?.siteEpisodes[String(ep.episode)]
                   if (!t && !watchId) return null
-                  const st = t ? stateLabel(t.state, t.progress) : null
+                  const inLibrary = ep.episode != null && libMedia.has(ep.episode)
+                  const st = t
+                    ? episodeDownloadLabel(t.state, t.progress, {
+                        inLibrary,
+                        onSite: !!watchId,
+                      })
+                    : null
                   return (
                     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                       {watchId ? (
@@ -1196,8 +1344,7 @@ export default function SeriesDetail() {
                       ) : null}
                       {t && st ? (
                         <span className={st.tone}>
-                          {t.progress >= 1 ? st.text : `Downloading ${(t.progress * 100).toFixed(0)}%`}
-                        </span>
+                          {t.progress >= 1 ? st.text : `Downloading ${(t.progress * 100).toFixed(0)}%`}                        </span>
                       ) : null}
                     </div>
                   )
