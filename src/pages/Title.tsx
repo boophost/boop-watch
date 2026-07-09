@@ -45,10 +45,17 @@ function CrossfadeBackdrop({ src }: { src: string }) {
 
 // Poster image that hides itself on error but recovers when the src changes
 // (a removed element would leave the fallback stuck across season swaps).
-function PosterImg({ src }: { src: string }) {
+// A season poster can 404 from a browser cache poisoned before the server
+// learned to fall back, so try `fallback` once before giving up.
+function PosterImg({ src, fallback }: { src: string; fallback?: string }) {
+  const [cur, setCur] = useState(src)
   const [ok, setOk] = useState(true)
-  useEffect(() => { setOk(true) }, [src])
-  return ok ? <img src={src} alt="" onError={() => setOk(false)} /> : null
+  useEffect(() => { setCur(src); setOk(true) }, [src])
+  const onError = () => {
+    if (fallback && cur !== fallback) setCur(fallback)
+    else setOk(false)
+  }
+  return ok ? <img src={cur} alt="" onError={onError} /> : null
 }
 
 function DetailShell({
@@ -100,7 +107,7 @@ function DetailShell({
           <div className="poster-fallback" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', fontFamily: 'var(--font-mono)', color: 'oklch(1 0 0 / 55%)' }}>
             {initials(name)}
           </div>
-          <PosterImg src={poster ?? imgUrl(id)} />
+          <PosterImg src={poster ?? imgUrl(id)} fallback={imgUrl(id)} />
         </div>
         <div style={{ paddingBottom: 6 }}>
           <div className="series-meta-row">{badges}</div>
@@ -210,7 +217,15 @@ export default function Title() {
                   data-active={season === s.season}
                   onClick={() => setSearchParams(s.season === seasons[seasons.length - 1] ? {} : { season: String(s.season) })}
                 >
-                  <img src={seasonImgUrl(data.id, s.season)} alt="" loading="lazy" onError={(e) => e.currentTarget.remove()} />
+                  <img
+                    src={seasonImgUrl(data.id, s.season)} alt="" loading="lazy"
+                    onError={(e) => {
+                      const img = e.currentTarget
+                      if (img.dataset.fallback) { img.remove(); return }
+                      img.dataset.fallback = '1'
+                      img.src = imgUrl(data.id)
+                    }}
+                  />
                   <span className="season-scrim" />
                   <span className="season-info">
                     <span className="season-name">{s.name}</span>
