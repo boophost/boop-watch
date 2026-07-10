@@ -21,7 +21,7 @@ const PRODUCTION_CHECKLIST_ITEMS = [
   'Staging `/health` and relevant APIs exercised (port-forward or exec)',
   'Diff scope matches what was verified on staging',
   'Post-merge: `kubectl -n link-apps rollout status deployment/boop-watch --timeout=180s`',
-  'Smoke `https://watch.boopurno.es/health` and spot-check affected surfaces',
+  'Post-merge: smoke `https://watch.boopurno.es/health` and spot-check affected surfaces',
 ]
 
 // Manually checking a box (or `gh pr edit`) is the only way this PR's
