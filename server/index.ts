@@ -15,6 +15,7 @@ import * as seriesDb from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView } from './publicRoutes.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
+import { AVATARS_DIR } from './avatars.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
@@ -76,11 +77,14 @@ async function requireAuth(
         // vary by provider (Google: full_name/name, Discord: user_name); fall
         // back to the email's local part so there is always a readable label.
         const meta = (user.user_metadata ?? {}) as Record<string, unknown>
-        const name = [meta.full_name, meta.name, meta.user_name].find(
+        // display_name / custom_avatar_url are the user's own profile-page overrides
+        // (set directly on their Supabase user_metadata); they win over whatever the
+        // OAuth provider supplied.
+        const name = [meta.display_name, meta.full_name, meta.name, meta.user_name].find(
           (v): v is string => typeof v === 'string' && v.trim().length > 0,
         )
         res.locals.displayName = name?.trim() || String(res.locals.email).split('@')[0] || 'user'
-        const avatar = meta.avatar_url ?? meta.picture
+        const avatar = meta.custom_avatar_url ?? meta.avatar_url ?? meta.picture
         res.locals.avatarUrl = typeof avatar === 'string' && avatar ? avatar : null
         return next()
       }
@@ -185,6 +189,46 @@ app.use(discordPresenceRouter(requireAuth))
 
 app.get('/api/me', requireAuth, (_req, res) => {
   res.json({ username: res.locals.username as string })
+})
+
+// Custom profile-picture upload (raw image bytes; content-type sets the extension).
+// Mirrors the season-art upload below. The client sets user_metadata.custom_avatar_url
+// itself (via supabase.auth.updateUser, its own field to write) after this returns
+// the file's URL — this endpoint only owns storage.
+app.post(
+  '/api/profile/avatar',
+  requireAuth,
+  express.raw({ type: Object.keys(EXT_BY_TYPE), limit: '5mb' }),
+  (req, res) => {
+    const userId = String(res.locals.username).replace(/[^a-zA-Z0-9_-]/g, '_')
+    const ext = EXT_BY_TYPE[String(req.headers['content-type'] ?? '').split(';')[0].trim()]
+    const body = req.body as Buffer
+    if (!ext || !Buffer.isBuffer(body) || body.length === 0) {
+      res.status(400).json({ error: 'Send raw image bytes (jpeg/png/webp/avif/gif)' })
+      return
+    }
+    fs.mkdirSync(AVATARS_DIR, { recursive: true })
+    for (const existing of fs.readdirSync(AVATARS_DIR)) {
+      if (existing.startsWith(`${userId}-`)) {
+        try { fs.unlinkSync(path.join(AVATARS_DIR, existing)) } catch { /* already gone */ }
+      }
+    }
+    const file = `${userId}-${Date.now()}.${ext}`
+    fs.writeFileSync(path.join(AVATARS_DIR, file), body)
+    res.status(201).json({ avatarUrl: `/api/avatar/${file}` })
+  },
+)
+
+// Remove the uploaded file. The client also clears user_metadata.custom_avatar_url
+// so the OAuth-provided picture (if any) reappears.
+app.delete('/api/profile/avatar', requireAuth, (req, res) => {
+  const userId = String(res.locals.username).replace(/[^a-zA-Z0-9_-]/g, '_')
+  try {
+    for (const existing of fs.readdirSync(AVATARS_DIR)) {
+      if (existing.startsWith(`${userId}-`)) fs.unlinkSync(path.join(AVATARS_DIR, existing))
+    }
+  } catch { /* dir doesn't exist yet */ }
+  res.json({ ok: true })
 })
 
 app.get('/api/search/anime', requireAuth, async (req, res) => {

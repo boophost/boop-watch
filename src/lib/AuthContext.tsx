@@ -8,6 +8,9 @@ interface User {
   id: string
   isAdmin: boolean
   avatarUrl: string | null
+  /** True when avatarUrl comes from the user's own upload (profile-page override),
+   *  not the OAuth provider — controls whether "Remove" shows on the profile page. */
+  hasCustomAvatar: boolean
   identities: UserIdentity[]
 }
 
@@ -40,14 +43,31 @@ function computeIsAdmin(session: Session): boolean {
   )
 }
 
+// display_name / custom_avatar_url are the user's own profile-page overrides
+// (written directly to their Supabase user_metadata); they win over whatever
+// the OAuth provider supplied. OAuth display name otherwise lands under
+// full_name/name (Google) or user_name (Discord); email is the last resort so
+// every profile has a readable label.
+function displayName(session: Session): string {
+  const meta = session.user.user_metadata || {}
+  return meta.display_name || meta.full_name || meta.name || meta.user_name || session.user.email || ''
+}
+
+function customAvatarUrl(session: Session): string | null {
+  const meta = session.user.user_metadata || {}
+  return typeof meta.custom_avatar_url === 'string' && meta.custom_avatar_url ? meta.custom_avatar_url : null
+}
+
+function avatarUrl(session: Session): string | null {
+  const meta = session.user.user_metadata || {}
+  return customAvatarUrl(session) || meta.avatar_url || meta.picture || null
+}
+
 // Tie the PostHog person profile to the Supabase account. Keyed by the stable
 // user id (survives email changes); safe to call repeatedly — re-identifying
 // the same id just refreshes the properties.
 function identifyFromSession(session: Session): void {
-  const meta = session.user.user_metadata || {}
-  // OAuth display name lands under full_name/name (Google) or user_name (Discord);
-  // fall back to email so every profile has a readable label.
-  const name = meta.full_name || meta.name || meta.user_name || session.user.email
+  const name = displayName(session)
   identifyUser(session.user.id, {
     email: session.user.email ?? undefined,
     name: name || undefined,
@@ -75,19 +95,23 @@ function handleAuthChange(event: AuthChangeEvent, session: Session | null): void
   if (event === 'SIGNED_OUT') resetAnalytics()
 }
 
-// Google and Discord (via Supabase OAuth) both land the profile photo under
-// one of these user_metadata keys depending on provider.
 function toUser(session: Session | null): User | null {
   if (!session?.user) return null
-  const meta = session.user.user_metadata || {}
-  const email = session.user.email ?? ''
   return {
-    username: email,
+    username: displayName(session) || session.user.email || '',
     id: session.user.id,
     isAdmin: computeIsAdmin(session),
-    avatarUrl: meta.avatar_url || meta.picture || null,
+    avatarUrl: avatarUrl(session),
+    hasCustomAvatar: customAvatarUrl(session) !== null,
     identities: session.user.identities ?? [],
   }
+}
+
+interface ProfilePatch {
+  /** Overrides the OAuth-provided name. Empty/undefined leaves it unchanged; pass null to clear the override. */
+  displayName?: string | null
+  /** Overrides the OAuth-provided avatar. Pass null to clear the override (reverts to the OAuth picture, if any). */
+  avatarUrl?: string | null
 }
 
 interface AuthContextType {
@@ -98,6 +122,7 @@ interface AuthContextType {
   loginWithProvider: (provider: 'google' | 'discord') => Promise<void>
   linkProvider: (provider: 'google' | 'discord') => Promise<void>
   unlinkProvider: (identity: UserIdentity) => Promise<void>
+  updateProfile: (patch: ProfilePatch) => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -109,6 +134,7 @@ const AuthContext = createContext<AuthContextType>({
   loginWithProvider: async () => {},
   linkProvider: async () => {},
   unlinkProvider: async () => {},
+  updateProfile: async () => {},
   logout: async () => {},
 })
 
@@ -178,6 +204,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(toUser(session))
   }
 
+  // display_name / custom_avatar_url are the user's own metadata fields (never
+  // written by an OAuth provider), so writing them directly is safe and needs
+  // no server round-trip.
+  const updateProfile = async (patch: ProfilePatch) => {
+    const data: Record<string, unknown> = {}
+    if (patch.displayName !== undefined) data.display_name = patch.displayName
+    if (patch.avatarUrl !== undefined) data.custom_avatar_url = patch.avatarUrl
+    const { error } = await supabase.auth.updateUser({ data })
+    if (error) throw error
+    const { data: { session } } = await supabase.auth.getSession()
+    setUser(toUser(session))
+  }
+
   const logout = async () => {
     await supabase.auth.signOut()
     resetAnalytics()
@@ -186,7 +225,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, login, signup, loginWithProvider, linkProvider, unlinkProvider, logout }}
+      value={{ user, loading, login, signup, loginWithProvider, linkProvider, unlinkProvider, updateProfile, logout }}
     >
       {children}
     </AuthContext.Provider>
