@@ -2056,14 +2056,35 @@ const indexerMatch: NodeImpl = {
     // We stamped `mal:<id>` on the torrent when we queued it, so its cour is
     // known, not inferred. Trust that over token-matching a release name —
     // "…4th Season - 05" otherwise falls through to the season-1 row.
+    //
+    // Unless the release name itself contradicts the tag: a search for one
+    // season can return (and queue-tag) another season's releases — three
+    // "S04E11" torrents queued by a season-1 search carried `mal:<S1>` and
+    // overwrote Season 1 files with Season 4 content. When the parsed season
+    // (seasonField) disagrees with the tagged row's tvdb_season and the same
+    // franchise (tvdb_id) has a row for the parsed season, believe the name.
     const matchTag = (item: FlowItem): (typeof catalog)[number] | undefined => {
       const mal = asNumber(item.tag_mal_id)
-      return mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
+      const tagged = mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
+      if (!tagged || !seasonField) return tagged
+      const season = Number(item[seasonField])
+      if (!Number.isFinite(season) || tagged.tvdb_season == null || Number(tagged.tvdb_season) === season) {
+        return tagged
+      }
+      const corrected = catalog.find(
+        (s) => s.tvdb_id != null && s.tvdb_id === tagged.tvdb_id && Number(s.tvdb_season) === season,
+      )
+      if (corrected) {
+        tagCorrected++
+        return corrected
+      }
+      return tagged
     }
 
     const matched: FlowItem[] = []
     const unmatched: FlowItem[] = []
     let fromTag = 0
+    let tagCorrected = 0
     for (const item of allInputs(inputs)) {
       const tagged = matchTag(item)
       if (tagged) fromTag++
@@ -2077,7 +2098,8 @@ const indexerMatch: NodeImpl = {
     }
     ctx.notes.push(
       `${matched.length}/${matched.length + unmatched.length} matched an indexer title` +
-        (fromTag ? ` (${fromTag} from torrent tags)` : ''),
+        (fromTag ? ` (${fromTag} from torrent tags)` : '') +
+        (tagCorrected ? ` (${tagCorrected} tag(s) overridden by the release's own season)` : ''),
     )
     return { matched, unmatched }
   },
