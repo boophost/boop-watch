@@ -45,25 +45,19 @@
   & *::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 8%); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
   & *::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 16%); }
 
-  /* App shell: side nav + content column. The nav's inner column is sticky,
-     so it stays pinned to the viewport while the page scrolls; data-collapsed
-     on the shell shrinks it to an icon rail. */
-  &.shell { display: flex; min-height: 100vh; }
+  /* App shell: a full-width header row, then side nav + content column in
+     .shell-body. The header carries the brand; the nav is links-only, and its
+     inner column sticks below the (sticky, 56px) header while the page
+     scrolls. data-collapsed on the shell shrinks the nav to an icon rail. */
+  &.shell { display: flex; flex-direction: column; min-height: 100vh; }
+  & .shell-body { display: flex; flex: 1; min-width: 0; }
   /* inline-size container so the hero can break out of main's centered
      max-width to the full content-pane width (100cqw) on wide screens. */
   & .shell-main { flex: 1; min-width: 0; display: flex; flex-direction: column; container-type: inline-size; }
   & .snav { flex: none; width: 232px; border-right: 1px solid var(--border); transition: width .18s ease; }
   &.shell[data-collapsed="true"] .snav { width: 64px; }
-  & .snav-inner { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
+  & .snav-inner { position: sticky; top: 56px; height: calc(100vh - 56px); display: flex; flex-direction: column;
     gap: 2px; padding: 14px 12px; overflow: hidden; }
-  & .snav-head { padding: 2px 4px 14px; }
-  & .snav-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px;
-    letter-spacing: -0.02em; white-space: nowrap; min-width: 0; }
-  & .snav-brand .brand-mark { width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--accent), oklch(0.62 0.2 270));
-    display: grid; place-items: center;
-    font-family: var(--font-mono); font-size: 13px; color: var(--accent-fg); font-weight: 600; }
-  & .snav-brand .sub { color: var(--fg-subtle); font-weight: 400; }
   & .snav-link { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 11px;
     border-radius: 9px; border: none; background: transparent; cursor: pointer;
     font: 500 13.5px var(--font-sans); color: var(--fg-muted); white-space: nowrap;
@@ -76,7 +70,6 @@
   &.shell[data-collapsed="true"] .snav-label { display: none; }
   &.shell[data-collapsed="true"] .snav-inner { padding: 14px 13px; }
   &.shell[data-collapsed="true"] .snav-link { justify-content: center; padding: 0; }
-  &.shell[data-collapsed="true"] .snav-head { padding: 2px 0 14px; display: flex; justify-content: center; }
   
   & .mob-nav { display: none; }
   @media (max-width: 767px) { 
@@ -104,8 +97,8 @@
     background: oklch(0.145 0.008 285 / 80%); backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--border);
   }
-  & .chrome .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; }
-  @media (min-width: 768px) { & .chrome .brand { display: none; } }
+  & .chrome .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px;
+    letter-spacing: -0.02em; min-width: 0; }
   & .chrome .brand-mark {
     width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
     background: linear-gradient(135deg, var(--accent), oklch(0.62 0.2 270));
@@ -591,9 +584,11 @@
   /* Main header: brand · centered search · account crumb (mirrors .chrome).
      Shared SearchBar/UserCrumb components — the styles live in the .kagura
      scope, so the page root carries both classes. */
+  /* 56px + sticky to match .chrome: the snav's sticky offset assumes the
+     header row is exactly this tall on every page. */
   & .topbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 520px) minmax(0, 1fr);
-    gap: 14px; align-items: center; padding: 12px 22px; border-bottom: 1px solid var(--border);
-    position: relative; z-index: 60;
+    gap: 14px; align-items: center; padding: 0 22px; height: 56px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 60;
     background: oklch(0.145 0.008 285 / 70%); backdrop-filter: blur(10px); }
   & .topbar .umenu { grid-column: 3; justify-self: end; }
   & .topbar .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px;
@@ -731,7 +726,8 @@
 
   /* Episode sidebar */
   & .panel { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; }
-  & .col-eps { display: flex; flex-direction: column; max-height: calc(100vh - 92px); position: sticky; top: 20px; overflow: hidden; }
+  /* Sticks 20px below the (sticky, 56px) topbar. */
+  & .col-eps { display: flex; flex-direction: column; max-height: calc(100vh - 148px); position: sticky; top: 76px; overflow: hidden; }
   & .eps-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--border);
     font-weight: 600; font-size: 14px; }
   & .eps-head .badge { margin-left: auto; font-family: var(--font-mono); font-size: 11px; font-weight: 500;
@@ -809,7 +805,7 @@
      right-aligning via the spacer. The back-link + SxEy chip + title get
      their own uncramped .subbar row. */
   @media (max-width: 760px) {
-    & .topbar { padding: 10px 12px; gap: 10px;
+    & .topbar { padding: 0 12px; gap: 10px;
       grid-template-columns: auto minmax(0, 1fr) auto; }
     & .topbar .brand .label { display: none; }
     & .subbar { padding: 8px 12px; }

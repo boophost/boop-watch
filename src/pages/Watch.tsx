@@ -23,26 +23,34 @@ import '@vidstack/react/player/styles/default/theme.css'
 import '@vidstack/react/player/styles/default/layouts/video.css'
 
 // The player page reuses the portal's side nav (Kagura-scoped, so it composes
-// with the .player styles already on the root). The .shell flex layout puts the
-// nav beside a .shell-main column holding the topbar/subbar/player. Theater +
-// pseudo-fullscreen still fill the viewport (their .col-video is position:fixed).
+// with the .player styles already on the root). The topbar spans the full
+// viewport width above the nav; .shell-body puts the nav beside a .shell-main
+// column holding the subbar/player. Theater + pseudo-fullscreen still fill the
+// viewport (their .col-video is position:fixed).
 function PlayerShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useSidebarCollapsed()
   return (
     <div className="kagura player shell" data-collapsed={collapsed}>
-      <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
-      <div className="shell-main">{children}</div>
+      <PlayerTopbar />
+      <div className="shell-body">
+        <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+        <div className="shell-main">{children}</div>
+      </div>
       <MobileNav />
     </div>
   )
 }
 
-// Main player header: centered search · account crumb. The brand lives in the
-// side nav now, so the topbar drops it to avoid a duplicate wordmark. The series
-// back-link + episode title live in the .subbar row below it.
+// Main player header: brand · centered search · account crumb. The brand lives
+// here now (the side nav is links-only). The series back-link + episode title
+// live in the .subbar row below it.
 function PlayerTopbar() {
   return (
     <header className="topbar">
+      <Link className="brand" to="/">
+        <span className="brand-mark">B</span>
+        <span className="label">boopurnoes <span className="sub">· watch</span></span>
+      </Link>
       <SearchBar />
       <UserCrumb />
     </header>
@@ -518,14 +526,13 @@ export default function Watch() {
   }, [])
 
   if (error) {
-    return <PlayerShell><PlayerTopbar /><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></PlayerShell>
+    return <PlayerShell><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></PlayerShell>
   }
   if (!data) {
     // Skeleton with the final page geometry — the .vid box reserves its 16/9
     // slot (kagura.css), so the player mounting never reflows the layout.
     return (
       <PlayerShell>
-        <PlayerTopbar />
         <div className="subbar"><span className="t">Loading…</span></div>
         <div className="wrap">
           <div className="col-video">
@@ -555,13 +562,18 @@ export default function Watch() {
 
   const closeMenu = (e: React.MouseEvent) => (e.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')
 
+  // The next-episode chase stub belongs to the current episode's season (the
+  // sidebar list is season-scoped), so number it "S1·E3" like its siblings —
+  // bare "E3" only when the season isn't known (epNum empty).
+  const seasonPrefix = /^S\d+/.exec(data.epNum)?.[0]
+  const stubNum = (n: number) => (seasonPrefix ? `${seasonPrefix}·E${n}` : `E${n}`)
+
   const audioLabel = data.audio.tracks.find((t) => String(t.index) === audioIndex)?.label || 'Audio'
   const subLabel = subIndex === '' ? 'Off' : (data.subs.find((s) => String(s.index) === subIndex)?.group || 'English')
   const qualityLabel = data.quality.find((q) => q.key === qKey)?.label || 'Auto'
 
   return (
     <PlayerShell>
-      <PlayerTopbar />
       <div className="subbar">
         <Link className="back" to={data.back.href}><Icon name="back" size={15} /><span className="bl">{data.back.label}</span></Link>
         {data.epNum && <span className="ep">{data.epNum}</span>}
@@ -685,7 +697,7 @@ export default function Watch() {
               })}
               {data.nextEpisode ? (
                 <div className="eprow chasing">
-                  <span className="epn">E{data.nextEpisode.episode}</span>
+                  <span className="epn">{stubNum(data.nextEpisode.episode)}</span>
                   <span className="ept">{data.nextEpisode.title || `Episode ${data.nextEpisode.episode}`}</span>
                   <span className="epnow">
                     <EpisodeStatus chase={data.nextEpisode} />
@@ -700,7 +712,7 @@ export default function Watch() {
             <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span></div>
             <div className="eps-list">
               <div className="eprow chasing">
-                <span className="epn">E{data.nextEpisode.episode}</span>
+                <span className="epn">{stubNum(data.nextEpisode.episode)}</span>
                 <span className="ept">{data.nextEpisode.title || `Episode ${data.nextEpisode.episode}`}</span>
                 <span className="epnow"><EpisodeStatus chase={data.nextEpisode} /></span>
               </div>

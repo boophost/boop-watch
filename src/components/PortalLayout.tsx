@@ -16,20 +16,15 @@ export function useSidebarCollapsed() {
   return [collapsed, setCollapsed] as const
 }
 
-/** The Kagura-scoped side nav: sticky brand + links, collapses to an icon rail.
- * Shared by the portal shell and the player page. */
+/** The Kagura-scoped side nav: sticky links, collapses to an icon rail. Shared
+ * by the portal shell and the player page. The brand lives in the header (which
+ * spans the full viewport above this nav), so the rail is links-only. */
 export function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
   const { user } = useAuth()
   const { open: openSuggest } = useSuggest()
   return (
     <aside className="snav">
       <div className="snav-inner">
-        <div className="snav-head">
-          <Link className="snav-brand" to="/" title="boopurnoes · watch">
-            <span className="brand-mark">B</span>
-            <span className="snav-label">boopurnoes <span className="sub">· watch</span></span>
-          </Link>
-        </div>
         <nav className="snav-nav">
           <NavLink to="/" end className="snav-link" title="All titles">
             <Icon name="film" size={16} /><span className="snav-label">All titles</span>
@@ -119,12 +114,14 @@ export function PortalLayout({ crumb, children }: { crumb?: ReactNode; children:
     }
   }, [user])
 
+  // The header spans the full viewport width, above the side nav; the nav +
+  // content share the .shell-body row below it.
   return (
     <div className="kagura shell" data-collapsed={collapsed}>
-      <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
-      <div className="shell-main">
-        <Chrome crumb={crumb} />
-        {children}
+      <Chrome crumb={crumb} />
+      <div className="shell-body">
+        <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+        <div className="shell-main">{children}</div>
       </div>
       <MobileNav />
     </div>
