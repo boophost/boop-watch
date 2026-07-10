@@ -15,6 +15,7 @@ import { getSchedule } from './schedule.js'
 import { getPortalItem, getPortalEpisodes, getPortalSeasonCounts } from './portalDb.js'
 import { getBanner, getSelectedBanner, findByMalId, listSeries, listComments, type BannerRow, type SeriesRow, type CommentRow } from './db.js'
 import { BANNERS_DIR } from './banners.js'
+import { AVATARS_DIR } from './avatars.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
 
 export const publicRouter = Router()
@@ -32,6 +33,14 @@ function serveBanner(res: Response, b: Pick<BannerRow, 'url' | 'local_file'>): b
   if (b.url) { res.redirect(302, b.url); return true }
   return false
 }
+
+// Serve a custom profile-picture upload. basename guards against path
+// traversal; filenames are server-generated (userId-timestamp.ext).
+publicRouter.get('/api/avatar/:file', (req, res) => {
+  const file = path.join(AVATARS_DIR, path.basename(req.params.file))
+  if (!fs.existsSync(file)) { res.status(404).end(); return }
+  res.sendFile(file)
+})
 
 const qStr = (v: unknown): string => (typeof v === 'string' ? v : Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '')
 
