@@ -220,6 +220,12 @@ export function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_library_files_ep ON library_files(mal_id, tvdb_season, episode);
     CREATE INDEX IF NOT EXISTS idx_library_files_hash ON library_files(torrent_hash);
+    CREATE TABLE IF NOT EXISTS fetch_attempts (
+      kind TEXT NOT NULL,
+      key TEXT NOT NULL,
+      attempted_at INTEGER NOT NULL,
+      PRIMARY KEY (kind, key)
+    );
   `)
 
   // Additive migration for the richer metadata columns.
@@ -517,6 +523,28 @@ export interface EpisodeRow {
   title: string | null
   title_japanese?: string | null
   aired?: string | null
+}
+
+// Throttle ledger for external fetches (banner gathers, poster searches,
+// episode-title fetches). Persisted so a pod restart doesn't refire every
+// gather at once — deploys roll the pod many times a day, and the old
+// in-process maps made each roll a burst of AniList/Kitsu/fanart/Jikan
+// requests (observed 429s when dev and prod rolled together).
+/** Last recorded attempt (ms epoch) for a throttled fetch, or 0 if never tried. */
+export function lastFetchAttempt(kind: string, key: string): number {
+  const row = getDb()
+    .prepare('SELECT attempted_at FROM fetch_attempts WHERE kind = ? AND key = ?')
+    .get(kind, key) as { attempted_at: number } | undefined
+  return row?.attempted_at ?? 0
+}
+
+export function recordFetchAttempt(kind: string, key: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO fetch_attempts (kind, key, attempted_at) VALUES (?, ?, ?)
+       ON CONFLICT (kind, key) DO UPDATE SET attempted_at = excluded.attempted_at`,
+    )
+    .run(kind, key, Date.now())
 }
 
 /** How many episode titles are cached for a series (0 = never fetched). */
