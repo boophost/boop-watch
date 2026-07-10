@@ -551,26 +551,6 @@
   & .eprow:hover .go { background: var(--accent-soft); color: var(--accent-soft-fg); }
   & .eprow.watched .num, & .eprow.watched .et { color: var(--fg-subtle); }
 
-  /* Theme-song rows (OP/ED widget under the episode list) */
-  & .themelist { display: flex; flex-direction: column; }
-  & .themerow { display: flex; gap: 14px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border);
-    transition: background .14s; }
-  & .themerow:last-child { border-bottom: none; }
-  & .themerow:hover { background: oklch(1 0 0 / 3%); }
-  & .theme-kind { font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
-    width: 48px; flex: none; text-align: center; padding: 3px 0; border-radius: 6px;
-    background: var(--accent-soft); color: var(--accent-soft-fg); }
-  & .theme-kind[data-kind="ed"] { background: var(--bg-elev-2); color: var(--fg-muted); }
-  & .theme-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  & .theme-title { color: var(--fg); font-size: 14px; font-weight: 500; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; }
-  & .theme-artist { color: var(--fg-subtle); font-size: 12px; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; }
-  & .theme-eps { font-family: var(--font-mono); font-size: 12px; color: var(--fg-subtle); flex: none; }
-  & .themerow .go { width: 30px; height: 30px; border-radius: 7px; display: grid; place-items: center;
-    color: var(--fg-subtle); background: transparent; transition: background .14s, color .14s; flex: none; }
-  & .themerow:hover .go { background: var(--accent-soft); color: var(--accent-soft-fg); }
-
   & .synopsis { font-size: 13px; line-height: 1.65; color: var(--fg-muted); margin: 10px 0 0; }
   & .empty { color: var(--fg-subtle); padding: 60px 0; text-align: center; }
 
@@ -766,6 +746,25 @@
   /* .watched / .epprog shared with .kagura .eplist above; player also dims .epn/.ept. */
   & .eprow.watched .epn, & .eprow.watched .ept { color: var(--fg-subtle); }
 
+  /* OST rail under the episode sidebar: MAL OP/ED themes + iTunes cover art. */
+  & .col-ost { grid-column: 2; overflow: hidden; }
+  & .ost-list { padding: 6px; display: flex; flex-direction: column; }
+  & .ostrow { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 9px;
+    transition: background .14s; }
+  & .ostrow:hover { background: oklch(1 0 0 / 4%); }
+  & .ost-art { width: 42px; height: 42px; border-radius: 8px; flex: none; position: relative; overflow: hidden;
+    background: var(--bg-elev-2); display: grid; place-items: center; color: var(--fg-subtle); }
+  & .ost-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  & .ost-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  & .ost-title { color: var(--fg); font-size: 13px; font-weight: 500; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  & .ost-artist { color: var(--fg-subtle); font-size: 12px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  & .ost-meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+  & .ost-kind { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); }
+  & .ost-eps { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle); }
+  & .wrap.no-eps .col-ost { grid-column: 1; }
+
   /* Per-episode comments, below the player in the video column (the episode
      sidebar stays sticky beside them). Composer for signed-in users; the list
      reads fine anonymously. */
@@ -814,6 +813,7 @@
   @media (max-width: 980px) {
     & .wrap { grid-template-columns: minmax(0, 1fr); }
     & .col-eps { position: static; max-height: 420px; }
+    & .col-ost { grid-column: 1; }
   }
 
   /* Phone layout: brand collapses to just the mark, the search takes the
@@ -840,7 +840,7 @@ body.theater { overflow: hidden; }
 body.theater .app-version { display: none; } /* fixed badge, z-index above the overlay */
 body.theater .player .topbar, body.theater .player .subbar { display: none; }
 body.theater .player .wrap { display: block; max-width: none; margin: 0; padding: 0; height: 100vh; height: 100dvh; }
-body.theater .player .col-eps { display: none; }
+body.theater .player .col-eps, body.theater .player .col-ost { display: none; }
 body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
 /* Keep .vid in block flow (not flex): JASSUB inserts a 0-width anchor div right
    after the <video> and positions its subtitle canvas relative to it, assuming

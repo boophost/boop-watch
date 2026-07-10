@@ -138,6 +138,8 @@ export interface WatchData {
   title: string
   epNum: string
   isEpisode: boolean
+  seriesId: string | null
+  season: number | null
   back: { href: string; label: string }
   audio: { tracks: AudioTrack[]; default: number | null }
   subs: SubTrack[]
@@ -214,6 +216,8 @@ export interface ThemeSong {
   title: string
   artist: string | null
   episodes: string | null
+  /** Cover art (iTunes) — null while the server-side lookup is still cold. */
+  art: string | null
 }
 export const getThemes = (id: string, season?: number | null) =>
   getJSON<{ themes: ThemeSong[] }>(
