@@ -237,6 +237,7 @@ export interface Comment {
   userId: string
   name: string
   avatarUrl: string | null
+  isAdmin: boolean
   body: string
   createdAt: string
 }
