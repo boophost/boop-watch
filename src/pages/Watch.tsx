@@ -742,7 +742,7 @@ export default function Watch() {
 
 // OST rail under the episode list — fully self-sourcing: the server pulls
 // MAL's OP/ED themes for this season's cour(s) and iTunes cover art, so
-// nothing renders until it has something real. Rows open a YouTube search.
+// nothing renders until it has something real.
 function OstPanel({ titleId, season }: { titleId: string; season: number | null }) {
   const [themes, setThemes] = useState<ThemeSong[]>([])
 
@@ -761,16 +761,7 @@ function OstPanel({ titleId, season }: { titleId: string; season: number | null 
       <div className="eps-head"><Icon name="music" size={15} /><span>OST</span><span className="badge">{themes.length}</span></div>
       <div className="ost-list">
         {themes.map((t, i) => (
-          <a
-            key={`${t.kind}${i}`}
-            className="ostrow"
-            href={`https://www.youtube.com/results?search_query=${encodeURIComponent(
-              `${t.title}${t.artist ? ` ${t.artist}` : ''}`,
-            )}`}
-            target="_blank"
-            rel="noreferrer"
-            onClick={() => track('theme_song_clicked', { item_id: titleId, kind: t.kind, title: t.title })}
-          >
+          <div key={`${t.kind}${i}`} className="ostrow">
             <span className="ost-art">
               <Icon name="music" size={16} />
               {t.art && (
@@ -786,7 +777,7 @@ function OstPanel({ titleId, season }: { titleId: string; season: number | null 
               <span className="ost-kind">{t.kind.toUpperCase()}{t.index ?? ''}</span>
               {t.episodes && <span className="ost-eps">{t.episodes}</span>}
             </span>
-          </a>
+          </div>
         ))}
       </div>
     </aside>
