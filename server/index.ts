@@ -28,7 +28,7 @@ import { qbitConfigured, qbitDelete } from './qbit.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
 import { posthogUiHost } from './posthogConfig.js'
-import { deleteUser, listAllUsers, setUserAdmin } from './users.js'
+import { deleteUser, listAllUsers, setUserAdmin, isAdminViaEnv, isAdminForUserId } from './users.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -55,14 +55,6 @@ app.use(cookieParser())
 // Public, no-login portal routes (catalog, player, HLS/sub/image proxies,
 // schedule). Registered before the authed admin APIs and the SPA catch-all.
 app.use(publicRouter)
-
-// Same allowlist idea as ADMIN_EMAILS in src/lib/AuthContext.tsx, but enforced
-// server-side for the APIs that can mutate the portal or hammer upstreams.
-// Declared above requireAuth so the comment-author profile cache can use it.
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? 'admin@example.com')
-  .split(',')
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean)
 
 async function requireAuth(
   req: express.Request,
@@ -94,11 +86,9 @@ async function requireAuth(
         res.locals.displayName = name?.trim() || String(res.locals.email).split('@')[0] || 'user'
         const avatar = meta.custom_avatar_url ?? meta.avatar_url ?? meta.picture
         res.locals.avatarUrl = typeof avatar === 'string' && avatar ? avatar : null
-        const email = String(res.locals.email).toLowerCase()
-        const isAdmin =
-          meta.admin === true ||
-          (user.app_metadata as { role?: unknown } | undefined)?.role === 'admin' ||
-          (!!email && ADMIN_EMAILS.includes(email))
+        // Admin = ADMIN_EMAILS super-admin allowlist or a row in the Postgres
+        // admin_users table (the /manage/Users toggle writes there).
+        const isAdmin = await isAdminForUserId(String(user.id), String(res.locals.email))
         res.locals.isAdmin = isAdmin
         // Keep the comment-author cache current so public reads show the latest
         // name/avatar/admin badge without a Supabase round-trip.
@@ -129,8 +119,8 @@ async function requireAuth(
     res.locals.email = payload.email || ''
     res.locals.displayName = String(res.locals.username).split('@')[0]
     res.locals.avatarUrl = null
-    const email = String(res.locals.email).toLowerCase()
-    res.locals.isAdmin = !!email && ADMIN_EMAILS.includes(email)
+    // Legacy JWT login has no Supabase user id, so only the env allowlist applies.
+    res.locals.isAdmin = isAdminViaEnv(String(res.locals.email))
     next()
   } catch {
     res.status(401).json({ error: 'Unauthorized' })
@@ -142,8 +132,7 @@ function requireAdmin(
   res: express.Response,
   next: express.NextFunction,
 ) {
-  const email = String(res.locals.email ?? '').toLowerCase()
-  if (!email || !ADMIN_EMAILS.includes(email)) {
+  if (!res.locals.isAdmin) {
     res.status(403).json({ error: 'Admin only' })
     return
   }
@@ -212,7 +201,11 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
 app.use(discordPresenceRouter(requireAuth))
 
 app.get('/api/me', requireAuth, (_req, res) => {
-  res.json({ username: res.locals.username as string })
+  res.json({
+    username: res.locals.username as string,
+    email: res.locals.email as string,
+    isAdmin: Boolean(res.locals.isAdmin),
+  })
 })
 
 // Custom profile-picture upload (raw image bytes; content-type sets the extension).
@@ -962,8 +955,7 @@ app.delete('/api/comments/:id', requireAuth, (req, res) => {
     res.status(404).json({ error: 'Not found' })
     return
   }
-  const email = String(res.locals.email ?? '').toLowerCase()
-  const isAdmin = Boolean(res.locals.isAdmin) || (!!email && ADMIN_EMAILS.includes(email))
+  const isAdmin = Boolean(res.locals.isAdmin)
   if (row.user_id !== res.locals.username && !isAdmin) {
     res.status(403).json({ error: 'Not your comment' })
     return

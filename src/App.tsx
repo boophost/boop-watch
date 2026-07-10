@@ -53,9 +53,12 @@ function RequireAuthSignup() {
 }
 
 function RequireAdmin() {
-  const { user, loading } = useAuth()
+  const { user, loading, adminReady } = useAuth()
 
-  if (loading) {
+  // isAdmin resolves asynchronously (server round trip) after loading flips
+  // false — without the adminReady wait, a hard refresh on /manage would
+  // bounce to /profile before the real answer arrives.
+  if (loading || (user && !adminReady)) {
     return (
       <div className="flex h-screen items-center justify-center">
         <div className="text-muted-foreground">Loading...</div>
