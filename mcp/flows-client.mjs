@@ -35,7 +35,7 @@ function cfg() {
   loadEnv()
   return {
     base: (process.env.BOOP_API || 'http://localhost:8080').replace(/\/$/, ''),
-    email: process.env.BOOP_ADMIN_EMAIL || 'admin@example.com',
+    email: process.env.BOOP_ADMIN_EMAIL || '',
     token: process.env.BOOP_TOKEN || '',
     secret: process.env.BOOP_JWT_SECRET || '',
   }
@@ -46,6 +46,9 @@ function authToken() {
   if (token) return token
   if (!secret) {
     throw new Error('No admin credential: set BOOP_TOKEN or BOOP_JWT_SECRET in mcp/flows.env')
+  }
+  if (!email) {
+    throw new Error('Cannot mint admin token: set BOOP_ADMIN_EMAIL in mcp/flows.env')
   }
   // Shape matches what requireAuth reads (email drives requireAdmin).
   return jwt.sign({ email, username: email }, secret, { expiresIn: '12h' })

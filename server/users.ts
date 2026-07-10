@@ -12,7 +12,7 @@ export interface AdminUserRow {
   adminViaEnv: boolean
 }
 
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? 'admin@example.com')
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? '')
   .split(',')
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean)
