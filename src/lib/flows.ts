@@ -437,8 +437,32 @@ export interface QueueStat {
   lastError: { at: number; message: string } | null
 }
 
+/** One outbound request from the server's rolling log (URL is origin+path, no query). */
+export interface RequestLogEntry {
+  at: number
+  key: string
+  method: string
+  url: string
+  status: number | null
+  ms: number
+  error: string | null
+}
+
+/** One portal-sync pass (the 5-min Jellyfin → portal.sqlite refresh). */
+export interface SyncSummary {
+  at: number
+  ms: number
+  items: number
+  episodes: number
+  pruned: number
+  posterSearches: number
+  error: string | null
+}
+
 export const getQueueStats = () =>
-  fetchAuth('/api/flows/queue').then((r) => json<{ queues: Record<string, QueueStat> }>(r))
+  fetchAuth('/api/flows/queue').then((r) =>
+    json<{ queues: Record<string, QueueStat>; requests: RequestLogEntry[]; syncs: SyncSummary[] }>(r),
+  )
 
 // Live activity stream events (GET /api/flows/runs/stream). `snapshot` arrives
 // first, then run lifecycle events as they happen; `ping` is a keepalive.
