@@ -127,7 +127,7 @@ function buildBody({ version, ahead, commitLines, mergedPrs, previous }) {
       }
     }
   } else {
-    lines.push('_No merge commits with PR numbers in this range — direct commits on dev:_')
+    lines.push('_No PR-linked commits (merge or squash) in this range — direct commits on dev:_')
     lines.push('')
     for (const line of commitLines) lines.push(line)
     lines.push('')
@@ -194,21 +194,31 @@ function main() {
     return
   }
 
+  // PRs land on dev two ways: a merge commit ("Merge pull request #N") or a
+  // squash merge, whose subject GitHub suffixes with "(#N)". Scan both — for
+  // a while only merge commits were parsed, so squash-merged PRs' test plans
+  // silently skipped the promotion checklist.
   const mergeSubjects = sh('git', ['log', 'origin/main..origin/dev', '--merges', '--pretty=format:%s']).split('\n').filter(Boolean)
+  const squashSubjects = sh('git', ['log', 'origin/main..origin/dev', '--no-merges', '--pretty=format:%s']).split('\n').filter(Boolean)
   const prNumbers = [
-    ...new Set(
-      mergeSubjects
-        .map((s) => {
-          const m = s.match(/Merge pull request #(\d+)/)
-          return m ? Number(m[1]) : null
-        })
-        .filter((n) => n !== null),
-    ),
+    ...new Set([
+      ...mergeSubjects
+        .map((s) => s.match(/Merge pull request #(\d+)/))
+        .filter((m) => m !== null)
+        .map((m) => Number(m[1])),
+      ...squashSubjects
+        .map((s) => s.match(/\(#(\d+)\)\s*$/))
+        .filter((m) => m !== null)
+        .map((m) => Number(m[1])),
+    ]),
   ]
 
-  const mergedPrs = prNumbers.map((num) => {
-    const pr = shJson('gh', ['pr', 'view', String(num), '--json', 'number,title,body,url'])
-    return pr
+  const mergedPrs = prNumbers.flatMap((num) => {
+    try {
+      return [shJson('gh', ['pr', 'view', String(num), '--json', 'number,title,body,url'])]
+    } catch {
+      return [] // a trailing "(#N)" that references an issue, not a PR
+    }
   })
 
   const commitLines = sh('git', ['log', 'origin/main..origin/dev', '--pretty=format:- %s (`%h`)', '--no-merges'])
