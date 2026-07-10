@@ -295,16 +295,28 @@ export default function Watch() {
     if (p && activeSeg) { p.currentTime = activeSeg.end; setActiveSeg(null) }
   }
 
-  const goNext = () => {
-    if (!data || !data.nextId) return
+  // Mark the current episode fully finished (position = duration), then optionally
+  // advance. Used by both Next controls and onEnded — must write the complete
+  // marker *before* navigate, because the progress-effect cleanup would otherwise
+  // flush the mid-episode playhead and clear watched.
+  const markComplete = async (nextId: string | null) => {
+    if (!data) return
     const p = playerRef.current
-    if (p) {
-      const prog: Progress = { position: p.currentTime, duration: p.duration || 0, watched: true }
-      saveLocalProgress(data.id, prog)
-      if (user) saveAccountProgress(user.id, data.id, prog).catch(() => {})
-      setProgMap((m) => ({ ...m, [data.id]: prog }))
+    const d = (p && Number.isFinite(p.duration) && p.duration > 0)
+      ? p.duration
+      : duration
+    const prog: Progress = { position: d, duration: d, watched: true }
+    saveLocalProgress(data.id, prog)
+    setProgMap((m) => ({ ...m, [data.id]: prog }))
+    if (user) {
+      try { await saveAccountProgress(user.id, data.id, prog) } catch { /* local still set */ }
     }
-    navigate(`/watch/${data.nextId}`)
+    if (nextId) navigate(`/watch/${nextId}`)
+  }
+
+  const goNext = () => {
+    if (!data?.nextId) return
+    void markComplete(data.nextId)
   }
 
   // Intro/outro marks on the timeline: a gradient with a stop pair per segment,
@@ -333,12 +345,7 @@ export default function Watch() {
   // Auto-advance when the episode ends.
   const onEnded = () => {
     if (!data) return
-    const p = playerRef.current
-    const prog: Progress = { position: p?.duration || 0, duration: p?.duration || 0, watched: true }
-    saveLocalProgress(data.id, prog)
-    if (user) saveAccountProgress(user.id, data.id, prog).catch(() => {})
-    setProgMap((m) => ({ ...m, [data.id]: prog }))
-    if (data.nextId) navigate(`/watch/${data.nextId}`)
+    void markComplete(data.nextId)
   }
 
   // Client-side subtitles (JASSUB overlay) — independent of the transcode.
@@ -379,11 +386,14 @@ export default function Watch() {
   // Persist progress: locally every tick (resume), to the account on a longer
   // cadence + flush points (tab hide, unmount, near-end), and into progMap so
   // the episode list's bar tracks the playhead. Past the -15s mark it counts
-  // as watched.
+  // as watched. Never downgrade a completed mark — Next/onEnded write
+  // watched:true with position=duration, and the unmount flush would otherwise
+  // overwrite that with the mid-episode playhead.
   useEffect(() => {
     if (!data) return
     let lastPush = 0
     const savePos = (flush = false) => {
+      if (localProgress(data.id)?.watched) return
       const p = playerRef.current
       if (!p) return
       const d = p.duration

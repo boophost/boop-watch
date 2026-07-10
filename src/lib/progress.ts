@@ -63,7 +63,19 @@ export async function loadProgressMap(ids: string[], loggedIn: boolean): Promise
       .in('item_id', ids)
     if (error) throw error
     for (const r of data || []) {
-      out[r.item_id] = { position: r.position, duration: r.duration, watched: r.watched }
+      const account: Progress = { position: r.position, duration: r.duration, watched: r.watched }
+      const local = out[r.item_id]
+      // A just-completed local mark can race ahead of the account upsert; don't
+      // let a stale unfinished account row wipe "watched" on the next page load.
+      if (local?.watched && !account.watched) {
+        out[r.item_id] = {
+          position: Math.max(local.position, account.position),
+          duration: Math.max(local.duration, account.duration) || local.duration || account.duration,
+          watched: true,
+        }
+      } else {
+        out[r.item_id] = account
+      }
     }
   } catch { /* offline/unreachable: local view is still useful */ }
   return out
