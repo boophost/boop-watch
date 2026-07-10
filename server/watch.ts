@@ -31,6 +31,9 @@ export interface WatchData {
   title: string
   epNum: string
   isEpisode: boolean
+  /** Parent series + season for episodes (the OST widget's themes key). */
+  seriesId: string | null
+  season: number | null
   back: { href: string; label: string }
   audio: { tracks: AudioTrack[]; default: number | null }
   subs: SubTrack[]
@@ -100,6 +103,8 @@ export function buildWatchData(id: string, item: JfItem, siblings: JfItem[], seg
     title,
     epNum,
     isEpisode,
+    seriesId: isEpisode ? item.SeriesId ?? null : null,
+    season: isEpisode ? item.ParentIndexNumber ?? null : null,
     back: isEpisode
       ? { href: `/series/${item.SeriesId}`, label: item.SeriesName || 'Series' }
       : { href: '/', label: 'All titles' },

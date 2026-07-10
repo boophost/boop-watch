@@ -12,7 +12,7 @@ import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { SearchBar } from '@/components/SearchBar'
 import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
-import { getWatch, type Segment, type WatchData } from '@/lib/api'
+import { getWatch, getThemes, type Segment, type WatchData, type ThemeSong } from '@/lib/api'
 import {
   loadProgressMap, localProgress, saveLocalProgress, saveAccountProgress, backfillAccountProgress,
   type Progress,
@@ -732,9 +732,64 @@ export default function Watch() {
           </aside>
         ) : null}
 
+        <OstPanel titleId={data.seriesId ?? data.id} season={data.season} />
+
         <Comments itemId={data.id} />
       </div>
     </PlayerShell>
+  )
+}
+
+// OST rail under the episode list — fully self-sourcing: the server pulls
+// MAL's OP/ED themes for this season's cour(s) and iTunes cover art, so
+// nothing renders until it has something real. Rows open a YouTube search.
+function OstPanel({ titleId, season }: { titleId: string; season: number | null }) {
+  const [themes, setThemes] = useState<ThemeSong[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    setThemes([])
+    getThemes(titleId, season)
+      .then((r) => { if (!cancelled) setThemes(r.themes) })
+      .catch(() => { /* cosmetic — the rail just stays hidden */ })
+    return () => { cancelled = true }
+  }, [titleId, season])
+
+  if (themes.length === 0) return null
+  return (
+    <aside className="col-ost panel">
+      <div className="eps-head"><Icon name="music" size={15} /><span>OST</span><span className="badge">{themes.length}</span></div>
+      <div className="ost-list">
+        {themes.map((t, i) => (
+          <a
+            key={`${t.kind}${i}`}
+            className="ostrow"
+            href={`https://www.youtube.com/results?search_query=${encodeURIComponent(
+              `${t.title}${t.artist ? ` ${t.artist}` : ''}`,
+            )}`}
+            target="_blank"
+            rel="noreferrer"
+            onClick={() => track('theme_song_clicked', { item_id: titleId, kind: t.kind, title: t.title })}
+          >
+            <span className="ost-art">
+              <Icon name="music" size={16} />
+              {t.art && (
+                <img src={t.art} alt="" loading="lazy"
+                  onError={(e) => { e.currentTarget.style.display = 'none' }} />
+              )}
+            </span>
+            <span className="ost-main">
+              <span className="ost-title">{t.title}</span>
+              {t.artist && <span className="ost-artist">{t.artist}</span>}
+            </span>
+            <span className="ost-meta">
+              <span className="ost-kind">{t.kind.toUpperCase()}{t.index ?? ''}</span>
+              {t.episodes && <span className="ost-eps">{t.episodes}</span>}
+            </span>
+          </a>
+        ))}
+      </div>
+    </aside>
   )
 }
 

@@ -95,6 +95,7 @@ type ServiceKey =
   | 'fanart'
   | 'jimaku'
   | 'aniskip'
+  | 'itunes'
   | 'other'
 
 // Starting values; each key is overridable via env HTTPQ_<KEY> as partial JSON,
@@ -108,6 +109,8 @@ const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   fanart: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   jimaku: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 2 },
   aniskip: { minGapMs: 350, concurrency: 2, timeoutMs: 5_000, retries: 1 },
+  // iTunes Search allows ~20 req/min without a key — pace well under that.
+  itunes: { minGapMs: 3100, concurrency: 1, timeoutMs: 10_000, retries: 1 },
   other: { minGapMs: 250, concurrency: 2, timeoutMs: 20_000, retries: 1 },
 }
 

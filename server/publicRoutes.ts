@@ -17,7 +17,7 @@ import { getBanner, getSelectedBanner, findByMalId, listSeries, listComments, ty
 import { BANNERS_DIR } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
-import { themesForMal, type ThemeSong } from './themes.js'
+import { themesForMal, withArt, type ThemeSong } from './themes.js'
 
 export const publicRouter = Router()
 
@@ -504,8 +504,13 @@ publicRouter.get('/api/catalog/:id/themes', async (req, res) => {
     seen.add(key)
     return true
   })
-  res.set('cache-control', 'public, max-age=3600')
-  res.json({ themes: deduped })
+  // Cover art is budget-raced: cached art answers instantly, cold lookups keep
+  // running past the deadline and land in the cache for the next request. Keep
+  // the client cache short while art may still be trickling in.
+  const withArtRows = await withArt(deduped, 2500)
+  const artComplete = withArtRows.every((t) => t.art != null)
+  res.set('cache-control', `public, max-age=${artComplete ? 3600 : 60}`)
+  res.json({ themes: withArtRows })
 })
 
 // Player metadata (audio/subtitle/quality tracks + sibling episodes).
