@@ -252,6 +252,11 @@ publicRouter.get('/api/featured', async (_req, res) => {
   const newestBySeries = new Map<string, number>()
   const firstEp = new Map<string, JfItem>()
   const epCount = new Map<string, number>()
+  // Latest *regular* season (excludes S0 specials) and how many regular seasons
+  // exist — so the spotlight can show the airing season's art and label it,
+  // while a single-season show stays unlabelled.
+  const latestSeasonBySeries = new Map<string, number>()
+  const seasonsBySeries = new Map<string, Set<number>>()
   for (const ep of getScopeEpisodes()) {
     const sid = ep.SeriesId
     if (!sid) continue
@@ -260,6 +265,11 @@ publicRouter.get('/api/featured', async (_req, res) => {
     epCount.set(sid, (epCount.get(sid) || 0) + 1)
     const prev = firstEp.get(sid)
     if (!prev || epOrd(ep) < epOrd(prev)) firstEp.set(sid, ep)
+    const s = ep.ParentIndexNumber
+    if (s != null && s > 0) {
+      ;(seasonsBySeries.get(sid) ?? seasonsBySeries.set(sid, new Set()).get(sid)!).add(s)
+      if (s > (latestSeasonBySeries.get(sid) ?? -1)) latestSeasonBySeries.set(sid, s)
+    }
   }
 
   const entries = getCollectionItems().flatMap((it) => {
@@ -267,6 +277,14 @@ publicRouter.get('/api/featured', async (_req, res) => {
     const isSeries = it.Type === 'Series'
     const watchId = isSeries ? firstEp.get(it.Id)?.Id : it.Id
     if (!watchId) return []
+    // The spotlight shows the latest season's banner + a "Season N" label,
+    // suppressed only for a plain Season-1-only show (where "Season 1" would be
+    // noise) and for movies. A series holding e.g. only Season 2 still labels it.
+    const latest = latestSeasonBySeries.get(it.Id) ?? null
+    const season =
+      isSeries && latest != null && (latest > 1 || (seasonsBySeries.get(it.Id)?.size ?? 0) > 1)
+        ? latest
+        : null
     return [{
       t: isSeries ? (newestBySeries.get(it.Id) ?? 0) : releasedTs(it),
       item: {
@@ -277,6 +295,7 @@ publicRouter.get('/api/featured', async (_req, res) => {
         year: it.ProductionYear || null,
         genres: (it.Genres || []).slice(0, 3),
         epCount: isSeries ? (epCount.get(it.Id) || 0) : null,
+        season,
         watchId,
       },
     }]
