@@ -155,7 +155,6 @@ export function getDb(): Database.Database {
       updated_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_suggestions_created ON suggestions(created_at);
-    CREATE INDEX IF NOT EXISTS idx_suggestions_group ON suggestions(group_id);
 
     -- MAL episode titles, cached so the portal can show real episode names
     -- without hitting Jikan on every sync. Keyed by (mal_id, episode number).
@@ -278,6 +277,11 @@ export function getDb(): Database.Database {
   ] as const) {
     if (!suggestionCols.has(name)) instance.exec(`ALTER TABLE suggestions ADD COLUMN ${name} ${type}`)
   }
+  // Index on group_id lives here, not in the schema block above: on an existing
+  // DB the CREATE TABLE IF NOT EXISTS is a no-op, so group_id only exists once the
+  // ALTER above has run. Creating it in the schema block would reference a column
+  // that isn't there yet on already-provisioned deployments.
+  instance.exec(`CREATE INDEX IF NOT EXISTS idx_suggestions_group ON suggestions(group_id)`)
 
   // Additive migration: `thumb_url` arrived with the provider-artwork sources,
   // whose candidate lists are far too large to cache in full (see banners.ts).
