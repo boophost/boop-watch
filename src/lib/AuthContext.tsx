@@ -14,11 +14,6 @@ interface User {
   identities: UserIdentity[]
 }
 
-// Emails granted admin regardless of Supabase metadata. Admin is only enforced
-// client-side (the /manage guard + sidebar link), so this allowlist is the
-// source of truth alongside user_metadata.admin / app_metadata.role.
-const ADMIN_EMAILS = ['ethanwhi@gmail.com']
-
 const NEW_USER_MS = 60_000
 
 function oauthProvider(session: Session): 'google' | 'discord' | null {
@@ -33,14 +28,17 @@ function isNewUser(session: Session): boolean {
   return Number.isFinite(created) && Date.now() - created < NEW_USER_MS
 }
 
-function computeIsAdmin(session: Session): boolean {
-  const meta = session.user.user_metadata || {}
-  const email = session.user.email ?? ''
-  return (
-    meta.admin === true ||
-    session.user.app_metadata?.role === 'admin' ||
-    ADMIN_EMAILS.includes(email.toLowerCase())
-  )
+// Admin status is server-verified: GET /api/me consults the ADMIN_EMAILS
+// allowlist and the Postgres admin_users table. The session metadata is no
+// longer trusted for this — toUser() defaults isAdmin to false and
+// refreshIsAdmin() upgrades it once the server answers.
+async function fetchIsAdmin(session: Session): Promise<boolean> {
+  const resp = await fetch('/api/me', {
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  })
+  if (!resp.ok) return false
+  const body = (await resp.json()) as { isAdmin?: unknown }
+  return body.isAdmin === true
 }
 
 // display_name / custom_avatar_url are the user's own profile-page overrides
@@ -65,14 +63,14 @@ function avatarUrl(session: Session): string | null {
 
 // Tie the PostHog person profile to the Supabase account. Keyed by the stable
 // user id (survives email changes); safe to call repeatedly — re-identifying
-// the same id just refreshes the properties.
+// the same id just refreshes the properties. is_admin is asserted separately
+// once the server answers (see refreshIsAdmin), so it isn't guessed here.
 function identifyFromSession(session: Session): void {
   const name = displayName(session)
   identifyUser(session.user.id, {
     email: session.user.email ?? undefined,
     name: name || undefined,
     provider: oauthProvider(session) ?? 'email',
-    is_admin: computeIsAdmin(session),
     created_at: session.user.created_at,
   })
 }
@@ -95,12 +93,15 @@ function handleAuthChange(event: AuthChangeEvent, session: Session | null): void
   if (event === 'SIGNED_OUT') resetAnalytics()
 }
 
+// isAdmin starts false and is upgraded asynchronously by refreshIsAdmin once
+// /api/me answers — callers that rebuild the user for unrelated reasons must
+// merge the already-resolved value back in (see unlinkProvider/updateProfile).
 function toUser(session: Session | null): User | null {
   if (!session?.user) return null
   return {
     username: displayName(session) || session.user.email || '',
     id: session.user.id,
-    isAdmin: computeIsAdmin(session),
+    isAdmin: false,
     avatarUrl: avatarUrl(session),
     hasCustomAvatar: customAvatarUrl(session) !== null,
     identities: session.user.identities ?? [],
@@ -117,6 +118,9 @@ interface ProfilePatch {
 interface AuthContextType {
   user: User | null
   loading: boolean
+  /** False while the server-verified isAdmin flag is still in flight for the
+   *  current session — admin route guards should wait on this, not redirect. */
+  adminReady: boolean
   login: (email: string, password: string) => Promise<void>
   signup: (email: string, password: string) => Promise<void>
   loginWithProvider: (provider: 'google' | 'discord') => Promise<void>
@@ -129,6 +133,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
   user: null,
   loading: true,
+  adminReady: false,
   login: async () => {},
   signup: async () => {},
   loginWithProvider: async () => {},
@@ -141,20 +146,53 @@ const AuthContext = createContext<AuthContextType>({
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
+  const [adminReady, setAdminReady] = useState(false)
 
   useEffect(() => {
+    // Resolve the server-verified admin flag for a just-seen session. Always
+    // asserts the settled boolean (into state and the PostHog person) so a
+    // revoke can't leave a stale true; the id guard keeps a late response for
+    // an old session from clobbering a newer one.
+    // adminReady latches true after the first resolution (it starts false, so
+    // hard-refresh deep links to /manage wait for the real answer) — later
+    // re-verifications on token refresh just correct isAdmin in place without
+    // bouncing route guards back to a spinner.
+    const refreshIsAdmin = (session: Session) => {
+      fetchIsAdmin(session)
+        .catch(() => false)
+        .then((isAdmin) => {
+          setUser((prev) =>
+            prev && prev.id === session.user.id ? { ...prev, isAdmin } : prev,
+          )
+          identifyUser(session.user.id, { is_admin: isAdmin })
+          setAdminReady(true)
+        })
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) identifyFromSession(session)
       setUser(toUser(session))
       setLoading(false)
+      if (session) refreshIsAdmin(session)
+      else setAdminReady(true)
     })
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
       handleAuthChange(event, session)
-      setUser(toUser(session))
+      // This fires on token refreshes/tab refocus too — keep the resolved
+      // isAdmin for the same user so admin UI doesn't flicker off while
+      // refreshIsAdmin re-verifies.
+      setUser((prev) => {
+        const next = toUser(session)
+        return next && prev && prev.id === next.id
+          ? { ...next, isAdmin: prev.isAdmin }
+          : next
+      })
       setLoading(false)
+      if (session) refreshIsAdmin(session)
+      else setAdminReady(true)
     })
 
     return () => subscription.unsubscribe()
@@ -201,7 +239,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const { error } = await supabase.auth.unlinkIdentity(identity)
     if (error) throw error
     const { data: { session } } = await supabase.auth.getSession()
-    setUser(toUser(session))
+    // Unlinking doesn't change admin status — keep the resolved flag rather
+    // than letting toUser() regress it to false until the next auth cycle.
+    setUser((prev) => {
+      const next = toUser(session)
+      return next ? { ...next, isAdmin: prev?.isAdmin ?? false } : next
+    })
   }
 
   // display_name / custom_avatar_url are the user's own metadata fields (never
@@ -215,7 +258,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const { error } = await supabase.auth.updateUser({ data })
     if (error) throw error
     const { data: { session } } = await supabase.auth.getSession()
-    setUser(toUser(session))
+    // Profile edits don't change admin status — same merge as unlinkProvider.
+    setUser((prev) => {
+      const next = toUser(session)
+      return next ? { ...next, isAdmin: prev?.isAdmin ?? false } : next
+    })
     if (session?.access_token) {
       void fetch('/api/me', {
         headers: { Authorization: `Bearer ${session.access_token}` },
@@ -231,7 +278,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, login, signup, loginWithProvider, linkProvider, unlinkProvider, updateProfile, logout }}
+      value={{ user, loading, adminReady, login, signup, loginWithProvider, linkProvider, unlinkProvider, updateProfile, logout }}
     >
       {children}
     </AuthContext.Provider>
