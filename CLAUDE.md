@@ -68,52 +68,34 @@ check with no push. **Both moving tags must exist for the pods to pull** — `:l
 `main` push, `:dev` from a `dev` push (a Deployment pinned to a tag that was never published
 `ImagePullBackOff`s).
 
-The app now runs on a **k3s cluster** (control plane `k8s-cp`, `[redacted-lan-ip]`), provisioned by the
-`n0es/link` platform: the `boop-watch` (prod) and `boop-watch-dev` (staging) Deployments/Services
-live in the **`link-apps`** namespace with `link.boopurno.es/app` labels. link sets
+The app runs on a **k3s cluster** provisioned by the `n0es/link` platform: the `boop-watch` (prod)
+and `boop-watch-dev` (staging) Deployments/Services live in the **`link-apps`** namespace. link sets
 `imagePullPolicy: Always` + a changing `link.dev/deployed-at` pod annotation, but a *running* pod
 never re-pulls a moved tag on its own — so the deploy job runs `kubectl rollout restart` (same effect
-as link's redeploy) to force the new pod to pull the freshly pushed image. It is **not** a
-Watchtower/compose deploy anymore (the old `boop-watch` compose service on `boopurnoes` is
-retired/stopped).
+as link's redeploy) to force the new pod to pull the freshly pushed image. Each deploy job is gated
+by `github.ref` and uses a least-privilege RBAC identity scoped to the required deployments.
 
-Both `deploy` (prod) and `deploy-dev` run on the **self-hosted runner on `k8s-cp`** (label `k3s-cp`)
-because the k3s API is LAN-only, and each is gated by `github.ref` so only the matching branch's job
-runs. They authenticate with a token scoped (RBAC `Role` in `link-apps`) to `get/list/watch/patch`
-deployments — not cluster-admin — via kubeconfig `$HOME/.kube/boop-watch-deployer.yaml` on that host.
-Manual roll if ever needed: `kubectl -n link-apps rollout restart deployment/boop-watch` (or
-`deployment/boop-watch-dev`).
+Private cluster hostnames, LAN IPs, kubeconfig paths, and secret-minting recipes live outside this
+repo (operator runbook / private agent docs).
 
 ```bash
 npm run build:all     # tsc -b && vite build  +  tsc -p server/tsconfig.json  (CI does this)
 npm run dev           # Vite dev server (proxies /api + /img to the backend)
 npm run server:dev    # tsx watch server/index.ts  (backend on :3001)
 
-# smoke test a running pod (the app listens on :3000 in-container)
-kubectl -n link-apps exec deploy/boop-watch     -- wget -qO- http://localhost:3000/health   # prod
-kubectl -n link-apps exec deploy/boop-watch-dev -- wget -qO- http://localhost:3000/health   # staging
+# generic deployment checks
+kubectl -n link-apps rollout status deployment/boop-watch-dev
+kubectl -n link-apps exec deploy/boop-watch-dev -- wget -qO- http://localhost:3000/health
 ```
 
-**Verify a change on staging after merging to `dev`** (the host has `kubectl` access to the LAN
-cluster — you don't need the self-hosted runner to *check*):
+**Verify a change on staging after merging to `dev`:** wait for the staging rollout, confirm the
+deployment is healthy, and exercise `/health` plus the APIs and UI affected by the change. Record
+the results against the merged PR's test-plan checklist. Environment access details belong in the
+operator runbook, not this repository.
 
-```bash
-kubectl -n link-apps rollout status deployment/boop-watch-dev --timeout=180s   # wait for the roll
-kubectl -n link-apps get pods -l link.boopurno.es/app=boop-watch-dev           # expect 1/1 Running
-kubectl -n link-apps exec deploy/boop-watch-dev -- wget -qO- http://localhost:3000/health   # -> ok
-# exercise the real APIs against staging without a public URL:
-kubectl -n link-apps port-forward deploy/boop-watch-dev 8080:3000 &            # then curl :8080/api/…
-```
-
-`boop-watch-dev` has **no ingress yet** (ClusterIP only), so it's reachable via `exec`/`port-forward`,
-not a browser URL. Give it its own `JELLYFIN_API_KEY` / `WATCH_COLLECTION_ID` (portal routes 503
-without them). A public `dev.watch.boopurno.es`-style route would be a follow-up (add an ingress in
-the `link` platform).
-
-`watch.boopurno.es` is served through the `link`/k3s ingress path (MetalLB), not the old
-`boopurnoes` Traefik route. The public DNS record is **grey-clouded** (Cloudflare proxy off) so video
-bypasses CF's free-tier video ToS. The SQLite DB needs a persistent volume (the k3s app `Volume` /
-PVC, mounted at `DATA_DIR`).
+Production is served at `watch.boopurno.es`. The public DNS record is **grey-clouded** (Cloudflare
+proxy off) so video bypasses CF's free-tier video ToS. The SQLite DB needs a persistent volume
+mounted at `DATA_DIR`.
 
 ### Library-import flow (custom indexer → library)
 
@@ -128,16 +110,13 @@ sidecars alongside) → `sink.jellyfin-scan`. Run it on a schedule (files finish
 queued). Sorting/scoring/branching is done with the general `filter.compare` / `filter.sort` /
 `transform.compute` / `combine.group-pick` nodes — **don't hardcode that logic into domain nodes.**
 
-**This flow needs the media storage mounted into the pod.** Downloads and the Jellyfin library are
-**one NFS export** — `[redacted-nfs-export]` (qBittorrent on boopurnoes bind-mounts it at `/data`;
-Jellyfin/tdarr mount it via `media-nfs-pvc`; layout: `downloads/`, `anime/`, `anime-movies/`,
-`movies/`). Mount that same export **at `/data`** in the pod: then qBit's reported
-`content_path=/data/downloads/…` resolves with **no** `pathFrom`/`pathTo` remap, and set
-`LIBRARY_DIR=/data/anime`. Because downloads and library are the **same filesystem**,
-`sink.library-import` **hardlinks** (verified: shared inode; it falls back to a copy across
-filesystems). `link` supports this via its NFS-mount field (added in `n0es/link` for issue #54).
-`ffmpeg`/`ffprobe` are in the image for the probe/extract nodes. The `mcp/` CLI (see `mcp/README.md`)
-drives flows against a port-forwarded staging backend for iteration.
+**This flow needs shared media storage mounted into the pod.** Mount downloads and the Jellyfin
+library from the same filesystem, keep qBittorrent's reported paths aligned with the pod mount, and
+set `LIBRARY_DIR` to the library directory. `sink.library-import` then hardlinks files and falls back
+to copying across filesystems. `link` supports this through its NFS-mount field. Exact exports,
+mount paths, and storage topology live in the operator runbook. `ffmpeg`/`ffprobe` are in the image
+for the probe/extract nodes. The `mcp/` CLI (see `mcp/README.md`) drives flows against an
+authenticated staging backend for iteration.
 
 ### Flows/schedules live in the DB, not git — promoting code never promotes them
 
@@ -149,7 +128,7 @@ If you build/edit a flow on staging (new node, rewired graph, new published comp
 and this is a deliberate choice (no tooling for it yet — see below), not a bug.
 
 **Manual replication recipe** (e.g. porting a staging-only flow edit to prod):
-1. Port-forward both environments' backends (`kubectl -n link-apps port-forward deploy/boop-watch-dev 3001:3000` and `deploy/boop-watch 3002:3000`), mint a JWT for each from that pod's own `JWT_SECRET` (they differ per environment).
+1. Connect to both environments using the authenticated access procedure in the operator runbook.
 2. **Fetch the target environment's *current* graph fresh — never blindly copy the source environment's graph.** Environments drift (e.g. prod's `enrich.indexer-match` had a `seasonField` config dev's didn't; prod's `sink.library-import` had no explicit `pathTemplate` override while dev did) — copying wholesale silently clobbers real prod-only config. Diff node-by-node (`id`, `type`, `config`) before touching anything.
 3. Apply the same structural edit (insert/rewire nodes) to the target's own fetched graph, preserving every other node's config untouched.
 4. If the edit references a published component (a `flow.subflow` node's `flowId`), that component must be created + published **separately on the target environment first** — flow IDs are per-database and will not match across environments (e.g. a component published as flow #37 on dev may land as flow #26 on prod).
@@ -177,11 +156,10 @@ a manual process for now).
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free
   personal key); unset ⇒ that source no-ops, the other three still gather
-- `JIKAN_URL` — self-hosted jikan-rest base (`http://jikan-rest.jikan.svc.cluster.local:8080/v4`
-  on the cluster; see `k8s/jikan/`) for all **id-based** MAL routes; default is the public
-  `https://api.jikan.moe/v4`. `JIKAN_SEARCH_URL` — base for `/anime?q=` searches only, default
-  public: the self-hosted instance runs without a search index, so **never** point
-  `JIKAN_SEARCH_URL` at it (its `/anime?q=` 500s)
+- `JIKAN_URL` — Jikan base for all **id-based** MAL routes; default is the public
+  `https://api.jikan.moe/v4` (see `k8s/jikan/` for self-hosting). `JIKAN_SEARCH_URL` — base for
+  `/anime?q=` searches only, default public: a self-hosted instance without a search index will
+  return 500s for that route
 - `NODE_ENV=production` — serve the built `dist/`
 - `PORT` — default `3000` (the Dockerfile sets it; the dev backend defaults to `3001`)
 - `POSTHOG_KEY` — PostHog project token for portal analytics (public, exposed via `/config.js`;
@@ -250,11 +228,10 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
 
 ## When you change something
 1. `npm run build:all` (typechecks frontend + server; CI runs this and the Docker build).
-2. For real verification, run the built server and exercise it — the host can reach the Jellyfin
-   container directly (e.g. `JELLYFIN_URL=http://[redacted-docker-ip]:8096`), and the host-built
-   `better-sqlite3` is glibc-native so `node dist-server/index.js` runs locally. The public JSON
-   APIs and a headless browser (Playwright) screenshot are the way to verify UI; you can't rely on
-   server-rendered HTML anymore (it's a client-rendered SPA).
+2. For real verification, run the built server with a reachable Jellyfin test endpoint. The
+   host-built `better-sqlite3` is glibc-native so `node dist-server/index.js` runs locally. The
+   public JSON APIs and a headless browser (Playwright) screenshot are the way to verify UI; you
+   can't rely on server-rendered HTML anymore (it's a client-rendered SPA).
 3. **Bump the version with every change that ships.** Increment `version` in `package.json` (semver:
    patch for fixes, minor for features, major for breaking changes). This is the single source of
    is how a deploy becomes visibly identifiable. One bump per shipped change (if making multiple
