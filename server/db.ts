@@ -172,6 +172,22 @@ export function getDb(): Database.Database {
     -- distinct since SQLite treats NULLs as unequal in a UNIQUE index.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_banners_url ON series_banners(mal_id, kind, url);
 
+    -- Per-episode comments on the public player page. item_id is the Jellyfin
+    -- episode/movie id (same key as watch progress); user_id is the Supabase
+    -- account id. Display name + avatar are snapshotted at post time so reads
+    -- never need a Supabase lookup (a later profile change doesn't rewrite
+    -- history, same trade-off as suggestions.email).
+    CREATE TABLE IF NOT EXISTS episode_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      user_name TEXT NOT NULL,
+      avatar_url TEXT,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_comments_item ON episode_comments(item_id, created_at);
+
     -- What sink.library-import placed, and where it came from. Keyed on the
     -- library-relative path because that is what survives: a file rewritten in
     -- place (trim-audio writes to the PVC, so the import copies across
@@ -358,6 +374,48 @@ export function setSuggestionStatus(id: number, status: SuggestionStatus): Sugge
 
 export function deleteSuggestion(id: number): boolean {
   return getDb().prepare('DELETE FROM suggestions WHERE id = ?').run(id).changes > 0
+}
+
+export interface CommentRow {
+  id: number
+  item_id: string
+  user_id: string
+  user_name: string
+  avatar_url: string | null
+  body: string
+  created_at: string
+}
+
+/** Comments on one episode/movie, newest first. */
+export function listComments(item_id: string): CommentRow[] {
+  return getDb()
+    .prepare('SELECT * FROM episode_comments WHERE item_id = ? ORDER BY id DESC')
+    .all(item_id) as CommentRow[]
+}
+
+export function addComment(c: {
+  item_id: string
+  user_id: string
+  user_name: string
+  avatar_url: string | null
+  body: string
+}): CommentRow {
+  const info = getDb()
+    .prepare(
+      'INSERT INTO episode_comments (item_id, user_id, user_name, avatar_url, body) VALUES (?, ?, ?, ?, ?)',
+    )
+    .run(c.item_id, c.user_id, c.user_name, c.avatar_url, c.body)
+  return getDb()
+    .prepare('SELECT * FROM episode_comments WHERE id = ?')
+    .get(Number(info.lastInsertRowid)) as CommentRow
+}
+
+export function getComment(id: number): CommentRow | undefined {
+  return getDb().prepare('SELECT * FROM episode_comments WHERE id = ?').get(id) as CommentRow | undefined
+}
+
+export function deleteComment(id: number): boolean {
+  return getDb().prepare('DELETE FROM episode_comments WHERE id = ?').run(id).changes > 0
 }
 
 export function listSeries(): SeriesRow[] {

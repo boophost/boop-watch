@@ -45,25 +45,19 @@
   & *::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 8%); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
   & *::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 16%); }
 
-  /* App shell: side nav + content column. The nav's inner column is sticky,
-     so it stays pinned to the viewport while the page scrolls; data-collapsed
-     on the shell shrinks it to an icon rail. */
-  &.shell { display: flex; min-height: 100vh; }
+  /* App shell: a full-width header row, then side nav + content column in
+     .shell-body. The header carries the brand; the nav is links-only, and its
+     inner column sticks below the (sticky, 56px) header while the page
+     scrolls. data-collapsed on the shell shrinks the nav to an icon rail. */
+  &.shell { display: flex; flex-direction: column; min-height: 100vh; }
+  & .shell-body { display: flex; flex: 1; min-width: 0; }
   /* inline-size container so the hero can break out of main's centered
      max-width to the full content-pane width (100cqw) on wide screens. */
   & .shell-main { flex: 1; min-width: 0; display: flex; flex-direction: column; container-type: inline-size; }
   & .snav { flex: none; width: 232px; border-right: 1px solid var(--border); transition: width .18s ease; }
   &.shell[data-collapsed="true"] .snav { width: 64px; }
-  & .snav-inner { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
+  & .snav-inner { position: sticky; top: 56px; height: calc(100vh - 56px); display: flex; flex-direction: column;
     gap: 2px; padding: 14px 12px; overflow: hidden; }
-  & .snav-head { padding: 2px 4px 14px; }
-  & .snav-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px;
-    letter-spacing: -0.02em; white-space: nowrap; min-width: 0; }
-  & .snav-brand .brand-mark { width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--accent), oklch(0.62 0.2 270));
-    display: grid; place-items: center;
-    font-family: var(--font-mono); font-size: 13px; color: var(--accent-fg); font-weight: 600; }
-  & .snav-brand .sub { color: var(--fg-subtle); font-weight: 400; }
   & .snav-link { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 11px;
     border-radius: 9px; border: none; background: transparent; cursor: pointer;
     font: 500 13.5px var(--font-sans); color: var(--fg-muted); white-space: nowrap;
@@ -76,7 +70,6 @@
   &.shell[data-collapsed="true"] .snav-label { display: none; }
   &.shell[data-collapsed="true"] .snav-inner { padding: 14px 13px; }
   &.shell[data-collapsed="true"] .snav-link { justify-content: center; padding: 0; }
-  &.shell[data-collapsed="true"] .snav-head { padding: 2px 0 14px; display: flex; justify-content: center; }
   
   & .mob-nav { display: none; }
   @media (max-width: 767px) { 
@@ -104,8 +97,8 @@
     background: oklch(0.145 0.008 285 / 80%); backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--border);
   }
-  & .chrome .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; }
-  @media (min-width: 768px) { & .chrome .brand { display: none; } }
+  & .chrome .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px;
+    letter-spacing: -0.02em; min-width: 0; }
   & .chrome .brand-mark {
     width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
     background: linear-gradient(135deg, var(--accent), oklch(0.62 0.2 270));
@@ -591,9 +584,11 @@
   /* Main header: brand · centered search · account crumb (mirrors .chrome).
      Shared SearchBar/UserCrumb components — the styles live in the .kagura
      scope, so the page root carries both classes. */
+  /* 56px + sticky to match .chrome: the snav's sticky offset assumes the
+     header row is exactly this tall on every page. */
   & .topbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 520px) minmax(0, 1fr);
-    gap: 14px; align-items: center; padding: 12px 22px; border-bottom: 1px solid var(--border);
-    position: relative; z-index: 60;
+    gap: 14px; align-items: center; padding: 0 22px; height: 56px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 60;
     background: oklch(0.145 0.008 285 / 70%); backdrop-filter: blur(10px); }
   & .topbar .umenu { grid-column: 3; justify-self: end; }
   & .topbar .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px;
@@ -626,19 +621,42 @@
     color: var(--fg-muted); font-size: 13px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 7px; }
   & .subbar .manage-link:hover { color: var(--fg); border-color: var(--fg-subtle); }
 
+  /* width: 100% matters: .wrap is a flex item whose auto cross-axis margins
+     disable stretching, so without it the grid shrink-wraps to its content —
+     historically the player's own intrinsic (viewport-height-dependent!) size,
+     which made the video a different width on every window shape. */
   & .wrap { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px;
-    max-width: 1560px; margin: 0 auto; padding: 20px; align-items: start; }
+    width: 100%; max-width: 1560px; margin: 0 auto; padding: 20px; align-items: start; }
   & .wrap.no-eps { grid-template-columns: minmax(0, 1fr); max-width: 1280px; }
   & .col-video { min-width: 0; }
+  /* The .vid box owns the player's geometry: a fixed 16/9 (clamped to 78vh on
+     short windows) that exists before the player mounts and never changes with
+     the source — so loading, episode switches, and metadata arriving cause no
+     layout shift. The player fills it absolutely; the video letterboxes inside. */
   & .vid { position: relative; background: #000; border-radius: 12px; overflow: hidden;
+    aspect-ratio: 16 / 9; max-height: 78vh; margin: 0 auto; /* max-height transfers to a width cap on short windows; keep the box centered then */
     box-shadow: 0 30px 80px -30px oklch(0 0 0 / 80%); }
   & video { display: block; width: 100%; max-height: 78vh; background: #000; }
 
   /* Vidstack player, themed to the Kagura accent. */
-  & .vds-player { width: 100%; max-height: 78vh; --media-brand: var(--accent); --media-focus-ring-color: var(--accent); }
-  & .vds-player video { max-height: 78vh; }
+  & .vds-player { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none;
+    aspect-ratio: auto !important; /* .vid is the sizing box; beat the inline React prop */
+    --media-brand: var(--accent); --media-focus-ring-color: var(--accent); }
+  & .vds-player video { width: 100%; height: 100%; max-height: none; object-fit: contain; }
   & .vds-player[data-fullscreen] { max-height: none; aspect-ratio: auto !important; }
   & .vds-player[data-fullscreen] video { max-height: none; }
+
+  /* Loading shimmer inside the reserved .vid box (metadata still in flight). */
+  & .vid-loading::after { content: ""; position: absolute; inset: 0;
+    background: linear-gradient(100deg, transparent 35%, oklch(1 0 0 / 5%) 50%, transparent 65%);
+    background-size: 200% 100%; animation: skel-shimmer 1.6s linear infinite; }
+
+  /* Skeleton fills for the control bar + episode list while /api/watch loads. */
+  & .skel-pill { display: inline-block; height: 38px; width: 96px; border-radius: 9px;
+    background: var(--bg-elev-2); border: 1px solid var(--border);
+    animation: skel-pulse 1.5s ease-in-out infinite; }
+  & .skel-box { display: inline-block; height: 11px; max-width: 100%; border-radius: 4px;
+    background: var(--bg-elev-2); animation: skel-pulse 1.5s ease-in-out infinite; }
 
   /* Subtitle (JASSUB) overlay. Vidstack wraps <video> in a flex
      [data-media-provider] and JASSUB inserts its canvas anchor as a *sibling* of
@@ -708,7 +726,8 @@
 
   /* Episode sidebar */
   & .panel { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; }
-  & .col-eps { display: flex; flex-direction: column; max-height: calc(100vh - 92px); position: sticky; top: 20px; overflow: hidden; }
+  /* Sticks 20px below the (sticky, 56px) topbar. */
+  & .col-eps { display: flex; flex-direction: column; max-height: calc(100vh - 148px); position: sticky; top: 76px; overflow: hidden; }
   & .eps-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--border);
     font-weight: 600; font-size: 14px; }
   & .eps-head .badge { margin-left: auto; font-family: var(--font-mono); font-size: 11px; font-weight: 500;
@@ -732,6 +751,50 @@
     background: var(--accent); border-radius: 0 2px 2px 0; pointer-events: none; }
   & .eprow.watched .epprog { background: var(--fg-subtle); }
 
+  /* Per-episode comments, below the player in the video column (the episode
+     sidebar stays sticky beside them). Composer for signed-in users; the list
+     reads fine anonymously. */
+  & .comments { grid-column: 1; min-width: 0; }
+  & .cmt-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px;
+    border-bottom: 1px solid var(--border); font-weight: 600; font-size: 14px; }
+  & .cmt-head .badge { font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+    height: 20px; padding: 0 8px; display: inline-flex; align-items: center; border-radius: 999px;
+    background: var(--bg-elev-2); color: var(--fg-muted); border: 1px solid var(--border); }
+  & .cmt-composer { display: flex; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  & .cmt-avatar { width: 34px; height: 34px; border-radius: 999px; flex: none;
+    object-fit: cover; background: var(--bg-elev-2); }
+  & .cmt-avatar-fallback { display: grid; place-items: center;
+    font: 600 14px var(--font-mono); color: var(--accent-soft-fg); background: var(--accent-soft); }
+  & .cmt-input-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  & .cmt-input { width: 100%; resize: vertical; min-height: 44px; max-height: 220px; padding: 10px 12px;
+    background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 9px; color: var(--fg);
+    font: 13.5px/1.5 var(--font-sans); }
+  & .cmt-input:focus { outline: none; border-color: var(--accent); }
+  & .cmt-input::placeholder { color: var(--fg-subtle); }
+  & .cmt-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
+  & .cmt-error { color: oklch(0.72 0.17 25); font-size: 12.5px; margin-right: auto; }
+  & .cmt-count { font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); }
+  & .cmt-post { height: 34px; padding: 0 16px; font-size: 13px; }
+  & .cmt-post:disabled { opacity: 0.45; pointer-events: none; }
+  & .cmt-signin { padding: 14px 16px; border-bottom: 1px solid var(--border);
+    color: var(--fg-muted); font-size: 13.5px; }
+  & .cmt-signin a { color: var(--accent-soft-fg); }
+  & .cmt-signin a:hover { text-decoration: underline; }
+  & .cmt-list { padding: 4px 0 8px; }
+  & .cmt { display: flex; gap: 12px; padding: 12px 16px; }
+  & .cmt-main { flex: 1; min-width: 0; }
+  & .cmt-meta { display: flex; align-items: baseline; gap: 8px; }
+  & .cmt-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  & .cmt-time { font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); flex: none; }
+  & .cmt-del { margin-left: auto; flex: none; align-self: center; border: none; background: transparent;
+    color: var(--fg-subtle); cursor: pointer; padding: 3px; border-radius: 5px; opacity: 0.55;
+    transition: opacity .12s, color .12s, background .12s; }
+  & .cmt:hover .cmt-del { opacity: 1; }
+  & .cmt-del:hover { color: oklch(0.72 0.17 25); background: var(--bg-hover); }
+  & .cmt-body { margin: 4px 0 0; font-size: 13.5px; line-height: 1.55; color: var(--fg);
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+  & .cmt-empty { padding: 16px 16px 20px; color: var(--fg-subtle); font-size: 13px; }
+
   @media (max-width: 980px) {
     & .wrap { grid-template-columns: minmax(0, 1fr); }
     & .col-eps { position: static; max-height: 420px; }
@@ -742,7 +805,7 @@
      right-aligning via the spacer. The back-link + SxEy chip + title get
      their own uncramped .subbar row. */
   @media (max-width: 760px) {
-    & .topbar { padding: 10px 12px; gap: 10px;
+    & .topbar { padding: 0 12px; gap: 10px;
       grid-template-columns: auto minmax(0, 1fr) auto; }
     & .topbar .brand .label { display: none; }
     & .subbar { padding: 8px 12px; }
@@ -768,7 +831,9 @@ body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; backg
    the anchor shares the video's left edge. A flex row would push that anchor to
    the right of the full-width video and drag the canvas off-screen, so fill the
    video by absolute positioning instead. */
-body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow: none; position: relative; }
+body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow: none; position: relative;
+  aspect-ratio: auto; max-height: none; margin: 0; /* the flex column sizes the box here, not the 16/9 (auto margins would stop it stretching) */ }
+body.theater .player .comments { display: none; }
 /* aspect-ratio: the player carries an inline 16/9 (React prop), and on an
    absolutely-positioned box the ratio wins over width — on a portrait phone it
    derives ~1500px from the viewport height and crops the frame. Filling the
@@ -789,6 +854,8 @@ body.fs .player .pbar { display: none; }
 body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 
 @keyframes suggest-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes skel-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.9; } }
+@keyframes skel-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* Next-episode chase status (Title + Watch episode rows) */
