@@ -19,7 +19,7 @@ import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fetchAniListArt } from './anilist.js'
 import { fetchFanartArt, FanartImage } from './fanart.js'
-import { addBanner, getSelectedBanner, listBanners, listSeries, selectBanner, setBannerLocalFile, ArtKind, BannerRow, SeriesRow } from './db.js'
+import { addBanner, getSelectedBanner, lastFetchAttempt, listBanners, listSeries, recordFetchAttempt, selectBanner, setBannerLocalFile, ArtKind, BannerRow, SeriesRow } from './db.js'
 import { limitedFetch } from './httpQueue.js'
 import { getSeriesSeasons, jellyfinConfigured, jfRemoteImages, jfSeriesIdByTvdb } from './jellyfin.js'
 
@@ -260,16 +260,15 @@ async function cacheBannerFile(b: BannerRow): Promise<void> {
 // Remote sources are re-queried on this cadence so art added later (Kitsu often
 // lags a new season by weeks) still shows up. Anything already stored stays —
 // `addBanner` dedupes by URL, so a re-query only inserts genuinely new art.
+// The last attempt is persisted (fetch_attempts) because deploys roll the pod
+// many times a day, and an in-process map made every roll re-gather the whole
+// catalog against AniList/Kitsu/fanart at once.
 const REGATHER_MS = 6 * 60 * 60 * 1000
-// `${mal_id}:${source}` -> last attempt. In-process only: a restart re-queries
-// once, which is cheap and self-healing.
-const lastTried = new Map<string, number>()
 
 function due(mal_id: number, source: string): boolean {
   const key = `${mal_id}:${source}`
-  const last = lastTried.get(key) ?? 0
-  if (Date.now() - last < REGATHER_MS) return false
-  lastTried.set(key, Date.now())
+  if (Date.now() - lastFetchAttempt('banner-gather', key) < REGATHER_MS) return false
+  recordFetchAttempt('banner-gather', key)
   return true
 }
 
