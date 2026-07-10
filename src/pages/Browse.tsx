@@ -44,7 +44,7 @@ function FeaturedBanner({ items }: { items: FeaturedItem[] }) {
         <div className="feat-slide" key={it.id} data-active={i === idx} aria-hidden={i !== idx}>
           <div className="feat-bg">
             <img
-              src={backdropUrl(it.id)} alt="" loading={i === 0 ? 'eager' : 'lazy'}
+              src={backdropUrl(it.id, it.season)} alt="" loading={i === 0 ? 'eager' : 'lazy'}
               onError={(e) => {
                 const img = e.currentTarget
                 if (img.dataset.fallback) { img.remove(); return }
@@ -60,6 +60,7 @@ function FeaturedBanner({ items }: { items: FeaturedItem[] }) {
             <div className="feat-meta">
               <span className="badge badge-accent">{it.type === 'series' ? 'Series' : 'Movie'}</span>
               {it.year != null && <span className="badge badge-mono">{it.year}</span>}
+              {it.season != null && <span className="badge">Season {it.season}</span>}
               {it.epCount != null && it.epCount > 0 && <span className="badge">{it.epCount} episodes</span>}
               {it.genres.map((g) => <span className="badge" key={g}>{g}</span>)}
             </div>
