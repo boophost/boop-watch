@@ -177,6 +177,11 @@ a manual process for now).
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free
   personal key); unset ⇒ that source no-ops, the other three still gather
+- `JIKAN_URL` — self-hosted jikan-rest base (`http://jikan-rest.jikan.svc.cluster.local:8080/v4`
+  on the cluster; see `k8s/jikan/`) for all **id-based** MAL routes; default is the public
+  `https://api.jikan.moe/v4`. `JIKAN_SEARCH_URL` — base for `/anime?q=` searches only, default
+  public: the self-hosted instance runs without a search index, so **never** point
+  `JIKAN_SEARCH_URL` at it (its `/anime?q=` 500s)
 - `NODE_ENV=production` — serve the built `dist/`
 - `PORT` — default `3000` (the Dockerfile sets it; the dev backend defaults to `3001`)
 - `POSTHOG_KEY` — PostHog project token for portal analytics (public, exposed via `/config.js`;

@@ -430,6 +430,8 @@ export interface QueueStat {
   minGapMs: number
   concurrency: number
   total: number
+  /** Requests started in the server's rolling rate window (last 10 min). */
+  recent: number
   retried: number
   lastStartAt: number | null
   lastError: { at: number; message: string } | null

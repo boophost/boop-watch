@@ -160,7 +160,7 @@ const QUEUE_LABELS: Record<string, string> = {
 function QueueStrip({ queues }: { queues: Record<string, QueueStat> }) {
   const entries = Object.entries(queues)
     .filter(([, q]) => q.total > 0 || q.inFlight > 0 || q.queued > 0)
-    .sort((a, b) => b[1].total - a[1].total)
+    .sort((a, b) => b[1].recent - a[1].recent || b[1].total - a[1].total)
   if (entries.length === 0) return null
   return (
     <div className="mb-4 rounded-lg border border-border bg-card p-3">
@@ -180,7 +180,7 @@ function QueueStrip({ queues }: { queues: Record<string, QueueStat> }) {
               )}
               title={
                 q.lastError
-                  ? `last error: ${q.lastError.message}`
+                  ? `last error ${relTime(new Date(q.lastError.at).toISOString())}: ${q.lastError.message}`
                   : `${q.concurrency}× concurrent, ${q.minGapMs}ms gap`
               }
             >
@@ -198,7 +198,8 @@ function QueueStrip({ queues }: { queues: Record<string, QueueStat> }) {
                 </span>
               ) : null}
               <span className="tabular-nums text-muted-foreground">
-                {q.total}
+                {q.recent > 0 ? `${q.recent} in 10m · ` : ''}
+                {q.total} total
                 {q.retried > 0 ? ` · ${q.retried} retried` : ''}
               </span>
             </div>

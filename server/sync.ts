@@ -3,6 +3,7 @@ import { upsertPortalItem, prunePortalItemsNotIn, PortalItem, getPortalItem } fr
 import {
   listSeries, SeriesRow, EpisodeRow,
   countCachedEpisodes, getEpisodeTitles, upsertEpisodes,
+  lastFetchAttempt, recordFetchAttempt,
 } from './db.js'
 import { searchAnime, pickPosterUrl, fetchAnimeEpisodesPage, episodeNumberFromUrl } from './jikan.js'
 import { ensureFranchiseBanners } from './banners.js'
@@ -27,11 +28,21 @@ function matchCatalog(it: JfItem, catalog: SeriesRow[]): SeriesRow | undefined {
   })
 }
 
+// An attempt that yields nothing (an unaired season, a MAL entry with no
+// episode list, an empty Jikan search) is not retried until this has passed —
+// otherwise the 5-minute portal sync re-asks Jikan the same unanswerable
+// question forever.
+const RETRY_EMPTY_MS = 24 * 60 * 60 * 1000
+
 // MAL episode titles for a series, cached in the catalog DB. Fetches from Jikan
 // only the first time (paginated); best-effort — returns whatever is cached on
 // error so a Jikan hiccup never breaks the portal sync.
 async function ensureEpisodeTitles(mal_id: number): Promise<Map<number, string>> {
   if (countCachedEpisodes(mal_id) > 0) return getEpisodeTitles(mal_id)
+  if (Date.now() - lastFetchAttempt('episode-titles', String(mal_id)) < RETRY_EMPTY_MS) {
+    return getEpisodeTitles(mal_id)
+  }
+  recordFetchAttempt('episode-titles', String(mal_id))
   try {
     const rows: EpisodeRow[] = []
     for (let page = 1; page <= 20; page++) {
@@ -88,7 +99,10 @@ export async function syncJellyfinToPortal() {
     if (!imageUrl && !it.PrimaryImageAspectRatio) {
       if (match && match.image_url) {
         imageUrl = match.image_url
-      } else {
+      } else if (Date.now() - lastFetchAttempt('poster-search', it.Id) >= RETRY_EMPTY_MS) {
+        // Throttled per item: a search that finds nothing (e.g. a stray
+        // release-dir "series" Jikan can't know) used to refire every sync.
+        recordFetchAttempt('poster-search', it.Id)
         try {
           const jikanRes = await searchAnime(it.Name || '', 1)
           if (jikanRes.length > 0) {
