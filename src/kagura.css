@@ -549,6 +549,7 @@
   & .eprow .go { width: 30px; height: 30px; border-radius: 7px; display: grid; place-items: center; color: var(--fg-subtle);
     background: transparent; transition: background .14s, color .14s; flex: none; }
   & .eprow:hover .go { background: var(--accent-soft); color: var(--accent-soft-fg); }
+  & .eprow.watched .num, & .eprow.watched .et { color: var(--fg-subtle); }
 
   & .synopsis { font-size: 13px; line-height: 1.65; color: var(--fg-muted); margin: 10px 0 0; }
   & .empty { color: var(--fg-subtle); padding: 60px 0; text-align: center; }
@@ -742,14 +743,8 @@
   & .eprow.current .epn { color: var(--accent-soft-fg); }
   & .eprow.current .ept { color: var(--accent-soft-fg); font-weight: 600; }
   & .eprow .epnow { color: var(--accent-soft-fg); display: flex; flex: none; }
-  & .eprow.watched { opacity: 0.45; }
-  & .eprow.watched:hover { opacity: 1; }
+  /* .watched / .epprog shared with .kagura .eplist above; player also dims .epn/.ept. */
   & .eprow.watched .epn, & .eprow.watched .ept { color: var(--fg-subtle); }
-  /* Watch-progress bar along the bottom edge of the row (width set inline). */
-  & .eprow { position: relative; overflow: hidden; }
-  & .eprow .epprog { position: absolute; left: 0; bottom: 0; height: 2px;
-    background: var(--accent); border-radius: 0 2px 2px 0; pointer-events: none; }
-  & .eprow.watched .epprog { background: var(--fg-subtle); }
 
   /* Per-episode comments, below the player in the video column (the episode
      sidebar stays sticky beside them). Composer for signed-in users; the list
@@ -785,6 +780,7 @@
   & .cmt-main { flex: 1; min-width: 0; }
   & .cmt-meta { display: flex; align-items: baseline; gap: 8px; }
   & .cmt-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  & .cmt-admin { flex: none; display: inline-flex; align-self: center; color: var(--accent-soft-fg); }
   & .cmt-time { font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); flex: none; }
   & .cmt-del { margin-left: auto; flex: none; align-self: center; border: none; background: transparent;
     color: var(--fg-subtle); cursor: pointer; padding: 3px; border-radius: 5px; opacity: 0.55;
@@ -914,6 +910,35 @@ body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
   color: var(--fg-muted);
   cursor: default;
   pointer-events: none;
+}
+
+/* Watch-progress bar + watched dim — shared by title-page .eplist and player sidebar. */
+.kagura .eprow,
+.player .eprow {
+  position: relative;
+  overflow: hidden;
+}
+.kagura .eprow.watched,
+.player .eprow.watched {
+  opacity: 0.45;
+}
+.kagura .eprow.watched:hover,
+.player .eprow.watched:hover {
+  opacity: 1;
+}
+.kagura .eprow .epprog,
+.player .eprow .epprog {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+  pointer-events: none;
+}
+.kagura .eprow.watched .epprog,
+.player .eprow.watched .epprog {
+  background: var(--fg-subtle);
 }
 /* Status lives outside the 30px play-icon .go slot so "airs in …" isn't clipped. */
 .kagura .eprow .ep-status-slot,

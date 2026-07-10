@@ -205,8 +205,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   // display_name / custom_avatar_url are the user's own metadata fields (never
-  // written by an OAuth provider), so writing them directly is safe and needs
-  // no server round-trip.
+  // written by an OAuth provider), so writing them directly is safe. Ping /api/me
+  // afterward so the server's user_profiles cache (used by comment reads) picks
+  // up the new name/avatar without waiting for the next authed request.
   const updateProfile = async (patch: ProfilePatch) => {
     const data: Record<string, unknown> = {}
     if (patch.displayName !== undefined) data.display_name = patch.displayName
@@ -215,6 +216,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (error) throw error
     const { data: { session } } = await supabase.auth.getSession()
     setUser(toUser(session))
+    if (session?.access_token) {
+      void fetch('/api/me', {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      }).catch(() => {})
+    }
   }
 
   const logout = async () => {
