@@ -1,9 +1,21 @@
+# boop-watch MCP servers / CLIs
+
+Local drivers for the admin REST API so `/manage` surfaces can be operated from
+Claude Code (or a shell) instead of clicking through the UI. There are two:
+
+- **`boop-flows`** (`flows-server.mjs`) — author, inspect, and run flows.
+- **`boop-suggestions`** (`suggestions-server.mjs`) — triage portal user
+  suggestions: move them across the kanban, write titles/notes, mark duplicates,
+  and bundle related ones into epics.
+
+Both are **not** part of the app image — they run on your workstation and talk to
+a deployment's REST API, and they **share the same auth + `mcp/flows.env`**
+config (see Setup below).
+
 # Flow MCP server / CLI
 
 A local driver for the admin flow API (`server/flowRoutes.ts`) so flows can be
-authored, inspected, and run without clicking through the `/manage` editor. It is
-**not** part of the app image — it runs on your workstation and talks to a
-deployment's REST API.
+authored, inspected, and run without clicking through the `/manage` editor.
 
 ## Setup
 
@@ -57,3 +69,41 @@ startup, so it becomes available **after a restart**. Tools: `node_types`,
 `list_flows`, `get_flow`, `create_flow`, `save_flow`, `delete_flow`, `run_flow`,
 `list_runs` (activity log), and the scheduler: `list_schedules`,
 `create_schedule`, `update_schedule`, `delete_schedule`, `run_schedule`.
+
+# Suggestions MCP server / CLI
+
+A driver for the admin suggestions API (`server/index.ts`) so portal user
+suggestions can be triaged from Claude Code. It reuses the flow driver's auth and
+`mcp/flows.env` (same setup as above). The user's suggestion text (`body`) is
+**read-only** — everything else (kanban status, an admin `title`/`notes`,
+duplicate links, and epic grouping) is editable.
+
+## CLI (works in a live session — no restart)
+
+```bash
+node mcp/suggestions-server.mjs list                 # all suggestions, one line each
+node mcp/suggestions-server.mjs list working          # filter by kanban column
+node mcp/suggestions-server.mjs get 12                # one suggestion, full JSON
+node mcp/suggestions-server.mjs status 12 working     # move across the board
+node mcp/suggestions-server.mjs title 12 "OST rows shouldn't link out"
+node mcp/suggestions-server.mjs note 12 "Fixed in #173; verify on staging"
+node mcp/suggestions-server.mjs note 12 none          # clear notes (also: title … none)
+node mcp/suggestions-server.mjs dup 15 12             # #15 is a duplicate of #12
+node mcp/suggestions-server.mjs dup 15 none           # unlink the duplicate
+node mcp/suggestions-server.mjs group 12 3            # attach #12 to epic #3
+node mcp/suggestions-server.mjs group 12 none         # detach from its epic
+node mcp/suggestions-server.mjs delete 12
+
+# Epics — bundle related suggestions under one writeup.
+node mcp/suggestions-server.mjs groups
+node mcp/suggestions-server.mjs group-new "Navigation polish" "Back-button + page memory"
+node mcp/suggestions-server.mjs group-edit 3 '{"description":"…"}'
+node mcp/suggestions-server.mjs group-delete 3        # members are detached, not deleted
+```
+
+## MCP server (for Claude Code)
+
+Registered in `.mcp.json` as `boop-suggestions` (available **after a restart**).
+Tools: `list_suggestions`, `update_suggestion` (status/title/notes/duplicate/group
+in one call), `mark_duplicate`, `assign_group`, `delete_suggestion`, and the epic
+tools `list_groups`, `create_group`, `update_group`, `delete_group`.

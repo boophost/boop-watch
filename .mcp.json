@@ -3,6 +3,10 @@
     "boop-flows": {
       "command": "node",
       "args": ["mcp/flows-server.mjs"]
+    },
+    "boop-suggestions": {
+      "command": "node",
+      "args": ["mcp/suggestions-server.mjs"]
     }
   }
 }

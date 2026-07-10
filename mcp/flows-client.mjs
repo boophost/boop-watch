@@ -104,4 +104,7 @@ export const schedules = {
   run: (id) => api('POST', `/api/schedules/${Number(id)}/run`),
 }
 
-export { cfg }
+// `api` and `cfg` are the shared HTTP core (auth + env loading). The
+// suggestions driver (mcp/suggestions-client.mjs) reuses them so both drivers
+// authenticate the same way against the same deployment.
+export { cfg, api }
