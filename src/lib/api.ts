@@ -205,6 +205,21 @@ export const getTitle = (id: string, season?: number | null) =>
       (season != null && Number.isFinite(season) ? `?season=${season}` : ''),
   )
 export const getWatch = (id: string) => getJSON<WatchData>(`/api/watch/${encodeURIComponent(id)}`)
+
+// OP/ED theme songs (MAL-sourced, season-scoped). Empty when the title isn't
+// mapped to a MAL entry or the upstream is down — the widget hides itself.
+export interface ThemeSong {
+  kind: 'op' | 'ed'
+  index: number | null
+  title: string
+  artist: string | null
+  episodes: string | null
+}
+export const getThemes = (id: string, season?: number | null) =>
+  getJSON<{ themes: ThemeSong[] }>(
+    `/api/catalog/${encodeURIComponent(id)}/themes` +
+      (season != null && Number.isFinite(season) ? `?season=${season}` : ''),
+  )
 export const getSchedule = (weekParam: string) =>
   getJSON<SchedulePayload>('/api/schedule' + (weekParam ? `?${weekParam}` : ''))
 

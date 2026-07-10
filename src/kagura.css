@@ -551,6 +551,26 @@
   & .eprow:hover .go { background: var(--accent-soft); color: var(--accent-soft-fg); }
   & .eprow.watched .num, & .eprow.watched .et { color: var(--fg-subtle); }
 
+  /* Theme-song rows (OP/ED widget under the episode list) */
+  & .themelist { display: flex; flex-direction: column; }
+  & .themerow { display: flex; gap: 14px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border);
+    transition: background .14s; }
+  & .themerow:last-child { border-bottom: none; }
+  & .themerow:hover { background: oklch(1 0 0 / 3%); }
+  & .theme-kind { font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+    width: 48px; flex: none; text-align: center; padding: 3px 0; border-radius: 6px;
+    background: var(--accent-soft); color: var(--accent-soft-fg); }
+  & .theme-kind[data-kind="ed"] { background: var(--bg-elev-2); color: var(--fg-muted); }
+  & .theme-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  & .theme-title { color: var(--fg); font-size: 14px; font-weight: 500; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  & .theme-artist { color: var(--fg-subtle); font-size: 12px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  & .theme-eps { font-family: var(--font-mono); font-size: 12px; color: var(--fg-subtle); flex: none; }
+  & .themerow .go { width: 30px; height: 30px; border-radius: 7px; display: grid; place-items: center;
+    color: var(--fg-subtle); background: transparent; transition: background .14s, color .14s; flex: none; }
+  & .themerow:hover .go { background: var(--accent-soft); color: var(--accent-soft-fg); }
+
   & .synopsis { font-size: 13px; line-height: 1.65; color: var(--fg-muted); margin: 10px 0 0; }
   & .empty { color: var(--fg-subtle); padding: 60px 0; text-align: center; }
 
