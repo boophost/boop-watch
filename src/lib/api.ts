@@ -80,6 +80,8 @@ export interface FeaturedItem {
   year: number | null
   genres: string[]
   epCount: number | null
+  /** Latest season, only for a multi-season series — drives the banner + label. */
+  season: number | null
   watchId: string
 }
 
