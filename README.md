@@ -1,61 +1,83 @@
 # boop-watch
 
-A public, **no-login** streaming portal for a curated subset of a private Jellyfin server, plus an
-authenticated **library manager**. The portal serves only the titles in one Jellyfin collection
-("Public"), keeps the Jellyfin API key server-side, and proxies posters + HLS so the token never
-reaches the browser.
+A sleek, **no-login** streaming portal for a curated subset of a private Jellyfin server, paired with an authenticated **library manager** (`/manage`). 
 
-Live at **watch.boopurno.es**.
+`boop-watch` was built to provide a friction-free, beautiful frontend for a specific Jellyfin collection (e.g., "Public"), keeping the Jellyfin API key entirely server-side. It proxies image assets and HLS streams so that backend authentication tokens never reach the browser.
+
+Live at **[watch.boopurno.es](https://watch.boopurno.es)**.
 
 ## Features
 
-Public portal:
-- Poster-forward **catalog** with live filter, sort (name/year/type), and collapsible genre/type tags
-- **Series** and **movie** detail pages (hero, metadata, synopsis, episodes / Play)
-- Token-stripping **HLS player** (hls.js) with client-side subtitles (JASSUB), audio/quality menus,
-  resume, theater mode, and auto-advance
-- Command-palette **search** that jumps straight to a title
-- Weekly anime **schedule** (sourced from animeschedule.net), filtered to titles in the library,
-  with sub/dub labels and prev/next week navigation
-- Dark, violet-accent "Kagura" design system; mobile-friendly
+**Public Portal:**
+- Poster-forward **catalog** with live filtering, sorting (name/year/type), and collapsible genre/type tags.
+- **Series** and **movie** detail pages featuring hero banners, metadata, synopses, and episode lists.
+- Token-stripping **HLS player** (via `hls.js`) with client-side subtitles (JASSUB), quality menus, resume functionality, theater mode, and auto-advance.
+- Command-palette **search** that jumps straight to a title.
+- Weekly anime **schedule** (sourced from animeschedule.net), filtered dynamically to titles present in your library, with sub/dub labels and week-to-week navigation.
+- A custom, dark, violet-accented **Kagura** design system that is fully mobile-responsive.
 
-Library manager (`/manage`, login required):
-- Search MyAnimeList (via Jikan), add titles to a SQLite catalog, browse metadata + episodes
+**Library Manager (`/manage`):**
+- Authenticated administration panel (built with shadcn/Tailwind).
+- Search MyAnimeList (via Jikan API), add titles to a SQLite catalog, and browse metadata/episodes.
+- Manage visual flow graphs (stored in SQLite) via MCP for advanced data-pipeline processing.
 
-## Stack
-React (Vite) + TypeScript SPA served by an Express 5 + better-sqlite3 backend. Two design systems:
-the portal's "Kagura" (`src/kagura.css`) and shadcn/Tailwind for the admin. See
-**[CLAUDE.md](./CLAUDE.md)** for architecture and development guidance.
+## Tech Stack
 
-## Run
+- **Frontend:** React (Vite) + TypeScript SPA.
+- **Backend:** Express 5 + `better-sqlite3`.
+- **Design Systems:** "Kagura" (`src/kagura.css`) for the public portal, shadcn/Tailwind for the admin dashboard.
+
+See **[CLAUDE.md](./CLAUDE.md)** and **[AGENTS.md](./AGENTS.md)** for architecture and contribution guidelines.
+
+## Quick Start
+
+### Build & Run
 ```bash
-# install + build (frontend -> dist, backend -> dist-server)
+# Install dependencies and build both frontend and backend
 npm ci && npm run build:all
 
-# production: serve the built app
-NODE_ENV=production JELLYFIN_API_KEY=… WATCH_COLLECTION_ID=… node dist-server/index.js   # :3000
-
-# local dev: Vite + backend (proxied) in two terminals
-npm run server:dev      # backend on :3001
-npm run dev             # Vite dev server (proxies /api and /img)
+# Run in production mode
+NODE_ENV=production \
+JELLYFIN_API_KEY=your_key \
+WATCH_COLLECTION_ID=your_collection_id \
+node dist-server/index.js
 ```
 
-| Env var | Required | Default |
+### Local Development
+Run Vite and the proxied Express backend in two separate terminals:
+```bash
+npm run server:dev      # Starts backend on :3001
+npm run dev             # Starts Vite dev server on :5173 (proxies /api and /img)
+```
+
+## Environment Variables
+
+| Variable | Required | Default / Note |
 |---|---|---|
-| `JELLYFIN_API_KEY` | portal | — |
-| `WATCH_COLLECTION_ID` | portal | — |
-| `JELLYFIN_URL` | no | `http://jellyfin:8096` |
-| `SCHEDULE_TZ` | no | `America/New_York` |
-| `DATA_DIR` | no | `./data` (holds `series.sqlite`) |
-| `JWT_SECRET` / `AUTH_USERNAME` / `AUTH_PASSWORD` | `/manage` | insecure dev defaults |
-| `PORT` | no | `3000` |
+| `JELLYFIN_API_KEY` | Yes (Portal) | Admin key required to fetch Jellyfin data. |
+| `WATCH_COLLECTION_ID` | Yes (Portal) | The Jellyfin collection ID to expose on the portal. |
+| `JELLYFIN_URL` | No | `http://jellyfin:8096` |
+| `SCHEDULE_TZ` | No | `America/New_York` |
+| `DATA_DIR` | No | `./data` (Holds the `series.sqlite` database and flow graphs) |
+| `ADMIN_EMAILS` | No | Comma-separated list of emails allowed to log in. |
+| `JWT_SECRET` | No | Insecure dev default used if unset. |
+| `AUTH_USERNAME` | No | Insecure dev default (`admin`) used if unset. |
+| `AUTH_PASSWORD` | No | Insecure dev default (`changeme`) used if unset. |
+| `PORT` | No | `3000` |
+| `JIKAN_URL` | No | Self-hosted Jikan REST API for ID lookups (defaults to public API). |
+| `JIKAN_SEARCH_URL`| No | Public Jikan API for searches (defaults to `https://api.jikan.moe/v4`). |
 
-Deploy is automated across two environments (`link-apps` namespace): pushing to `dev` builds & moves
-`ghcr.io/n0es/boop-watch:dev` → the `deploy-dev` job rolls `boop-watch-dev` (staging); pushing to
-`main` moves `:latest` → the `deploy` job rolls `boop-watch` (production). Normal flow: feature
-branch → PR to `dev` (CI `build` green, then merge = deploy to staging), verify the PR's test plan
-on staging, then promote with a `dev` → `main` PR.
+## Deployment & CI/CD
 
-## Curate
-Add or remove titles from the **"Public"** collection in Jellyfin. The portal's scope cache
-refreshes every 5 minutes (or restart the container).
+Deployment is automated via GitHub Actions:
+- Pushing to the `dev` branch builds the `:dev` image and rolls the staging deployment (`boop-watch-dev`).
+- Pushing to the `main` branch builds the `:latest` image and rolls the production deployment (`boop-watch`).
+
+**Standard Workflow:** 
+Feature Branch → PR to `dev` (Validates build & deploys to Staging) → Verify Staging Health → PR to `main` (Promotes to Production).
+
+## Curation
+
+To add or remove titles from the public portal, simply add or remove them from your configured "Public" collection in Jellyfin. The portal's scope cache will automatically refresh every 5 minutes (or immediately upon container restart).
+
+*Note: For internal infrastructure details, organization operators should refer to the private `boop-watch-ops` repository.*

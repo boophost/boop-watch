@@ -75,8 +75,8 @@ never re-pulls a moved tag on its own — so the deploy job runs `kubectl rollou
 as link's redeploy) to force the new pod to pull the freshly pushed image. Each deploy job is gated
 by `github.ref` and uses a least-privilege RBAC identity scoped to the required deployments.
 
-Private cluster hostnames, LAN IPs, kubeconfig paths, and secret-minting recipes live outside this
-repo (operator runbook / private agent docs).
+Private cluster hostnames, LAN IPs, kubeconfig paths, and secret-minting recipes live in the private
+[`boophost/boop-watch-ops`](https://github.com/boophost/boop-watch-ops) runbook.
 
 ```bash
 npm run build:all     # tsc -b && vite build  +  tsc -p server/tsconfig.json  (CI does this)
@@ -90,8 +90,8 @@ kubectl -n link-apps exec deploy/boop-watch-dev -- wget -qO- http://localhost:30
 
 **Verify a change on staging after merging to `dev`:** wait for the staging rollout, confirm the
 deployment is healthy, and exercise `/health` plus the APIs and UI affected by the change. Record
-the results against the merged PR's test-plan checklist. Environment access details belong in the
-operator runbook, not this repository.
+the results against the merged PR's test-plan checklist. Environment access details belong in
+[`boophost/boop-watch-ops`](https://github.com/boophost/boop-watch-ops), not this repository.
 
 Production is served at `watch.boopurno.es`. The public DNS record is **grey-clouded** (Cloudflare
 proxy off) so video bypasses CF's free-tier video ToS. The SQLite DB needs a persistent volume
@@ -114,7 +114,7 @@ queued). Sorting/scoring/branching is done with the general `filter.compare` / `
 library from the same filesystem, keep qBittorrent's reported paths aligned with the pod mount, and
 set `LIBRARY_DIR` to the library directory. `sink.library-import` then hardlinks files and falls back
 to copying across filesystems. `link` supports this through its NFS-mount field. Exact exports,
-mount paths, and storage topology live in the operator runbook. `ffmpeg`/`ffprobe` are in the image
+mount paths, and storage topology live in [`boophost/boop-watch-ops`](https://github.com/boophost/boop-watch-ops). `ffmpeg`/`ffprobe` are in the image
 for the probe/extract nodes. The `mcp/` CLI (see `mcp/README.md`) drives flows against an
 authenticated staging backend for iteration.
 
@@ -128,7 +128,8 @@ If you build/edit a flow on staging (new node, rewired graph, new published comp
 and this is a deliberate choice (no tooling for it yet — see below), not a bug.
 
 **Manual replication recipe** (e.g. porting a staging-only flow edit to prod):
-1. Connect to both environments using the authenticated access procedure in the operator runbook.
+1. Connect to both environments using the authenticated access procedure in
+   [`boophost/boop-watch-ops`](https://github.com/boophost/boop-watch-ops).
 2. **Fetch the target environment's *current* graph fresh — never blindly copy the source environment's graph.** Environments drift (e.g. prod's `enrich.indexer-match` had a `seasonField` config dev's didn't; prod's `sink.library-import` had no explicit `pathTemplate` override while dev did) — copying wholesale silently clobbers real prod-only config. Diff node-by-node (`id`, `type`, `config`) before touching anything.
 3. Apply the same structural edit (insert/rewire nodes) to the target's own fetched graph, preserving every other node's config untouched.
 4. If the edit references a published component (a `flow.subflow` node's `flowId`), that component must be created + published **separately on the target environment first** — flow IDs are per-database and will not match across environments (e.g. a component published as flow #37 on dev may land as flow #26 on prod).
