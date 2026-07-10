@@ -22,7 +22,8 @@ Quick rules:
   the merge rolls `boop-watch-dev`, and you then work through the test plan on the **merged PR
   page** by confirming rollout health and smoke-testing `/health` plus the relevant APIs. The change
   is done only when every checklist item is verified green on staging; fixes go up as follow-up
-  feature → `dev` PRs. Private cluster access details live in the operator runbook. Promote to prod
+  feature → `dev` PRs. Private cluster access details live in
+  [`boophost/boop-watch-ops`](https://github.com/boophost/boop-watch-ops). Promote to prod
   with a `dev` → `main` PR. **Never commit directly to `main`, and never push feature work straight
   to `dev`.** Bump `package.json` `version` with every shipped change (use patch bumps for follow-up
   commits in the same feature session).
