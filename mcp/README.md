@@ -7,24 +7,22 @@ deployment's REST API.
 
 ## Setup
 
-1. Port-forward the staging backend (the flow API is admin-only and LAN-scoped):
+1. Port-forward the staging backend (the flow API is admin-only):
 
    ```bash
    kubectl -n link-apps port-forward deploy/boop-watch-dev 8080:3000
    ```
 
-2. Provide an admin credential in `mcp/flows.env` (gitignored). The flow API
-   accepts a `JWT_SECRET`-signed token; mint one by giving the server the same
-   secret the deployment uses:
+2. Provide an admin credential in `mcp/flows.env` (gitignored), using secrets
+   from your own deployment:
 
    ```bash
-   # BOOP_API defaults to http://localhost:8080, BOOP_ADMIN_EMAIL to the default admin
-   printf 'BOOP_JWT_SECRET=%s\n' \
-     "$(kubectl -n link-apps exec deploy/boop-watch-dev -- printenv [REDACTED])" \
-     >> mcp/flows.env
+   BOOP_JWT_SECRET=<your deployment's JWT secret>
+   BOOP_ADMIN_EMAIL=<an email allowed by your deployment's ADMIN_EMAILS>
    ```
 
-   Alternatively set `BOOP_TOKEN=<a real Supabase access token>`.
+   Alternatively, set `BOOP_TOKEN=<a real Supabase access token>` instead of
+   `BOOP_JWT_SECRET` and `BOOP_ADMIN_EMAIL`.
 
 ## CLI (works in a live session — no restart)
 

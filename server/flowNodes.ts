@@ -3474,7 +3474,7 @@ const qbittorrentSink: NodeImpl = {
         label: 'qBittorrent URL',
         kind: 'text',
         default: '',
-        help: 'WebUI base URL, e.g. http://[redacted-lan-ip]:8080. Empty = QBIT_URL env.',
+        help: 'WebUI base URL, e.g. http://qbittorrent:8080. Empty = QBIT_URL env.',
       },
       { key: 'username', label: 'Username', kind: 'text', default: '', help: 'Empty = QBIT_USERNAME env.' },
       { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },

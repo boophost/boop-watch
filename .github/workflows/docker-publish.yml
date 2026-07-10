@@ -93,9 +93,8 @@ jobs:
     runs-on: [self-hosted, k3s-cp]
     steps:
       - name: Roll boop-watch deployment
-        env:
-          KUBECONFIG: $HOME/.kube/boop-watch-deployer.yaml
         run: |
+          export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
           kubectl -n link-apps set image deployment/boop-watch boop-watch=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.digest }}
           kubectl -n link-apps rollout status deployment/boop-watch --timeout=180s
 
@@ -105,8 +104,7 @@ jobs:
     runs-on: [self-hosted, k3s-cp]
     steps:
       - name: Roll boop-watch-dev deployment
-        env:
-          KUBECONFIG: $HOME/.kube/boop-watch-deployer.yaml
         run: |
+          export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
           kubectl -n link-apps set image deployment/boop-watch-dev boop-watch-dev=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.digest }}
           kubectl -n link-apps rollout status deployment/boop-watch-dev --timeout=180s
