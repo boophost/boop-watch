@@ -230,6 +230,39 @@ export async function unsaveAnime(id: string): Promise<void> {
   if (!r.ok) throw new Error('failed to unsave anime')
 }
 
+// Per-episode comments on the player page. Reading is public; posting and
+// deleting ride the Supabase session (fetchAuth).
+export interface Comment {
+  id: number
+  userId: string
+  name: string
+  avatarUrl: string | null
+  body: string
+  createdAt: string
+}
+
+export const getComments = (itemId: string) =>
+  getJSON<{ comments: Comment[] }>(`/api/comments/${encodeURIComponent(itemId)}`)
+
+export async function postComment(itemId: string, body: string): Promise<Comment> {
+  const r = await fetchAuth(`/api/comments/${encodeURIComponent(itemId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body }),
+  })
+  const data = await parseAuthJson<{ comment?: Comment; error?: string }>(r)
+  if (!r.ok || !data.comment) throw new Error(data.error || 'Could not post comment')
+  return data.comment
+}
+
+export async function deleteComment(id: number): Promise<void> {
+  const r = await fetchAuth(`/api/comments/${id}`, { method: 'DELETE' })
+  if (!r.ok) {
+    const data = await parseAuthJson<{ error?: string }>(r).catch(() => ({ error: '' }))
+    throw new Error(data.error || 'Could not delete comment')
+  }
+}
+
 export async function submitSuggestion(body: string): Promise<void> {
   const r = await fetchAuth('/api/suggestions', {
     method: 'POST',

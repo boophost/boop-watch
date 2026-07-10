@@ -7,6 +7,7 @@ import {
 import { DefaultVideoLayout, defaultLayoutIcons } from '@vidstack/react/player/layouts/default'
 import HLS from 'hls.js'
 import { Icon, type IconName } from '@/components/Icon'
+import { Comments } from '@/components/Comments'
 import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { SearchBar } from '@/components/SearchBar'
 import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
@@ -520,7 +521,36 @@ export default function Watch() {
     return <PlayerShell><PlayerTopbar /><div className="subbar"><Link className="back" to="/"><Icon name="back" size={15} /><span className="bl">All titles</span></Link></div><p style={{ padding: 20 }}>{error}</p></PlayerShell>
   }
   if (!data) {
-    return <PlayerShell><PlayerTopbar /><div className="subbar"><span className="t">Loading…</span></div></PlayerShell>
+    // Skeleton with the final page geometry — the .vid box reserves its 16/9
+    // slot (kagura.css), so the player mounting never reflows the layout.
+    return (
+      <PlayerShell>
+        <PlayerTopbar />
+        <div className="subbar"><span className="t">Loading…</span></div>
+        <div className="wrap">
+          <div className="col-video">
+            <div className="vid vid-loading" />
+            <div className="pbar">
+              <span className="skel-pill" />
+              <div className="spacer" />
+              <span className="skel-pill" />
+              <span className="skel-pill" />
+            </div>
+          </div>
+          <aside className="col-eps panel">
+            <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span></div>
+            <div className="eps-list">
+              {Array.from({ length: 8 }, (_, i) => (
+                <div key={i} className="eprow">
+                  <span className="epn"><span className="skel-box" style={{ width: 38 }} /></span>
+                  <span className="ept"><span className="skel-box" style={{ width: `${55 + ((i * 17) % 35)}%` }} /></span>
+                </div>
+              ))}
+            </div>
+          </aside>
+        </div>
+      </PlayerShell>
+    )
   }
 
   const closeMenu = (e: React.MouseEvent) => (e.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')
@@ -677,6 +707,8 @@ export default function Watch() {
             </div>
           </aside>
         ) : null}
+
+        <Comments itemId={data.id} />
       </div>
     </PlayerShell>
   )
