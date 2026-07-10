@@ -885,21 +885,97 @@ app.post('/api/suggestions', requireAuth, (req, res) => {
 })
 
 app.get('/api/suggestions', requireAuth, requireAdmin, (_req, res) => {
-  res.json({ suggestions: seriesDb.listSuggestions() })
+  res.json({ suggestions: seriesDb.listSuggestions(), groups: seriesDb.listSuggestionGroups() })
 })
+
+// A parsed optional field: invalid input (ok:false), key absent / leave
+// unchanged (set:false), or a concrete value to write (set:true).
+type Field<T> = { ok: false } | { ok: true; set: false } | { ok: true; set: true; value: T }
+
+// Optional string field: accept a string (trimmed, empty ⇒ null to clear) or an
+// explicit null. `undefined` (key absent) means "leave unchanged".
+function readNullableText(v: unknown, max: number): Field<string | null> {
+  if (v === undefined) return { ok: true, set: false }
+  if (v === null) return { ok: true, set: true, value: null }
+  if (typeof v !== 'string' || v.length > max) return { ok: false }
+  const t = v.trim()
+  return { ok: true, set: true, value: t === '' ? null : t }
+}
+
+// Optional id reference: a positive integer, or null to clear. `undefined` ⇒ leave.
+function readNullableRef(v: unknown): Field<number | null> {
+  if (v === undefined) return { ok: true, set: false }
+  if (v === null) return { ok: true, set: true, value: null }
+  const n = Number(v)
+  if (!Number.isInteger(n) || n <= 0) return { ok: false }
+  return { ok: true, set: true, value: n }
+}
 
 app.patch('/api/suggestions/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id)
-  const { status } = req.body as { status?: unknown }
-  if (
-    !Number.isFinite(id) ||
-    typeof status !== 'string' ||
-    !seriesDb.SUGGESTION_STATUSES.includes(status as seriesDb.SuggestionStatus)
-  ) {
-    res.status(400).json({ error: `status must be one of: ${seriesDb.SUGGESTION_STATUSES.join(', ')}` })
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
     return
   }
-  const row = seriesDb.setSuggestionStatus(id, status as seriesDb.SuggestionStatus)
+  const b = (req.body ?? {}) as Record<string, unknown>
+  const patch: seriesDb.SuggestionPatch = {}
+
+  if (b.status !== undefined) {
+    if (
+      typeof b.status !== 'string' ||
+      !seriesDb.SUGGESTION_STATUSES.includes(b.status as seriesDb.SuggestionStatus)
+    ) {
+      res.status(400).json({ error: `status must be one of: ${seriesDb.SUGGESTION_STATUSES.join(', ')}` })
+      return
+    }
+    patch.status = b.status as seriesDb.SuggestionStatus
+  }
+
+  const title = readNullableText(b.title, 200)
+  if (!title.ok) {
+    res.status(400).json({ error: 'title must be a string (max 200 chars) or null' })
+    return
+  }
+  if (title.set) patch.title = title.value
+
+  const notes = readNullableText(b.notes, 5000)
+  if (!notes.ok) {
+    res.status(400).json({ error: 'notes must be a string (max 5000 chars) or null' })
+    return
+  }
+  if (notes.set) patch.notes = notes.value
+
+  const dup = readNullableRef(b.duplicate_of)
+  if (!dup.ok) {
+    res.status(400).json({ error: 'duplicate_of must be a positive integer or null' })
+    return
+  }
+  if (dup.set) {
+    if (dup.value === id) {
+      res.status(400).json({ error: 'A suggestion cannot be a duplicate of itself' })
+      return
+    }
+    if (dup.value !== null && !seriesDb.getSuggestion(dup.value)) {
+      res.status(400).json({ error: `No suggestion #${dup.value} to duplicate` })
+      return
+    }
+    patch.duplicate_of = dup.value
+  }
+
+  const group = readNullableRef(b.group_id)
+  if (!group.ok) {
+    res.status(400).json({ error: 'group_id must be a positive integer or null' })
+    return
+  }
+  if (group.set) {
+    if (group.value !== null && !seriesDb.getSuggestionGroup(group.value)) {
+      res.status(400).json({ error: `No group #${group.value}` })
+      return
+    }
+    patch.group_id = group.value
+  }
+
+  const row = seriesDb.updateSuggestion(id, patch)
   if (!row) {
     res.status(404).json({ error: 'Not found' })
     return
@@ -910,6 +986,67 @@ app.patch('/api/suggestions/:id', requireAuth, requireAdmin, (req, res) => {
 app.delete('/api/suggestions/:id', requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id) || !seriesDb.deleteSuggestion(id)) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  res.json({ ok: true })
+})
+
+// --- Suggestion groups (epics) — admin-only triage grouping ----------------
+
+app.get('/api/suggestion-groups', requireAuth, requireAdmin, (_req, res) => {
+  res.json({ groups: seriesDb.listSuggestionGroups() })
+})
+
+app.post('/api/suggestion-groups', requireAuth, requireAdmin, (req, res) => {
+  const b = (req.body ?? {}) as Record<string, unknown>
+  const title = readNullableText(b.title, 200)
+  if (!title.ok || !title.set || !title.value) {
+    res.status(400).json({ error: 'title is required (max 200 chars)' })
+    return
+  }
+  const description = readNullableText(b.description, 5000)
+  if (!description.ok) {
+    res.status(400).json({ error: 'description must be a string (max 5000 chars) or null' })
+    return
+  }
+  const group = seriesDb.addSuggestionGroup(title.value, description.set ? description.value : null)
+  res.status(201).json({ group })
+})
+
+app.patch('/api/suggestion-groups/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  const b = (req.body ?? {}) as Record<string, unknown>
+  const patch: { title?: string; description?: string | null } = {}
+  if (b.title !== undefined) {
+    const title = readNullableText(b.title, 200)
+    if (!title.ok || !title.set || !title.value) {
+      res.status(400).json({ error: 'title must be a non-empty string (max 200 chars)' })
+      return
+    }
+    patch.title = title.value
+  }
+  const description = readNullableText(b.description, 5000)
+  if (!description.ok) {
+    res.status(400).json({ error: 'description must be a string (max 5000 chars) or null' })
+    return
+  }
+  if (description.set) patch.description = description.value
+  const group = seriesDb.updateSuggestionGroup(id, patch)
+  if (!group) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  res.json({ group })
+})
+
+app.delete('/api/suggestion-groups/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id) || !seriesDb.deleteSuggestionGroup(id)) {
     res.status(404).json({ error: 'Not found' })
     return
   }
