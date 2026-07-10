@@ -22,7 +22,9 @@ deployment's REST API.
    ```
 
    Alternatively, set `BOOP_TOKEN=<a real Supabase access token>` instead of
-   `BOOP_JWT_SECRET` and `BOOP_ADMIN_EMAIL`.
+   `BOOP_JWT_SECRET` and `BOOP_ADMIN_EMAIL`. Homelab minting recipes live in the
+   private [`boophost/boop-watch-ops`](https://github.com/boophost/boop-watch-ops)
+   runbook (`mcp-credentials.md`).
 
 ## CLI (works in a live session — no restart)
 
