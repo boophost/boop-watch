@@ -12,6 +12,10 @@ export function Chrome({ crumb }: { crumb?: ReactNode }) {
   return (
     <header className="chrome">
       <div className="chrome-left">
+        <Link className="brand" to="/">
+          <span className="brand-mark">B</span>
+          <span className="label">boopurnoes <span className="sub">· watch</span></span>
+        </Link>
         {user && (
           <button
             className="chrome-suggest"
@@ -23,10 +27,6 @@ export function Chrome({ crumb }: { crumb?: ReactNode }) {
             <Icon name="alert" size={18} />
           </button>
         )}
-        <Link className="brand" to="/">
-          <span className="brand-mark">B</span>
-          <span className="label">boopurnoes <span className="sub">· watch</span></span>
-        </Link>
       </div>
       <SearchBar />
       <div className="chrome-right">
