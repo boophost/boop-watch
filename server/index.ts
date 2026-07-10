@@ -56,6 +56,14 @@ app.use(cookieParser())
 // schedule). Registered before the authed admin APIs and the SPA catch-all.
 app.use(publicRouter)
 
+// Same allowlist idea as ADMIN_EMAILS in src/lib/AuthContext.tsx, but enforced
+// server-side for the APIs that can mutate the portal or hammer upstreams.
+// Declared above requireAuth so the comment-author profile cache can use it.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? 'ethanwhi@gmail.com')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean)
+
 async function requireAuth(
   req: express.Request,
   res: express.Response,
@@ -86,6 +94,24 @@ async function requireAuth(
         res.locals.displayName = name?.trim() || String(res.locals.email).split('@')[0] || 'user'
         const avatar = meta.custom_avatar_url ?? meta.avatar_url ?? meta.picture
         res.locals.avatarUrl = typeof avatar === 'string' && avatar ? avatar : null
+        const email = String(res.locals.email).toLowerCase()
+        const isAdmin =
+          meta.admin === true ||
+          (user.app_metadata as { role?: unknown } | undefined)?.role === 'admin' ||
+          (!!email && ADMIN_EMAILS.includes(email))
+        res.locals.isAdmin = isAdmin
+        // Keep the comment-author cache current so public reads show the latest
+        // name/avatar/admin badge without a Supabase round-trip.
+        try {
+          seriesDb.upsertUserProfile({
+            user_id: String(res.locals.username),
+            display_name: String(res.locals.displayName),
+            avatar_url: (res.locals.avatarUrl as string | null) ?? null,
+            is_admin: isAdmin,
+          })
+        } catch (e) {
+          console.error('user_profiles upsert failed', e)
+        }
         return next()
       }
     } catch (e) {
@@ -103,18 +129,13 @@ async function requireAuth(
     res.locals.email = payload.email || ''
     res.locals.displayName = String(res.locals.username).split('@')[0]
     res.locals.avatarUrl = null
+    const email = String(res.locals.email).toLowerCase()
+    res.locals.isAdmin = !!email && ADMIN_EMAILS.includes(email)
     next()
   } catch {
     res.status(401).json({ error: 'Unauthorized' })
   }
 }
-
-// Same allowlist idea as ADMIN_EMAILS in src/lib/AuthContext.tsx, but enforced
-// server-side for the APIs that can mutate the portal or hammer upstreams.
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? 'ethanwhi@gmail.com')
-  .split(',')
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean)
 
 function requireAdmin(
   _req: express.Request,
@@ -159,6 +180,9 @@ app.patch('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   }
   try {
     const user = await setUserAdmin(id, isAdmin)
+    // Comment reads join user_profiles; keep the admin badge current even if
+    // the target hasn't authenticated since the toggle.
+    try { seriesDb.setUserProfileAdmin(id, isAdmin) } catch { /* no cached row yet */ }
     res.json({ user })
   } catch (e) {
     console.error(e)
@@ -939,7 +963,7 @@ app.delete('/api/comments/:id', requireAuth, (req, res) => {
     return
   }
   const email = String(res.locals.email ?? '').toLowerCase()
-  const isAdmin = !!email && ADMIN_EMAILS.includes(email)
+  const isAdmin = Boolean(res.locals.isAdmin) || (!!email && ADMIN_EMAILS.includes(email))
   if (row.user_id !== res.locals.username && !isAdmin) {
     res.status(403).json({ error: 'Not your comment' })
     return

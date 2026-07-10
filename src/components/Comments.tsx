@@ -138,6 +138,11 @@ export function Comments({ itemId }: { itemId: string }) {
             <div className="cmt-main">
               <div className="cmt-meta">
                 <span className="cmt-name">{c.name}</span>
+                {c.isAdmin && (
+                  <span className="cmt-admin" title="Admin" aria-label="Admin">
+                    <Icon name="shield" size={13} />
+                  </span>
+                )}
                 <span className="cmt-time" title={c.createdAt}>{relTime(c.createdAt)}</span>
                 {user && (user.id === c.userId || user.isAdmin) && (
                   <button type="button" className="cmt-del" title="Delete comment" onClick={() => remove(c.id)}>
