@@ -17,6 +17,7 @@ import { getBanner, getSelectedBanner, findByMalId, listSeries, listComments, ty
 import { BANNERS_DIR } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
+import { themesForMal, type ThemeSong } from './themes.js'
 
 export const publicRouter = Router()
 
@@ -60,15 +61,12 @@ function titleMatchesFranchise(portalName: string, catalog: SeriesRow): boolean 
 }
 
 /**
- * Catalog cour for a Public JF series.
- * Always anchor to this franchise first (mal_id / title / shared tvdb_id) —
- * never pick another show that merely shares the same `tvdb_season` number
- * (Slime ?season=2 must not resolve to Mushoku Part 2).
+ * Every catalog cour in a Public JF series' franchise, anchored to this
+ * franchise first (mal_id / title / shared tvdb_id) — never another show that
+ * merely shares the same `tvdb_season` number (Slime ?season=2 must not
+ * resolve to Mushoku Part 2).
  */
-export function catalogCourForSeries(
-  pItem: { mal_id: number | null; name: string },
-  season: number | null,
-): SeriesRow | null {
+function franchiseForSeries(pItem: { mal_id: number | null; name: string }): SeriesRow[] {
   const all = listSeries()
 
   let franchise: SeriesRow[] = []
@@ -88,6 +86,15 @@ export function catalogCourForSeries(
       franchise = all.filter((s) => s.tvdb_id != null && tvdbIds.has(s.tvdb_id))
     }
   }
+  return franchise
+}
+
+/** Catalog cour for a Public JF series (see franchiseForSeries for anchoring). */
+export function catalogCourForSeries(
+  pItem: { mal_id: number | null; name: string },
+  season: number | null,
+): SeriesRow | null {
+  const franchise = franchiseForSeries(pItem)
 
   if (season != null && franchise.length > 0) {
     const cour = franchise.find((s) => s.tvdb_season === season)
@@ -106,6 +113,26 @@ export function catalogCourForSeries(
 
   if (pItem.mal_id != null) return findByMalId(pItem.mal_id) ?? null
   return franchise[0] ?? null
+}
+
+/**
+ * Every catalog cour that makes up one JF season (a 24-ep season is often two
+ * MAL entries, each with its own OP/ED), in airing order. Same unmapped-
+ * franchise fallback as catalogCourForSeries; season null = the whole
+ * franchise (movies, seasonless titles).
+ */
+export function catalogCoursForSeason(
+  pItem: { mal_id: number | null; name: string },
+  season: number | null,
+): SeriesRow[] {
+  const franchise = franchiseForSeries(pItem)
+  if (season == null) return franchise
+  const cours = franchise
+    .filter((s) => s.tvdb_season === season)
+    .sort((a, b) => (a.episode_offset ?? 0) - (b.episode_offset ?? 0))
+  if (cours.length > 0) return cours
+  if (franchise.length > 0 && franchise.every((s) => s.tvdb_season == null)) return [franchise[0]]
+  return []
 }
 
 publicRouter.get('/health', (_req, res) => { res.type('text').send('ok') })
@@ -432,6 +459,53 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
     console.error(e)
     res.status(502).json({ error: 'unavailable' })
   }
+})
+
+// OP/ED theme songs for a title — self-sourced from MAL (Jikan) via the
+// title's catalog mal_id, season-scoped so each cour shows its own songs.
+// Unmapped titles and upstream failures answer an empty list; the widget
+// simply doesn't render.
+publicRouter.get('/api/catalog/:id/themes', async (req, res) => {
+  if (!ensureConfigured(res)) return
+  const { id } = req.params
+  try {
+    await ensureScope()
+  } catch {
+    res.status(502).json({ error: 'unavailable' })
+    return
+  }
+  if (!isCollectionItem(id)) {
+    res.status(403).json({ error: 'not available' })
+    return
+  }
+  const pItem = getPortalItem(id)
+  if (!pItem) { res.json({ themes: [] }); return }
+  const seasonQ = qStr(req.query.season)
+  const seasonNum = seasonQ === '' ? NaN : Number(seasonQ)
+  const season = Number.isFinite(seasonNum) ? seasonNum : null
+
+  const cours = catalogCoursForSeason(pItem, season)
+  const malIds = cours.map((c) => c.mal_id)
+  // A title the portal knows the mal_id of but the catalog doesn't hold yet
+  // can still source its own themes directly.
+  if (malIds.length === 0 && pItem.mal_id != null) malIds.push(pItem.mal_id)
+
+  const themes: ThemeSong[] = []
+  for (const malId of [...new Set(malIds)]) {
+    try {
+      themes.push(...await themesForMal(malId))
+    } catch { /* partial answers beat none; misses are negative-cached */ }
+  }
+  // The same song can span cours (one OP over two entries) — keep the first.
+  const seen = new Set<string>()
+  const deduped = themes.filter((t) => {
+    const key = `${t.kind}|${t.title.toLowerCase()}|${(t.artist ?? '').toLowerCase()}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  res.set('cache-control', 'public, max-age=3600')
+  res.json({ themes: deduped })
 })
 
 // Player metadata (audio/subtitle/quality tracks + sibling episodes).

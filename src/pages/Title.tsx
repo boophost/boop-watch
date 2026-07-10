@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
-import { getTitle, imgUrl, backdropUrl, seasonImgUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
+import { getTitle, getThemes, imgUrl, backdropUrl, seasonImgUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail, type ThemeSong } from '@/lib/api'
 import type { ChaseState } from '@/lib/chase'
 import { useAuth } from '@/lib/AuthContext'
 import { loadProgressMap, type Progress } from '@/lib/progress'
@@ -57,6 +57,60 @@ function PosterImg({ src, fallback }: { src: string; fallback?: string }) {
     else setOk(false)
   }
   return ok ? <img src={cur} alt="" onError={onError} /> : null
+}
+
+// OP/ED info under the episode list — self-sourcing (MAL themes via the
+// title's catalog mapping, per season), so it renders nothing until the
+// server has something real. Rows link out to a YouTube search for the song.
+function ThemeSongs({ id, season }: { id: string; season: number | null }) {
+  const [themes, setThemes] = useState<ThemeSong[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    setThemes([])
+    getThemes(id, season)
+      .then((r) => { if (!cancelled) setThemes(r.themes) })
+      .catch(() => { /* cosmetic — the widget just stays hidden */ })
+    return () => { cancelled = true }
+  }, [id, season])
+
+  if (themes.length === 0) return null
+  const label = { op: 'OP', ed: 'ED' }
+  return (
+    <>
+      <div className="ep-head" style={{ marginTop: 28 }}>
+        <h2 className="k-h3">Theme songs</h2>
+        <span className="badge badge-mono">{themes.length}</span>
+        <div className="spacer" />
+      </div>
+      <div className="panel" style={{ overflow: 'hidden' }}>
+        <div className="themelist">
+          {themes.map((t, i) => (
+            <a
+              key={`${t.kind}-${i}`}
+              className="themerow"
+              href={`https://www.youtube.com/results?search_query=${encodeURIComponent(
+                `${t.title}${t.artist ? ` ${t.artist}` : ''}`,
+              )}`}
+              target="_blank"
+              rel="noreferrer"
+              onClick={() => track('theme_song_clicked', { item_id: id, kind: t.kind, title: t.title })}
+            >
+              <span className="theme-kind" data-kind={t.kind}>
+                {label[t.kind]}{t.index != null ? ` ${t.index}` : ''}
+              </span>
+              <span className="theme-main">
+                <span className="theme-title">{t.title}</span>
+                {t.artist && <span className="theme-artist">{t.artist}</span>}
+              </span>
+              {t.episodes && <span className="theme-eps">eps {t.episodes}</span>}
+              <span className="go"><Icon name="music" size={13} /></span>
+            </a>
+          ))}
+        </div>
+      </div>
+    </>
+  )
 }
 
 function DetailShell({
@@ -294,6 +348,7 @@ export default function Title() {
                 })}
             </div>
           </div>
+          <ThemeSongs id={data.id} season={season} />
         </DetailShell>
       </PortalLayout>
     )
