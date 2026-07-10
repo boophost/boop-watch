@@ -785,8 +785,7 @@
   & .cmt-main { flex: 1; min-width: 0; }
   & .cmt-meta { display: flex; align-items: baseline; gap: 8px; }
   & .cmt-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  & .cmt-admin { flex: none; height: 18px; padding: 0 7px; font-size: 10px; text-transform: uppercase;
-    letter-spacing: 0.02em; align-self: center; }
+  & .cmt-admin { flex: none; display: inline-flex; align-self: center; color: var(--accent-soft-fg); }
   & .cmt-time { font-family: var(--font-mono); font-size: 11px; color: var(--fg-subtle); flex: none; }
   & .cmt-del { margin-left: auto; flex: none; align-self: center; border: none; background: transparent;
     color: var(--fg-subtle); cursor: pointer; padding: 3px; border-radius: 5px; opacity: 0.55;
