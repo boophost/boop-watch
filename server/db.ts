@@ -174,9 +174,9 @@ export function getDb(): Database.Database {
 
     -- Per-episode comments on the public player page. item_id is the Jellyfin
     -- episode/movie id (same key as watch progress); user_id is the Supabase
-    -- account id. Display name + avatar are snapshotted at post time so reads
-    -- never need a Supabase lookup (a later profile change doesn't rewrite
-    -- history, same trade-off as suggestions.email).
+    -- account id. Display name + avatar are still snapshotted at post time as a
+    -- fallback, but reads prefer user_profiles (synced on auth) so a later
+    -- profile change shows up on existing comments without a Supabase lookup.
     CREATE TABLE IF NOT EXISTS episode_comments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       item_id TEXT NOT NULL,
@@ -187,6 +187,17 @@ export function getDb(): Database.Database {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_comments_item ON episode_comments(item_id, created_at);
+
+    -- Cached display identity for comment authors. Upserted on authenticated
+    -- requests from Supabase user_metadata so public comment reads can join
+    -- current name/avatar/admin without calling Supabase.
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      avatar_url TEXT,
+      is_admin INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
 
     -- What sink.library-import placed, and where it came from. Keyed on the
     -- library-relative path because that is what survives: a file rewritten in
@@ -384,12 +395,34 @@ export interface CommentRow {
   avatar_url: string | null
   body: string
   created_at: string
+  /** 1 when the author is currently an admin (from user_profiles join). */
+  is_admin: number
 }
+
+export interface UserProfileRow {
+  user_id: string
+  display_name: string
+  avatar_url: string | null
+  is_admin: number
+  updated_at: string
+}
+
+// Prefer the live profile cache when present; fall back to the write-time
+// snapshot for authors who haven't authenticated since profiles were added.
+const COMMENT_SELECT = `
+  SELECT
+    c.id, c.item_id, c.user_id, c.body, c.created_at,
+    CASE WHEN p.user_id IS NOT NULL THEN p.display_name ELSE c.user_name END AS user_name,
+    CASE WHEN p.user_id IS NOT NULL THEN p.avatar_url ELSE c.avatar_url END AS avatar_url,
+    COALESCE(p.is_admin, 0) AS is_admin
+  FROM episode_comments c
+  LEFT JOIN user_profiles p ON p.user_id = c.user_id
+`
 
 /** Comments on one episode/movie, newest first. */
 export function listComments(item_id: string): CommentRow[] {
   return getDb()
-    .prepare('SELECT * FROM episode_comments WHERE item_id = ? ORDER BY id DESC')
+    .prepare(`${COMMENT_SELECT} WHERE c.item_id = ? ORDER BY c.id DESC`)
     .all(item_id) as CommentRow[]
 }
 
@@ -405,17 +438,43 @@ export function addComment(c: {
       'INSERT INTO episode_comments (item_id, user_id, user_name, avatar_url, body) VALUES (?, ?, ?, ?, ?)',
     )
     .run(c.item_id, c.user_id, c.user_name, c.avatar_url, c.body)
-  return getDb()
-    .prepare('SELECT * FROM episode_comments WHERE id = ?')
-    .get(Number(info.lastInsertRowid)) as CommentRow
+  return getComment(Number(info.lastInsertRowid))!
 }
 
 export function getComment(id: number): CommentRow | undefined {
-  return getDb().prepare('SELECT * FROM episode_comments WHERE id = ?').get(id) as CommentRow | undefined
+  return getDb().prepare(`${COMMENT_SELECT} WHERE c.id = ?`).get(id) as CommentRow | undefined
 }
 
 export function deleteComment(id: number): boolean {
   return getDb().prepare('DELETE FROM episode_comments WHERE id = ?').run(id).changes > 0
+}
+
+export function upsertUserProfile(p: {
+  user_id: string
+  display_name: string
+  avatar_url: string | null
+  is_admin: boolean
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO user_profiles (user_id, display_name, avatar_url, is_admin, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(user_id) DO UPDATE SET
+         display_name = excluded.display_name,
+         avatar_url = excluded.avatar_url,
+         is_admin = excluded.is_admin,
+         updated_at = datetime('now')`,
+    )
+    .run(p.user_id, p.display_name, p.avatar_url, p.is_admin ? 1 : 0)
+}
+
+/** Keep the comment-author admin badge in sync when /manage toggles admin. */
+export function setUserProfileAdmin(user_id: string, is_admin: boolean): void {
+  getDb()
+    .prepare(
+      `UPDATE user_profiles SET is_admin = ?, updated_at = datetime('now') WHERE user_id = ?`,
+    )
+    .run(is_admin ? 1 : 0, user_id)
 }
 
 export function listSeries(): SeriesRow[] {

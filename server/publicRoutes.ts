@@ -545,12 +545,15 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
 
 // Shape a comment row for the client. user_id is included so the client can
 // mark the viewer's own comments; it's the opaque Supabase uuid, not an email.
+// name/avatar/isAdmin come from user_profiles when present (live), else the
+// write-time snapshot on the comment row.
 export function commentView(c: CommentRow) {
   return {
     id: c.id,
     userId: c.user_id,
     name: c.user_name,
     avatarUrl: c.avatar_url,
+    isAdmin: c.is_admin === 1,
     body: c.body,
     createdAt: c.created_at,
   }
