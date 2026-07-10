@@ -173,7 +173,7 @@ export default function Title() {
 
   // Episode-row progress bars (same source as the player sidebar).
   useEffect(() => {
-    if (!data || authLoading) return
+    if (!data || authLoading || data.type !== 'series') return
     const ids = data.episodes.map((ep) => ep.id).filter((eid): eid is string => !!eid)
     if (ids.length === 0) { setProgMap({}); return }
     let alive = true
@@ -257,29 +257,41 @@ export default function Title() {
             <div className="eplist">
               {data.episodes.length === 0
                 ? <p className="empty">No episodes found.</p>
-                : data.episodes.map((ep) => (
-                  ep.id ? (
-                    <Link key={ep.id} className="eprow" to={`/watch/${ep.id}`}>
+                : data.episodes.map((ep) => {
+                  if (!ep.id) {
+                    return (
+                      <div key={`chase-${ep.num}`} className="eprow chasing">
+                        <span className="num">{ep.num}</span>
+                        <span className="et">{ep.name}</span>
+                        <span className="ep-status-slot">
+                          <EpisodeStatus
+                            chase={{
+                              episode: data.nextEpisode?.episode ?? 0,
+                              state: (ep.status as ChaseState) ?? data.nextEpisode?.state ?? 'waiting',
+                              airsAt: ep.airsAt ?? data.nextEpisode?.airsAt ?? null,
+                            }}
+                          />
+                        </span>
+                      </div>
+                    )
+                  }
+                  const prog = progMap[ep.id]
+                  const watched = !!prog?.watched
+                  const pct = watched ? 100
+                    : prog && prog.duration > 0 ? Math.min(100, (prog.position / prog.duration) * 100) : 0
+                  return (
+                    <Link
+                      key={ep.id}
+                      className={`eprow${watched ? ' watched' : ''}`}
+                      to={`/watch/${ep.id}`}
+                    >
                       <span className="num">{ep.num}</span>
                       <span className="et">{ep.name}</span>
                       <span className="go"><Icon name="play" size={13} fill="currentColor" /></span>
+                      {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
                     </Link>
-                  ) : (
-                    <div key={`chase-${ep.num}`} className="eprow chasing">
-                      <span className="num">{ep.num}</span>
-                      <span className="et">{ep.name}</span>
-                      <span className="ep-status-slot">
-                        <EpisodeStatus
-                          chase={{
-                            episode: data.nextEpisode?.episode ?? 0,
-                            state: (ep.status as ChaseState) ?? data.nextEpisode?.state ?? 'waiting',
-                            airsAt: ep.airsAt ?? data.nextEpisode?.airsAt ?? null,
-                          }}
-                        />
-                      </span>
-                    </div>
                   )
-                ))}
+                })}
             </div>
           </div>
         </DetailShell>
