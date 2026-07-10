@@ -6,6 +6,7 @@ import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
 import { getTitle, imgUrl, backdropUrl, seasonImgUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
 import type { ChaseState } from '@/lib/chase'
 import { useAuth } from '@/lib/AuthContext'
+import { loadProgressMap, type Progress } from '@/lib/progress'
 import { track } from '@/lib/analytics'
 
 const initials = (n: string) =>
@@ -146,12 +147,14 @@ function DetailShell({
 
 export default function Title() {
   const { id = '' } = useParams()
+  const { user, loading: authLoading } = useAuth()
   const [searchParams, setSearchParams] = useSearchParams()
   const seasonQ = searchParams.get('season')
   const seasonParam = seasonQ != null && seasonQ !== '' ? Number(seasonQ) : null
   const [data, setData] = useState<TitleDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [progMap, setProgMap] = useState<Record<string, Progress>>({})
 
   // Only a title change blanks the page; a season swap keeps the current data
   // on screen (dimmed) while the new season loads, so nothing unmounts — the
@@ -167,6 +170,16 @@ export default function Title() {
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [id, seasonParam])
+
+  // Episode-row progress bars (same source as the player sidebar).
+  useEffect(() => {
+    if (!data || authLoading) return
+    const ids = data.episodes.map((ep) => ep.id).filter((eid): eid is string => !!eid)
+    if (ids.length === 0) { setProgMap({}); return }
+    let alive = true
+    loadProgressMap(ids, !!user).then((m) => { if (alive) setProgMap(m) })
+    return () => { alive = false }
+  }, [data, user, authLoading])
 
   if (error) {
     return <PortalLayout crumb={BackCrumb}><main><p className="empty">{error}</p></main></PortalLayout>

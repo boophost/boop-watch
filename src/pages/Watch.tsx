@@ -634,7 +634,9 @@ export default function Watch() {
           </div>
           <div className="pbar">
             {data.nextId && (
-              <Link className="pctl" to={`/watch/${data.nextId}`} title="Next episode"><Icon name="next" size={16} /><span>Next</span></Link>
+              <button type="button" className="pctl" title="Next episode" onClick={goNext}>
+                <Icon name="next" size={16} /><span>Next</span>
+              </button>
             )}
             <div className="spacer" />
 
