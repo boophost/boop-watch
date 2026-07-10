@@ -13,7 +13,7 @@ import { buildWatchData, type Segment } from './watch.js'
 import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
 import { getPortalItem, getPortalEpisodes, getPortalSeasonCounts } from './portalDb.js'
-import { getBanner, getSelectedBanner, findByMalId, listSeries, type BannerRow, type SeriesRow } from './db.js'
+import { getBanner, getSelectedBanner, findByMalId, listSeries, listComments, type BannerRow, type SeriesRow, type CommentRow } from './db.js'
 import { BANNERS_DIR } from './banners.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
 
@@ -453,37 +453,72 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
   let item: JfItem = { Id: id }
   try { item = await jfItem(id, 'MediaStreams,MediaSources,Overview') } catch { /* title is cosmetic */ }
 
-  let siblings: JfItem[] = []
-  if (item.Type === 'Episode' && item.SeriesId) {
+  // Everything below only needs `item`, so the three slow lookups — sibling
+  // episodes, skip segments, and the next-episode chase — run concurrently.
+  // Serially they added up to multiple seconds before the player could even
+  // request the stream; now the route costs max(...) instead of sum(...).
+  const siblingsPromise: Promise<JfItem[]> = (async () => {
+    if (item.Type !== 'Episode' || !item.SeriesId) return []
     try {
       const e = await jfJson<{ Items?: JfItem[] }>(`/Shows/${item.SeriesId}/Episodes`)
       const season = item.ParentIndexNumber
-      siblings = (e.Items || []).filter(
+      return (e.Items || []).filter(
         (ep) =>
           getPlayableIds().has(ep.Id) &&
           (season == null || ep.ParentIndexNumber === season),
       )
-    } catch { /* sidebar is optional */ }
-  }
+    } catch { return [] /* sidebar is optional */ }
+  })()
 
   // Fallback: when Jellyfin has no Media Segments provider, source community
   // skip times from AniSkip (MAL-keyed, resolved by the episode's air date).
   // Budgeted so a cold resolve (Jikan sequel-chain walk) can't stall the route —
   // the walk keeps filling the cache in the background and the *next* load of
-  // the episode gets the button.
-  let segments = await segPromise
-  if (!segments.length && item.Type === 'Episode' && item.SeriesName) {
+  // the episode gets the button. Matches on Jellyfin's own title (the portal
+  // name override below only happens after these lookups resolve).
+  const segmentsPromise: Promise<Segment[]> = (async () => {
+    const segments = await segPromise
+    if (segments.length || item.Type !== 'Episode' || !item.SeriesName) return segments
     const epLenSec = item.RunTimeTicks ? item.RunTimeTicks / 1e7 : 0
-    segments = await Promise.race([
+    return Promise.race([
       aniskipSegments(item.SeriesName, item.PremiereDate, epLenSec).catch(() => [] as Segment[]),
-      new Promise<Segment[]>((r) => setTimeout(() => r([]), 8000)),
+      new Promise<Segment[]>((r) => setTimeout(() => r([]), 3000)),
     ])
+  })()
+
+  // Catalog id for the admin "Library settings" shortcut — season-scoped for
+  // episodes (same franchise anchoring as the catalog route) so a watched
+  // season that isn't catalogued gets no manageId, which also stops another
+  // season's chase stub from trailing this season's sidebar.
+  const pSelf = getPortalItem(id)
+  let manageId: number | null = null
+  if (item.Type === 'Episode' && item.SeriesId) {
+    const pSeries = getPortalItem(item.SeriesId)
+    if (pSeries) manageId = catalogCourForSeries(pSeries, item.ParentIndexNumber ?? null)?.id ?? null
+  } else if (pSelf?.mal_id != null) {
+    manageId = findByMalId(pSelf.mal_id)?.id ?? null
   }
+
+  const chasePromise: Promise<ReturnType<typeof toPublicChase>> = (async () => {
+    if (manageId == null || item.Type !== 'Episode') return null
+    try {
+      const chase = await buildSeriesChase(manageId, {
+        includeLibrary: false,
+        budgetMs: 2500,
+      })
+      return toPublicChase(chase.nextChase)
+    } catch (e) {
+      console.error('watch chase failed —', e)
+      return null
+    }
+  })()
+
+  const [rawSiblings, segments, nextEpisode] = await Promise.all([siblingsPromise, segmentsPromise, chasePromise])
 
   // Prefer our catalog-sourced names (portalDb) over Jellyfin's for everything
   // the player shows — episode/movie title, the series back-link, and the
-  // sidebar list. Done after AniSkip so its matching still uses Jellyfin's title.
-  const pSelf = getPortalItem(id)
+  // sidebar list.
+  let siblings = rawSiblings
   if (pSelf?.name) item.Name = pSelf.name
   if (item.SeriesId) {
     const pSeries = getPortalItem(item.SeriesId)
@@ -496,30 +531,33 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
       return n ? { ...ep, Name: n } : ep
     })
   }
-  // Catalog id for the admin "Library settings" shortcut — season-scoped for
-  // episodes (same franchise anchoring as the catalog route) so a watched
-  // season that isn't catalogued gets no manageId, which also stops another
-  // season's chase stub from trailing this season's sidebar.
-  let manageId: number | null = null
-  if (item.Type === 'Episode' && item.SeriesId) {
-    const pSeries = getPortalItem(item.SeriesId)
-    if (pSeries) manageId = catalogCourForSeries(pSeries, item.ParentIndexNumber ?? null)?.id ?? null
-  } else if (pSelf?.mal_id != null) {
-    manageId = findByMalId(pSelf.mal_id)?.id ?? null
-  }
-  let nextEpisode: ReturnType<typeof toPublicChase> = null
-  if (manageId != null && item.Type === 'Episode') {
-    try {
-      const chase = await buildSeriesChase(manageId, {
-        includeLibrary: false,
-        budgetMs: 2500,
-      })
-      nextEpisode = toPublicChase(chase.nextChase)
-    } catch (e) {
-      console.error('watch chase failed —', e)
-    }
-  }
   res.json({ ...buildWatchData(id, item, siblings, segments), manageId, nextEpisode })
+})
+
+// Shape a comment row for the client. user_id is included so the client can
+// mark the viewer's own comments; it's the opaque Supabase uuid, not an email.
+export function commentView(c: CommentRow) {
+  return {
+    id: c.id,
+    userId: c.user_id,
+    name: c.user_name,
+    avatarUrl: c.avatar_url,
+    body: c.body,
+    createdAt: c.created_at,
+  }
+}
+
+// Per-episode comments — public read (the portal has no login), writes are the
+// authed routes in index.ts. Scope-guarded like every other content route.
+publicRouter.get('/api/comments/:id', async (req, res) => {
+  if (!ensureConfigured(res)) return
+  const { id } = req.params
+  try { await ensureScope() } catch { res.status(502).json({ error: 'unavailable' }); return }
+  if (!getPlayableIds().has(id)) {
+    res.status(403).json({ error: 'not available' })
+    return
+  }
+  res.json({ comments: listComments(id).map(commentView) })
 })
 
 // Weekly anime schedule, filtered to the library.

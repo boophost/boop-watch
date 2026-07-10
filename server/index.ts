@@ -13,14 +13,14 @@ import {
 } from './jikan.js'
 import * as seriesDb from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { publicRouter } from './publicRoutes.js'
+import { publicRouter, commentView } from './publicRoutes.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
 import { searchAnimeAniList } from './anilist.js'
-import { warmScope } from './jellyfin.js'
+import { warmScope, ensureScope, getPlayableIds } from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
@@ -72,6 +72,16 @@ async function requireAuth(
         const user = await resp.json()
         res.locals.username = user.id
         res.locals.email = typeof user.email === 'string' ? user.email : ''
+        // Display identity for user-visible content (comments): OAuth name keys
+        // vary by provider (Google: full_name/name, Discord: user_name); fall
+        // back to the email's local part so there is always a readable label.
+        const meta = (user.user_metadata ?? {}) as Record<string, unknown>
+        const name = [meta.full_name, meta.name, meta.user_name].find(
+          (v): v is string => typeof v === 'string' && v.trim().length > 0,
+        )
+        res.locals.displayName = name?.trim() || String(res.locals.email).split('@')[0] || 'user'
+        const avatar = meta.avatar_url ?? meta.picture
+        res.locals.avatarUrl = typeof avatar === 'string' && avatar ? avatar : null
         return next()
       }
     } catch (e) {
@@ -87,6 +97,8 @@ async function requireAuth(
     const payload = jwt.verify(token, JWT_SECRET) as { username?: string, email?: string }
     res.locals.username = payload.email || payload.username || 'admin'
     res.locals.email = payload.email || ''
+    res.locals.displayName = String(res.locals.username).split('@')[0]
+    res.locals.avatarUrl = null
     next()
   } catch {
     res.status(401).json({ error: 'Unauthorized' })
@@ -840,6 +852,55 @@ app.delete('/api/suggestions/:id', requireAuth, requireAdmin, (req, res) => {
     res.status(404).json({ error: 'Not found' })
     return
   }
+  res.json({ ok: true })
+})
+
+// --- Per-episode comments (public read lives in publicRoutes; writes here) ---
+
+const COMMENT_MAX = 1000
+
+app.post('/api/comments/:itemId', requireAuth, async (req, res) => {
+  const itemId = String(req.params.itemId)
+  // Same scope guard as every public content route: only playable Public-
+  // collection ids accept comments, so the table can't be spammed with junk ids.
+  try { await ensureScope() } catch { res.status(502).json({ error: 'Library unavailable' }); return }
+  if (!getPlayableIds().has(itemId)) {
+    res.status(403).json({ error: 'not available' })
+    return
+  }
+  const body = String((req.body as { body?: unknown })?.body ?? '').trim()
+  if (!body) {
+    res.status(400).json({ error: 'Comment cannot be empty' })
+    return
+  }
+  if (body.length > COMMENT_MAX) {
+    res.status(400).json({ error: `Comment is too long (max ${COMMENT_MAX} characters)` })
+    return
+  }
+  const row = seriesDb.addComment({
+    item_id: itemId,
+    user_id: res.locals.username as string,
+    user_name: (res.locals.displayName as string) || 'user',
+    avatar_url: (res.locals.avatarUrl as string | null) ?? null,
+    body,
+  })
+  res.status(201).json({ comment: commentView(row) })
+})
+
+app.delete('/api/comments/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id)
+  const row = Number.isFinite(id) ? seriesDb.getComment(id) : undefined
+  if (!row) {
+    res.status(404).json({ error: 'Not found' })
+    return
+  }
+  const email = String(res.locals.email ?? '').toLowerCase()
+  const isAdmin = !!email && ADMIN_EMAILS.includes(email)
+  if (row.user_id !== res.locals.username && !isAdmin) {
+    res.status(403).json({ error: 'Not your comment' })
+    return
+  }
+  seriesDb.deleteComment(id)
   res.json({ ok: true })
 })
 
