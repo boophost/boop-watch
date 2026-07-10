@@ -6,6 +6,11 @@ import { limitedFetch } from './httpQueue.js'
 // which used to surface as a hard 502 on the episodes API. See k8s/jikan/.
 const JIKAN_BASE = process.env.JIKAN_URL || 'https://api.jikan.moe/v4'
 
+// The self-hosted instance deliberately runs without Typesense, so the indexed
+// `/anime?q=` search 500s there — id-based routes only. Searches go to their
+// own base (JIKAN_SEARCH_URL), which stays the public API unless overridden.
+export const JIKAN_SEARCH_BASE = process.env.JIKAN_SEARCH_URL || 'https://api.jikan.moe/v4'
+
 // Jikan allows ~3 req/s; the shared 'jikan' queue serializes every caller
 // (search + detail + episodes on one page load, plus aniskip's chain-walk) so
 // they don't burst and trip 429s — Cloudflare fronts us and turns a 429 into a
@@ -52,7 +57,7 @@ export async function searchAnime(
   const q = query.trim()
   if (!q) return []
 
-  const u = new URL(`${JIKAN_BASE}/anime`)
+  const u = new URL(`${JIKAN_SEARCH_BASE}/anime`)
   u.searchParams.set('q', q)
   u.searchParams.set('limit', String(limit))
   u.searchParams.set('order_by', 'popularity')

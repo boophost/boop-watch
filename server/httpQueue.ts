@@ -27,6 +27,8 @@ export interface QueueStat {
   minGapMs: number
   concurrency: number
   total: number
+  /** Requests started in the last RATE_WINDOW_MS — the "is it busy *now*" signal. */
+  recent: number
   retried: number
   lastStartAt: number | null
   lastError: { at: number; message: string } | null
@@ -37,10 +39,15 @@ interface QueueState {
   pending: Array<() => void>
   inFlight: number
   lastStartAt: number | null
+  starts: number[]
   total: number
   retried: number
   lastError: { at: number; message: string } | null
 }
+
+// The lifetime total alone can't distinguish a boot-time burst four days ago
+// from sustained traffic right now, so track a short rolling window too.
+export const RATE_WINDOW_MS = 10 * 60 * 1000
 
 type ServiceKey =
   | 'jikan'
@@ -92,6 +99,7 @@ function stateFor(key: string): QueueState {
       pending: [],
       inFlight: 0,
       lastStartAt: null,
+      starts: [],
       total: 0,
       retried: 0,
       lastError: null,
@@ -102,6 +110,12 @@ function stateFor(key: string): QueueState {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+/** Drop window-expired entries. Starts are appended in time order, so shift from the front. */
+function pruneStarts(q: QueueState): void {
+  const cutoff = Date.now() - RATE_WINDOW_MS
+  while (q.starts.length > 0 && q.starts[0] < cutoff) q.starts.shift()
+}
 
 /**
  * Acquire a slot on `key`: waits until concurrency has room AND at least
@@ -135,6 +149,8 @@ export async function enqueue<T>(key: string, fn: () => Promise<T>): Promise<T> 
   const q = stateFor(key)
   await acquire(q)
   q.total++
+  q.starts.push(Date.now())
+  pruneStarts(q)
   try {
     return await fn()
   } finally {
@@ -235,12 +251,14 @@ export function hostKey(url: string | URL): ServiceKey | 'other' {
 export function queueStats(): Record<string, QueueStat> {
   const out: Record<string, QueueStat> = {}
   for (const [key, q] of queues) {
+    pruneStarts(q)
     out[key] = {
       inFlight: q.inFlight,
       queued: q.pending.length,
       minGapMs: q.cfg.minGapMs,
       concurrency: q.cfg.concurrency,
       total: q.total,
+      recent: q.starts.length,
       retried: q.retried,
       lastStartAt: q.lastStartAt,
       lastError: q.lastError,
