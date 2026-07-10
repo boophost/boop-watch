@@ -22,7 +22,8 @@ import { listPublishedComponents, parseComponent } from './flowsDb.js'
 import type { FlowRunRow, RunActivity, ScheduleKind, ScheduleSpec, WeekDay } from './flowsDb.js'
 import { computeNextRun, runScheduleNow } from './scheduler.js'
 import { emitActivity, subscribeActivity } from './runEvents.js'
-import { queueStats } from './httpQueue.js'
+import { queueStats, recentRequests } from './httpQueue.js'
+import { recentSyncs } from './sync.js'
 
 export const flowRouter = Router()
 
@@ -211,10 +212,12 @@ flowRouter.get('/api/flows/runs', (req, res) => {
   res.json({ runs: flowsDb.listRuns(Number.isFinite(limit) ? limit : 100) })
 })
 
-// Live snapshot of the outbound-request limiter (server/httpQueue.ts) — per-service
-// in-flight/queued counts + lifetime totals for the Activity-tab queue strip.
+// Live snapshot of background work for the Activity tab: the outbound-request
+// limiter (per-service counts + a log of the most recent requests, so the
+// traffic is attributable) and recent portal-sync passes (the main non-flow
+// background job).
 flowRouter.get('/api/flows/queue', (_req, res) => {
-  res.json({ queues: queueStats() })
+  res.json({ queues: queueStats(), requests: recentRequests(), syncs: recentSyncs() })
 })
 
 // Live activity feed: an initial snapshot of recent runs, then a newline-delimited

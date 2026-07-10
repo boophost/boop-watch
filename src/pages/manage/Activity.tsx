@@ -3,6 +3,8 @@ import {
   Activity as ActivityIcon,
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Database,
   Download,
   FlaskConical,
@@ -16,7 +18,8 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import {
   getQueueStats, streamActivity,
-  type ActivityStreamEvent, type FlowRun, type QueueStat, type RunActivity,
+  type ActivityStreamEvent, type FlowRun, type QueueStat, type RequestLogEntry,
+  type RunActivity, type SyncSummary,
 } from '@/lib/flows'
 
 // A run being watched live: lifecycle events accumulate here until it resolves
@@ -154,20 +157,129 @@ function RunCard({ run }: { run: FlowRun }) {
 // flows. Hidden entirely until at least one request has gone out.
 const QUEUE_LABELS: Record<string, string> = {
   jikan: 'Jikan', tsukihime: 'TsukiHime', tosho: 'AnimeTosho', anilist: 'AniList',
-  kitsu: 'Kitsu', jimaku: 'Jimaku', aniskip: 'AniSkip', other: 'Other',
+  kitsu: 'Kitsu', fanart: 'fanart.tv', jimaku: 'Jimaku', aniskip: 'AniSkip', other: 'Other',
 }
 
-function QueueStrip({ queues }: { queues: Record<string, QueueStat> }) {
+// Status color for a logged outbound request: ok / client error / server error
+// or transport failure.
+function statusClass(e: RequestLogEntry): string {
+  if (e.error || e.status == null || e.status >= 500) return 'text-red-400'
+  if (e.status >= 400) return 'text-amber-400'
+  return 'text-emerald-400'
+}
+
+function shortUrl(url: string): string {
+  return url.replace(/^https?:\/\//, '')
+}
+
+// The last outbound requests, newest first — the "what exactly did we call"
+// view the per-service counters can't answer.
+function RequestLog({ requests }: { requests: RequestLogEntry[] }) {
+  return (
+    <ul className="mt-3 flex max-h-72 flex-col gap-1 overflow-y-auto border-t pt-3">
+      {requests.length === 0 ? (
+        <li className="text-xs text-muted-foreground">No outbound requests since the server started.</li>
+      ) : (
+        requests.map((e, i) => (
+          <li key={`${e.at}-${i}`} className="flex items-baseline gap-2 font-mono text-[11px]">
+            <span className="w-14 shrink-0 text-muted-foreground" title={new Date(e.at).toLocaleString()}>
+              {relTime(new Date(e.at).toISOString())}
+            </span>
+            <span className="w-20 shrink-0 truncate text-muted-foreground">{QUEUE_LABELS[e.key] ?? e.key}</span>
+            <span className={cn('w-10 shrink-0 tabular-nums', statusClass(e))} title={e.error ?? undefined}>
+              {e.status ?? 'ERR'}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-foreground" title={`${e.method} ${e.url}`}>
+              {e.method !== 'GET' ? `${e.method} ` : ''}
+              {shortUrl(e.url)}
+            </span>
+            <span className="shrink-0 tabular-nums text-muted-foreground">{e.ms}ms</span>
+          </li>
+        ))
+      )}
+    </ul>
+  )
+}
+
+// Recent portal-sync passes: the 5-minute Jellyfin → portal cache refresh is
+// the main background job that isn't a flow run, and it's what drives most of
+// the outbound traffic above (banner gathers, poster searches).
+function SyncPanel({ syncs }: { syncs: SyncSummary[] }) {
+  const [open, setOpen] = useState(false)
+  if (syncs.length === 0) return null
+  const latest = syncs[0]
+  const Chevron = open ? ChevronDown : ChevronRight
+  const line = (s: SyncSummary): string => {
+    const parts = [`${s.items} items`, `${s.episodes} episodes`]
+    if (s.pruned > 0) parts.push(`${s.pruned} pruned`)
+    if (s.posterSearches > 0) parts.push(`${s.posterSearches} poster search${s.posterSearches === 1 ? '' : 'es'}`)
+    return parts.join(' · ')
+  }
+  return (
+    <div className="mb-4 rounded-lg border border-border bg-card p-3">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 text-left text-xs"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <RefreshCw className={cn('size-3.5 shrink-0', latest.error ? 'text-red-400' : 'text-muted-foreground')} />
+        <span className="font-medium text-muted-foreground">Portal sync</span>
+        {latest.error ? (
+          <span className="min-w-0 truncate text-red-400">{latest.error}</span>
+        ) : (
+          <span className="min-w-0 truncate text-foreground">{line(latest)}</span>
+        )}
+        <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
+          {relTime(new Date(latest.at).toISOString())} · {(latest.ms / 1000).toFixed(1)}s
+        </span>
+        <Chevron className="size-3.5 shrink-0 text-muted-foreground" />
+      </button>
+      {open ? (
+        <ul className="mt-3 flex flex-col gap-1 border-t pt-3">
+          {syncs.map((s, i) => (
+            <li key={`${s.at}-${i}`} className="flex items-baseline gap-2 text-[11px]">
+              <span className="w-14 shrink-0 text-muted-foreground" title={new Date(s.at).toLocaleString()}>
+                {relTime(new Date(s.at).toISOString())}
+              </span>
+              {s.error ? (
+                <span className="min-w-0 flex-1 truncate text-red-400" title={s.error}>{s.error}</span>
+              ) : (
+                <span className="min-w-0 flex-1 truncate text-muted-foreground">{line(s)}</span>
+              )}
+              <span className="shrink-0 tabular-nums text-muted-foreground">{(s.ms / 1000).toFixed(1)}s</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  )
+}
+
+function QueueStrip({
+  queues,
+  requests,
+}: {
+  queues: Record<string, QueueStat>
+  requests: RequestLogEntry[]
+}) {
+  const [open, setOpen] = useState(false)
   const entries = Object.entries(queues)
     .filter(([, q]) => q.total > 0 || q.inFlight > 0 || q.queued > 0)
     .sort((a, b) => b[1].recent - a[1].recent || b[1].total - a[1].total)
-  if (entries.length === 0) return null
+  if (entries.length === 0 && requests.length === 0) return null
+  const Chevron = open ? ChevronDown : ChevronRight
   return (
     <div className="mb-4 rounded-lg border border-border bg-card p-3">
-      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+      <button
+        type="button"
+        className="mb-2 flex w-full items-center gap-2 text-left text-xs font-medium text-muted-foreground"
+        onClick={() => setOpen((o) => !o)}
+      >
         <Network className="size-3.5" />
-        Outbound request queues
-      </div>
+        Outbound requests
+        <span className="ml-auto font-normal">{open ? 'hide' : 'show'} log</span>
+        <Chevron className="size-3.5" />
+      </button>
       <div className="flex flex-wrap gap-2">
         {entries.map(([key, q]) => {
           const busy = q.inFlight > 0 || q.queued > 0
@@ -206,7 +318,61 @@ function QueueStrip({ queues }: { queues: Record<string, QueueStat> }) {
           )
         })}
       </div>
+      {open ? <RequestLog requests={requests} /> : null}
     </div>
+  )
+}
+
+// Consecutive runs of the same flow collapse behind the newest one — an
+// event-triggered import can fire dozens of times in an hour, and a wall of
+// identical cards buries everything else.
+interface RunGroup {
+  key: string
+  runs: FlowRun[]
+}
+
+function groupRuns(runs: FlowRun[]): RunGroup[] {
+  const groups: RunGroup[] = []
+  for (const run of runs) {
+    const last = groups[groups.length - 1]
+    if (last && last.runs[0].flow_name === run.flow_name && last.runs[0].dry_run === run.dry_run) {
+      last.runs.push(run)
+    } else {
+      groups.push({ key: String(run.id), runs: [run] })
+    }
+  }
+  return groups
+}
+
+function RunGroupCards({ group }: { group: RunGroup }) {
+  const [expanded, setExpanded] = useState(false)
+  const [latest, ...earlier] = group.runs
+  const failed = earlier.filter((r) => !r.ok).length
+  return (
+    <>
+      <RunCard run={latest} />
+      {earlier.length > 0 ? (
+        expanded ? (
+          earlier.map((run) => <RunCard key={run.id} run={run} />)
+        ) : (
+          <li>
+            <button
+              type="button"
+              className={cn(
+                'flex w-full items-center gap-2 rounded-lg border border-dashed border-border px-4 py-2 text-xs',
+                failed > 0 ? 'text-red-400' : 'text-muted-foreground',
+              )}
+              onClick={() => setExpanded(true)}
+            >
+              <ChevronRight className="size-3.5" />
+              {earlier.length} earlier {latest.flow_name} run{earlier.length === 1 ? '' : 's'}
+              {failed > 0 ? ` · ${failed} failed` : ''}
+              <span className="ml-auto">{relTime(earlier[earlier.length - 1].started_at)} – {relTime(earlier[0].started_at)}</span>
+            </button>
+          </li>
+        )
+      ) : null}
+    </>
   )
 }
 
@@ -216,16 +382,23 @@ export default function Activity() {
   const [loading, setLoading] = useState(true)
   const [connected, setConnected] = useState(false)
   const [queues, setQueues] = useState<Record<string, QueueStat>>({})
+  const [requests, setRequests] = useState<RequestLogEntry[]>([])
+  const [syncs, setSyncs] = useState<SyncSummary[]>([])
   // Bump to force a reconnect (drops the current stream and refetches snapshot).
   const [gen, setGen] = useState(0)
 
-  // Poll the outbound-request queue snapshot (not part of the activity stream).
+  // Poll the background-work snapshot (queues + request log + sync passes —
+  // not part of the activity stream).
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
       try {
-        const { queues } = await getQueueStats()
-        if (!cancelled) setQueues(queues)
+        const { queues, requests, syncs } = await getQueueStats()
+        if (!cancelled) {
+          setQueues(queues)
+          setRequests(requests ?? [])
+          setSyncs(syncs ?? [])
+        }
       } catch {
         /* transient — keep the last snapshot */
       }
@@ -328,7 +501,8 @@ export default function Activity() {
       </header>
       <main className="p-4 md:p-6">
         <div className="mx-auto max-w-2xl">
-          <QueueStrip queues={queues} />
+          <QueueStrip queues={queues} requests={requests} />
+          <SyncPanel syncs={syncs} />
         </div>
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading activity…</p>
@@ -336,18 +510,19 @@ export default function Activity() {
           <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border py-24 text-center">
             <ActivityIcon className="size-8 text-muted-foreground" />
             <div>
-              <p className="font-medium">No activity yet</p>
+              <p className="font-medium">No flow runs yet</p>
               <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
                 Runs from the flow editor and scheduled flows show up here —
-                metadata updates, new downloads, imports, and cleanup.
+                metadata updates, new downloads, imports, and cleanup. Background
+                work (portal sync, outbound API requests) appears above.
               </p>
             </div>
           </div>
         ) : (
           <ul className="mx-auto flex max-w-2xl flex-col gap-3">
             {inProgress ? <InProgressCard ip={inProgress} /> : null}
-            {runs.map((run) => (
-              <RunCard key={run.id} run={run} />
+            {groupRuns(runs).map((group) => (
+              <RunGroupCards key={group.key} group={group} />
             ))}
           </ul>
         )}

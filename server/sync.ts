@@ -61,9 +61,45 @@ async function ensureEpisodeTitles(mal_id: number): Promise<Map<number, string>>
   return getEpisodeTitles(mal_id)
 }
 
+// Rolling record of recent sync passes for the Activity page. The portal sync
+// is the main background job that isn't a flow run, so without this its work
+// (and its external fetches) is invisible on /manage/activity.
+export interface SyncSummary {
+  at: number
+  ms: number
+  items: number
+  episodes: number
+  pruned: number
+  posterSearches: number
+  error: string | null
+}
+
+const SYNC_LOG_MAX = 20
+const syncLog: SyncSummary[] = []
+
+/** Recent portal-sync passes, newest first. */
+export function recentSyncs(): SyncSummary[] {
+  return [...syncLog].reverse()
+}
+
 export async function syncJellyfinToPortal() {
   if (!COLLECTION_ID) return
+  const summary: SyncSummary = {
+    at: Date.now(), ms: 0, items: 0, episodes: 0, pruned: 0, posterSearches: 0, error: null,
+  }
+  try {
+    await runSync(summary)
+  } catch (e) {
+    summary.error = e instanceof Error ? e.message : String(e)
+    throw e
+  } finally {
+    summary.ms = Date.now() - summary.at
+    syncLog.push(summary)
+    if (syncLog.length > SYNC_LOG_MAX) syncLog.shift()
+  }
+}
 
+async function runSync(summary: SyncSummary) {
   const children = await jfJson<{ Items?: JfItem[] }>('/Items', {
     ParentId: COLLECTION_ID,
     Recursive: 'true',
@@ -103,6 +139,7 @@ export async function syncJellyfinToPortal() {
         // Throttled per item: a search that finds nothing (e.g. a stray
         // release-dir "series" Jikan can't know) used to refire every sync.
         recordFetchAttempt('poster-search', it.Id)
+        summary.posterSearches++
         try {
           const jikanRes = await searchAnime(it.Name || '', 1)
           if (jikanRes.length > 0) {
@@ -136,6 +173,7 @@ export async function syncJellyfinToPortal() {
       mal_id: match?.mal_id ?? null,
     }
     upsertPortalItem(pItem)
+    summary.items++
 
     if (it.Type === 'Series') {
       // Clean per-episode titles from MAL (cached), mapped by episode number.
@@ -175,10 +213,12 @@ export async function syncJellyfinToPortal() {
           mal_id: null,
         }
         upsertPortalItem(pEp)
+        summary.episodes++
       }
     }
   }
 
   const pruned = prunePortalItemsNotIn(keepIds)
+  summary.pruned = pruned
   if (pruned > 0) console.log(`portal sync: pruned ${pruned} stale item(s)`)
 }

@@ -49,6 +49,43 @@ interface QueueState {
 // from sustained traffic right now, so track a short rolling window too.
 export const RATE_WINDOW_MS = 10 * 60 * 1000
 
+// Rolling log of the most recent outbound requests, so the Activity page can
+// show *what* the traffic was, not just per-service counts. URLs are logged as
+// origin + pathname only — query strings can carry credentials (fanart.tv puts
+// its api_key there).
+export interface RequestLogEntry {
+  at: number
+  key: string
+  method: string
+  url: string
+  /** HTTP status, or null when the request itself failed (timeout, DNS, …). */
+  status: number | null
+  ms: number
+  error: string | null
+}
+
+const REQUEST_LOG_MAX = 100
+const requestLog: RequestLogEntry[] = []
+
+function sanitizeUrl(url: string | URL): string {
+  try {
+    const u = new URL(url)
+    return u.origin + u.pathname
+  } catch {
+    return 'invalid-url'
+  }
+}
+
+function logRequest(entry: RequestLogEntry): void {
+  requestLog.push(entry)
+  if (requestLog.length > REQUEST_LOG_MAX) requestLog.shift()
+}
+
+/** Most recent outbound requests, newest first. */
+export function recentRequests(): RequestLogEntry[] {
+  return [...requestLog].reverse()
+}
+
 type ServiceKey =
   | 'jikan'
   | 'tsukihime'
@@ -190,13 +227,18 @@ export function limitedFetch(
 ): Promise<Response> {
   const q = stateFor(key)
   return enqueue(key, async () => {
+    const startedAt = Date.now()
+    const method = (init.method ?? 'GET').toUpperCase()
+    const logged = sanitizeUrl(url)
     for (let attempt = 0; ; attempt++) {
       const signal = init.signal ?? AbortSignal.timeout(q.cfg.timeoutMs)
       let res: Response
       try {
         res = await fetch(url, { ...init, signal })
       } catch (e) {
-        q.lastError = { at: Date.now(), message: e instanceof Error ? e.message : String(e) }
+        const message = e instanceof Error ? e.message : String(e)
+        q.lastError = { at: Date.now(), message }
+        logRequest({ at: startedAt, key, method, url: logged, status: null, ms: Date.now() - startedAt, error: message })
         throw e
       }
       if ((res.status === 429 || res.status === 503) && attempt < q.cfg.retries) {
@@ -206,6 +248,7 @@ export function limitedFetch(
         await sleep(Math.min(wait, 30_000))
         continue
       }
+      logRequest({ at: startedAt, key, method, url: logged, status: res.status, ms: Date.now() - startedAt, error: null })
       return res
     }
   })
