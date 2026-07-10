@@ -41,22 +41,38 @@ function providers(user: User): string[] {
   return typeof fallback === 'string' && fallback ? [fallback] : []
 }
 
-function isAdminViaEnv(email: string | null): boolean {
+export function isAdminViaEnv(email: string | null): boolean {
   const normalized = (email ?? '').toLowerCase()
   return normalized.length > 0 && ADMIN_EMAILS.includes(normalized)
 }
 
-function isAdminUser(user: User): boolean {
-  const email = (user.email ?? '').toLowerCase()
-  const meta = user.user_metadata ?? {}
-  return (
-    meta.admin === true ||
-    user.app_metadata?.role === 'admin' ||
-    (email.length > 0 && ADMIN_EMAILS.includes(email))
-  )
+/**
+ * Admin status for one user: the env allowlist (super-admins, never revocable
+ * and never dependent on the DB being reachable) or a row in admin_users.
+ * Fails closed — a missing service client or query error means "not admin".
+ */
+export async function isAdminForUserId(id: string, email: string | null): Promise<boolean> {
+  if (isAdminViaEnv(email)) return true
+  const client = adminClient()
+  if (!client) return false
+  try {
+    const { data, error } = await client
+      .from('admin_users')
+      .select('user_id')
+      .eq('user_id', id)
+      .maybeSingle()
+    if (error) {
+      console.error('admin_users lookup failed', error)
+      return false
+    }
+    return data !== null
+  } catch (e) {
+    console.error('admin_users lookup failed', e)
+    return false
+  }
 }
 
-function toRow(user: User): AdminUserRow {
+function toRow(user: User, isAdmin: boolean): AdminUserRow {
   const email = user.email ?? null
   return {
     id: user.id,
@@ -65,7 +81,7 @@ function toRow(user: User): AdminUserRow {
     providers: providers(user),
     createdAt: user.created_at,
     lastSignInAt: user.last_sign_in_at ?? null,
-    isAdmin: isAdminUser(user),
+    isAdmin,
     adminViaEnv: isAdminViaEnv(email),
   }
 }
@@ -77,6 +93,12 @@ export async function listAllUsers(): Promise<AdminUserRow[]> {
     throw new Error('User listing is not configured (SUPABASE_SERVICE_ROLE_KEY)')
   }
 
+  const { data: adminRows, error: adminError } = await client
+    .from('admin_users')
+    .select('user_id')
+  if (adminError) throw adminError
+  const adminIds = new Set((adminRows ?? []).map((r) => r.user_id as string))
+
   const rows: AdminUserRow[] = []
   let page = 1
   const perPage = 200
@@ -84,7 +106,10 @@ export async function listAllUsers(): Promise<AdminUserRow[]> {
   for (;;) {
     const { data, error } = await client.auth.admin.listUsers({ page, perPage })
     if (error) throw error
-    for (const user of data.users) rows.push(toRow(user))
+    for (const user of data.users) {
+      const isAdmin = adminIds.has(user.id) || isAdminViaEnv(user.email ?? null)
+      rows.push(toRow(user, isAdmin))
+    }
     if (data.users.length < perPage) break
     page += 1
   }
@@ -102,6 +127,7 @@ export async function deleteUser(id: string): Promise<void> {
   if (!client) {
     throw new Error('User management is not configured (SUPABASE_SERVICE_ROLE_KEY)')
   }
+  // admin_users.user_id cascades on auth.users delete — no separate cleanup.
   const { error } = await client.auth.admin.deleteUser(id)
   if (error) throw error
 }
@@ -120,11 +146,12 @@ export async function setUserAdmin(id: string, isAdmin: boolean): Promise<AdminU
     throw new Error('Cannot revoke admin for an allowlisted email')
   }
 
-  const { data, error } = await client.auth.admin.updateUserById(id, {
-    app_metadata: { ...existing.user.app_metadata, role: isAdmin ? 'admin' : null },
-    user_metadata: { ...existing.user.user_metadata, admin: isAdmin },
-  })
-  if (error) throw error
-  if (!data.user) throw new Error('User not found')
-  return toRow(data.user)
+  if (isAdmin) {
+    const { error } = await client.from('admin_users').upsert({ user_id: id })
+    if (error) throw error
+  } else {
+    const { error } = await client.from('admin_users').delete().eq('user_id', id)
+    if (error) throw error
+  }
+  return toRow(existing.user, isAdmin || isAdminViaEnv(existing.user.email ?? null))
 }
