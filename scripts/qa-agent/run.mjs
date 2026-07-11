@@ -20,8 +20,12 @@
  *                      (default ethanwhi@gmail.com)
  *   QA_PLAYWRIGHT=1    allow the Playwright MCP for UI checks (optional)
  *   CLAUDE_CODE_OAUTH_TOKEN  subscription auth for the `claude` CLI (from
- *                      `claude setup-token`); or ANTHROPIC_API_KEY for API
- *                      billing. Not needed for --dry-run.
+ *                      `claude setup-token`). Add CLAUDE_CODE_OAUTH_TOKEN_2..N
+ *                      (or a newline/comma-separated CLAUDE_CODE_OAUTH_TOKENS)
+ *                      to pool several accounts: when one hits its usage cap the
+ *                      agent rotates to the next. ANTHROPIC_API_KEY is tried last
+ *                      (per-token billing). Not needed for --dry-run.
+ *   QA_LOCAL_CLAUDE=1  use the machine's existing `claude` login instead
  *   QA_MODEL           agent model (default claude-haiku-4-5)
  *
  * `--dry-run` skips the agent (marks every item pass) to exercise the
@@ -124,6 +128,59 @@ function mintToken() {
   return `${head}.${payload}.${sig}`
 }
 
+// Ordered list of Claude credentials to try. A subscription account that hits its
+// usage cap rotates to the next one, so QA keeps working across accounts. Sources
+// (in order): CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN_2..N, the
+// newline/comma-separated CLAUDE_CODE_OAUTH_TOKENS, then ANTHROPIC_API_KEY as a
+// last resort (per-token billing). QA_LOCAL_CLAUDE=1 uses the machine's existing
+// `claude` login instead.
+function credentialPool() {
+  if (process.env.QA_LOCAL_CLAUDE) return [{ name: 'local login', kind: 'oauth', env: {} }]
+
+  const seen = new Set()
+  const creds = []
+  const addOauth = (token, name) => {
+    const t = token?.trim()
+    if (!t || seen.has(t)) return
+    seen.add(t)
+    // Pin this token and blank the others so the CLI can't silently reuse one.
+    creds.push({ name, kind: 'oauth', env: { CLAUDE_CODE_OAUTH_TOKEN: t, ANTHROPIC_API_KEY: '' } })
+  }
+
+  addOauth(process.env.CLAUDE_CODE_OAUTH_TOKEN, 'CLAUDE_CODE_OAUTH_TOKEN')
+  for (let i = 2; i <= 10; i++) addOauth(process.env[`CLAUDE_CODE_OAUTH_TOKEN_${i}`], `CLAUDE_CODE_OAUTH_TOKEN_${i}`)
+  ;(process.env.CLAUDE_CODE_OAUTH_TOKENS || '')
+    .split(/[\n,]/)
+    .forEach((t, i) => addOauth(t, `CLAUDE_CODE_OAUTH_TOKENS[${i}]`))
+
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim()
+  if (apiKey) {
+    creds.push({ name: 'ANTHROPIC_API_KEY', kind: 'api-key', env: { ANTHROPIC_API_KEY: apiKey, CLAUDE_CODE_OAUTH_TOKEN: '' } })
+  }
+  return creds
+}
+
+// Try each credential in turn; a usage/rate limit rotates to the next account.
+// Only when every credential is capped do we report the run as deferred.
+function runAgentWithFailover(prompt, creds) {
+  const limits = []
+  for (const [i, cred] of creds.entries()) {
+    try {
+      if (i > 0) console.log(`Rotating to credential: ${cred.name}`)
+      return runAgent(prompt, cred)
+    } catch (err) {
+      if (!(err instanceof RateLimitError) || i === creds.length - 1) {
+        if (err instanceof RateLimitError) limits.push(`${cred.name}: ${err.message}`)
+        if (err instanceof RateLimitError) throw new RateLimitError(limits.join(' | '))
+        throw err
+      }
+      console.warn(`Credential ${cred.name} is rate limited (${err.message}) — trying the next one.`)
+      limits.push(`${cred.name}: ${err.message}`)
+    }
+  }
+  throw new RateLimitError(limits.join(' | ') || 'no Claude credentials available')
+}
+
 function buildPrompt({ baseUrl, token, prTitle, changedFiles, items }) {
   const template = readFileSync(join(HERE, 'prompt.md'), 'utf8')
   const playwrightNote = process.env.QA_PLAYWRIGHT
@@ -141,7 +198,8 @@ function buildPrompt({ baseUrl, token, prTitle, changedFiles, items }) {
 // Run the claude CLI in headless JSON mode and pull the verdict block out of the
 // assistant's final message. Fast model + budget/time caps keep a QA pass cheap
 // and bounded (a QA agent mostly curls endpoints — it doesn't need Opus).
-function runAgent(prompt) {
+// `cred` selects which account/key the CLI authenticates with (see credentialPool).
+function runAgent(prompt, cred) {
   const model = process.env.QA_MODEL || 'claude-haiku-4-5'
   const timeoutMs = Number(process.env.QA_TIMEOUT_MS || 8 * 60_000)
 
@@ -151,9 +209,9 @@ function runAgent(prompt) {
     '--permission-mode', 'bypassPermissions',
     '--model', model,
   ]
-  // A dollar cap only makes sense for API-key billing; under subscription
-  // (CLAUDE_CODE_OAUTH_TOKEN) the timeout is the bound.
-  if (process.env.ANTHROPIC_API_KEY && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+  // A dollar cap only makes sense for API-key billing; under a subscription the
+  // timeout is the bound.
+  if (cred.kind === 'api-key') {
     args.push('--max-budget-usd', process.env.QA_MAX_BUDGET_USD || '2')
   }
   if (process.env.QA_PLAYWRIGHT) {
@@ -171,7 +229,9 @@ function runAgent(prompt) {
 
   // Keep a fresh CI install from stalling on first-run chores (native-build
   // fetch, auto-update, telemetry) — network to the API/preview is already fine,
-  // so any hang is self-inflicted startup work.
+  // so any hang is self-inflicted startup work. `...cred.env` pins exactly one
+  // credential for this run (the others are blanked) so a rotation really does
+  // switch accounts.
   const env = {
     ...process.env,
     CI: 'true',
@@ -179,6 +239,7 @@ function runAgent(prompt) {
     DISABLE_TELEMETRY: '1',
     DISABLE_ERROR_REPORTING: '1',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    ...cred.env,
   }
 
   let raw
@@ -284,29 +345,27 @@ async function main() {
   const changedFiles = files.map((f) => `- \`${f.filename}\``).join('\n')
 
   // Fail fast on a missing credential rather than letting the CLI hang until the
-  // timeout — surface the config gap on the PR so a human can fix it. Prefer the
-  // subscription OAuth token (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`);
-  // accept an ANTHROPIC_API_KEY too. QA_LOCAL_CLAUDE=1 skips this when running
-  // outside CI on a workstation where `claude` is already logged in.
-  const hasCred = process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY || process.env.QA_LOCAL_CLAUDE
-  if (!dryRun && !hasCred) {
+  // timeout — surface the config gap on the PR so a human can fix it.
+  const creds = credentialPool()
+  if (!dryRun && !creds.length) {
     await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — not run\n\nNo Claude credential on the runner. Set the \`CLAUDE_CODE_OAUTH_TOKEN\` repo secret (from \`claude setup-token\`, uses your subscription) — or \`ANTHROPIC_API_KEY\` — and re-run this job.`)
     throw new Error('No Claude credential (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY) — cannot run the QA agent')
   }
+  if (!dryRun) console.log(`Claude credentials available: ${creds.map((c) => c.name).join(', ')}`)
 
   let verdicts
   if (dryRun) {
     verdicts = items.map((_, i) => ({ index: i, status: 'pass', evidence: 'dry-run: not actually verified' }))
   } else {
     try {
-      verdicts = runAgent(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items }))
+      verdicts = runAgentWithFailover(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items }), creds)
     } catch (err) {
-      // Hitting the account's usage cap means nothing was verified — but it's not
-      // a QA failure either. Say so on the PR, tick nothing, and exit clean so the
-      // check isn't a misleading red X. Re-run the job once usage resets.
+      // Every credential is capped — nothing was verified, but that's not a QA
+      // failure either. Say so on the PR, tick nothing, and exit clean so the
+      // check isn't a misleading red X. Re-run once usage resets.
       if (err instanceof RateLimitError) {
-        await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — deferred\n\n${err.message} No items were verified, so none were checked off. Re-run this job once usage resets.`)
-        console.log(`QA deferred: ${err.message}`)
+        await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — deferred\n\nAll ${creds.length} Claude credential(s) are rate limited, so nothing was verified and no items were checked off. Re-run this job once usage resets.\n\n<details><summary>Details</summary>\n\n${err.message}\n\n</details>`)
+        console.log(`QA deferred (all ${creds.length} credential(s) rate limited): ${err.message}`)
         return
       }
       throw err

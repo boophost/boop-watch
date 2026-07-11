@@ -186,8 +186,12 @@ jobs:
       BASE_URL: ${{ needs.preview-up.outputs.internal_url || needs.preview-up.outputs.url }}
       GITHUB_TOKEN: ${{ github.token }}
       # Subscription/session auth (from `claude setup-token`) — NOT per-token API
-      # billing. Falls back to ANTHROPIC_API_KEY if that's the one that's set.
+      # billing. Set CLAUDE_CODE_OAUTH_TOKEN_2/_3 to pool extra accounts: when one
+      # hits its usage cap the agent rotates to the next. ANTHROPIC_API_KEY (if
+      # set) is tried last. Unset secrets come through empty and are skipped.
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      CLAUDE_CODE_OAUTH_TOKEN_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
+      CLAUDE_CODE_OAUTH_TOKEN_3: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_3 }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - name: Checkout
