@@ -188,6 +188,10 @@ function runAgent(prompt) {
     const partial = [err?.stdout, err?.stderr].filter(Boolean).join('\n').slice(-1200)
     let dbg = ''
     try { dbg = readFileSync(debugFile, 'utf8').slice(-2000) } catch { /* none */ }
+    // A usage/rate limit is not a QA failure — the CLI exits non-zero, but
+    // nothing was verified either way. Signal it so the caller can defer.
+    const limited = detectRateLimit(err?.stdout, partial, dbg)
+    if (limited) throw new RateLimitError(limited)
     if (dbg) console.error(`--- claude debug tail ---\n${dbg}\n--- end debug ---`)
     if (partial) console.error(`--- claude partial output ---\n${partial}\n--- end ---`)
     if (err?.code === 'ETIMEDOUT') throw new Error(`agent timed out after ${timeoutMs / 1000}s — see debug tail above`)
@@ -195,14 +199,30 @@ function runAgent(prompt) {
   }
   let result
   try {
-    result = JSON.parse(raw).result ?? ''
-  } catch {
+    const out = JSON.parse(raw)
+    const limited = detectRateLimit(raw)
+    if (limited) throw new RateLimitError(limited)
+    result = out.result ?? ''
+  } catch (err) {
+    if (err instanceof RateLimitError) throw err
     result = raw // some versions print the text directly
   }
   const blocks = [...result.matchAll(/```json\s*([\s\S]*?)```/g)]
   if (!blocks.length) throw new Error(`agent produced no json verdict block:\n${result.slice(-500)}`)
   const parsed = JSON.parse(blocks[blocks.length - 1][1])
   return parsed.verdicts ?? []
+}
+
+class RateLimitError extends Error {}
+
+// The CLI reports a usage cap as api_error_status 429 / a "session limit"
+// result. Pull out a human-readable reason (incl. the reset time when present).
+function detectRateLimit(...texts) {
+  const blob = texts.filter(Boolean).join('\n')
+  if (!blob) return null
+  if (!/rate[_ ]limit|"api_error_status"\s*:\s*429|session limit|usage limit/i.test(blob)) return null
+  const reset = blob.match(/resets?[^"\n]*/i)?.[0]?.trim()
+  return reset ? `Claude usage limit reached (${reset}).` : 'Claude usage/rate limit reached.'
 }
 
 // ---- reporting --------------------------------------------------------------
@@ -278,7 +298,19 @@ async function main() {
   if (dryRun) {
     verdicts = items.map((_, i) => ({ index: i, status: 'pass', evidence: 'dry-run: not actually verified' }))
   } else {
-    verdicts = runAgent(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items }))
+    try {
+      verdicts = runAgent(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items }))
+    } catch (err) {
+      // Hitting the account's usage cap means nothing was verified — but it's not
+      // a QA failure either. Say so on the PR, tick nothing, and exit clean so the
+      // check isn't a misleading red X. Re-run the job once usage resets.
+      if (err instanceof RateLimitError) {
+        await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — deferred\n\n${err.message} No items were verified, so none were checked off. Re-run this job once usage resets.`)
+        console.log(`QA deferred: ${err.message}`)
+        return
+      }
+      throw err
+    }
   }
 
   const passedIdx = verdicts.filter((v) => v.status === 'pass').map((v) => v.index)
