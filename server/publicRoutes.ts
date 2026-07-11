@@ -257,9 +257,11 @@ publicRouter.get('/api/items/summary', async (req, res) => {
       epLabel: ep.IndexNumber != null ? `E${ep.IndexNumber}` : '',
       epName: ep.Name || '',
     })),
-    ...getCollectionItems().filter((it) => it.Type !== 'Series' && ids.has(it.Id)).map((it) => ({
+    // Top-level titles (series + movies) — so a set of saved-title ids resolves
+    // to name/type without pulling the whole catalog client-side.
+    ...getCollectionItems().filter((it) => ids.has(it.Id)).map((it) => ({
       id: it.Id,
-      type: 'movie' as const,
+      type: (it.Type === 'Series' ? 'series' : 'movie') as 'series' | 'movie',
       seriesId: null,
       name: it.Name || '',
       season: null,
@@ -685,6 +687,11 @@ publicRouter.get('/img/:id', async (req, res) => {
     res.redirect(302, pItem.image_url)
     return
   }
+  // Let browsers cache the poster for an hour, as the season/backdrop routes do
+  // — without this every visit re-proxies the image through Jellyfin's
+  // on-the-fly generation. proxy() forces no-store on a 4xx/5xx, so an upstream
+  // failure is never cached under this lifetime.
+  res.set('cache-control', 'public, max-age=3600')
   await proxy(req, res, jfUrl(`/Items/${id}/Images/Primary`, { maxWidth: '400', quality: '90' }))
 })
 
