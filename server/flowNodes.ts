@@ -2715,8 +2715,53 @@ const VIDEO_EXTS_DEFAULT = 'mkv,mp4,avi,m4v,mov'
 // the node's disk and got the pod evicted (prod outage; staging nearly repeated
 // it). Set WORK_DIR to a path on the big media NFS (e.g. /data/.boopwork) so
 // scratch never lands on node disk. `.../work` is appended by the nodes.
+//
+// Safe by construction: `assertScratchVolumeSafe()` (called at boot on any
+// environment that *runs* flows) refuses to start when this resolves to a
+// volume below WORK_MIN_GIB — so a forgotten WORK_DIR fails loudly at deploy
+// instead of silently filling the node PVC and evicting the pod at 3am.
 const WORK_DIR = () =>
   process.env.WORK_DIR ?? process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
+
+// Boot guard: the library-import flow writes GB-sized intermediates, so scratch
+// must never land on the small node PVC (see WORK_DIR above — that's what took
+// prod down on 2026-07-11). Stat the volume WORK_DIR resolves to and throw if
+// its total capacity is below WORK_MIN_GIB (default 10Gi), which cleanly
+// separates the 1-2Gi node PVC from the media NFS. Only call this where flows
+// actually execute — a management-only environment (SCHEDULER_ENABLED=false)
+// never writes scratch, so its small PVC is fine.
+export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB ?? 10)): void {
+  const workDir = WORK_DIR()
+  // statfs needs an existing path; walk up to the nearest ancestor that exists
+  // (the `work` subdir is created lazily by the nodes on first write).
+  let probe = path.resolve(workDir)
+  while (!fs.existsSync(probe)) {
+    const parent = path.dirname(probe)
+    if (parent === probe) break // reached the filesystem root
+    probe = parent
+  }
+  let totalGiB: number
+  try {
+    const st = fs.statfsSync(probe)
+    totalGiB = (st.blocks * st.bsize) / 2 ** 30
+  } catch (err) {
+    // Can't stat (unusual FS / permissions) — warn but don't block boot; the
+    // pruner and ephemeral-storage limit are still in place as backstops.
+    console.warn(`[work-guard] could not stat scratch volume at ${probe}; skipping capacity check:`, err)
+    return
+  }
+  if (totalGiB < minGiB) {
+    const src = process.env.WORK_DIR ? 'WORK_DIR' : process.env.DATA_DIR ? 'DATA_DIR' : 'the default'
+    throw new Error(
+      `flow scratch dir "${workDir}" (from ${src}) is on a ${totalGiB.toFixed(1)}Gi volume, below the ` +
+      `${minGiB}Gi floor. The library-import flow writes GB-sized intermediates (trim-audio-tracks alone ` +
+      `emits ~3.5GB per episode) and will fill this volume and evict the pod. Point WORK_DIR at the big ` +
+      `media NFS (e.g. a .boopwork dir on the same filesystem as LIBRARY_DIR), set SCHEDULER_ENABLED=false ` +
+      `for a management-only environment, or lower the floor with WORK_MIN_GIB.`,
+    )
+  }
+  console.log(`[work-guard] scratch volume "${workDir}" ok (${totalGiB.toFixed(0)}Gi ≥ ${minGiB}Gi floor)`)
+}
 
 // The library-import nodes (extract-subs, mux-tracks, …) drop intermediate
 // files — extracted subs, fonts, muxed MKVs — under DATA_DIR/work. Nothing ever
