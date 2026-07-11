@@ -44,18 +44,36 @@ const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
 
 // ---- GitHub REST ------------------------------------------------------------
 
-async function ghApi(method, path, body) {
+async function ghApi(method, path, body, attempt = 1) {
   if (!REPO || !TOKEN) throw new Error('GITHUB_REPOSITORY and GITHUB_TOKEN are required')
-  const res = await fetch(`https://api.github.com${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  })
+  let res
+  try {
+    res = await fetch(`https://api.github.com${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(30_000),
+    })
+  } catch (err) {
+    // Network-level failure (ECONNRESET/ETIMEDOUT/DNS). `fetch failed` hides the
+    // real reason in err.cause — surface it, and retry with backoff.
+    const cause = err?.cause?.code || err?.cause?.message || err?.message
+    if (attempt < 4) {
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)))
+      return ghApi(method, path, body, attempt + 1)
+    }
+    throw new Error(`GitHub ${method} ${path} failed after ${attempt} attempts: ${cause}`)
+  }
+  // Retry transient server/rate-limit statuses too.
+  if ((res.status >= 500 || res.status === 429) && attempt < 4) {
+    await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)))
+    return ghApi(method, path, body, attempt + 1)
+  }
   if (!res.ok) throw new Error(`GitHub ${method} ${path} → ${res.status} ${await res.text()}`)
   return res.status === 204 ? null : res.json()
 }
@@ -248,8 +266,10 @@ async function main() {
   // Fail fast on a missing credential rather than letting the CLI hang until the
   // timeout — surface the config gap on the PR so a human can fix it. Prefer the
   // subscription OAuth token (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`);
-  // accept an ANTHROPIC_API_KEY too.
-  if (!dryRun && !process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.ANTHROPIC_API_KEY) {
+  // accept an ANTHROPIC_API_KEY too. QA_LOCAL_CLAUDE=1 skips this when running
+  // outside CI on a workstation where `claude` is already logged in.
+  const hasCred = process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY || process.env.QA_LOCAL_CLAUDE
+  if (!dryRun && !hasCred) {
     await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — not run\n\nNo Claude credential on the runner. Set the \`CLAUDE_CODE_OAUTH_TOKEN\` repo secret (from \`claude setup-token\`, uses your subscription) — or \`ANTHROPIC_API_KEY\` — and re-run this job.`)
     throw new Error('No Claude credential (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY) — cannot run the QA agent')
   }
