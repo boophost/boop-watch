@@ -148,14 +148,32 @@ function runAgent(prompt) {
   // prompt goes on stdin (the CLI reads it there in --print mode).
   args.push('--allowed-tools', ...allowed)
 
+  const debugFile = join(mkdtempSync(join(tmpdir(), 'qa-dbg-')), 'claude.log')
+  args.push('--debug-file', debugFile)
+
+  // Keep a fresh CI install from stalling on first-run chores (native-build
+  // fetch, auto-update, telemetry) — network to the API/preview is already fine,
+  // so any hang is self-inflicted startup work.
+  const env = {
+    ...process.env,
+    CI: 'true',
+    DISABLE_AUTOUPDATER: '1',
+    DISABLE_TELEMETRY: '1',
+    DISABLE_ERROR_REPORTING: '1',
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+  }
+
   let raw
   try {
-    raw = execFileSync('claude', args, { input: prompt, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs })
+    raw = execFileSync('claude', args, { input: prompt, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs })
   } catch (err) {
-    if (err?.code === 'ETIMEDOUT') throw new Error(`agent timed out after ${timeoutMs / 1000}s — check the preview is reachable and the model is responding`)
-    // Surface stdout/stderr the CLI produced before dying (auth/model errors).
-    const detail = [err?.stdout, err?.stderr].filter(Boolean).join('\n').slice(-800)
-    throw new Error(`claude CLI failed (${err?.code || err?.status}): ${detail || err?.message}`)
+    const partial = [err?.stdout, err?.stderr].filter(Boolean).join('\n').slice(-1200)
+    let dbg = ''
+    try { dbg = readFileSync(debugFile, 'utf8').slice(-2000) } catch { /* none */ }
+    if (dbg) console.error(`--- claude debug tail ---\n${dbg}\n--- end debug ---`)
+    if (partial) console.error(`--- claude partial output ---\n${partial}\n--- end ---`)
+    if (err?.code === 'ETIMEDOUT') throw new Error(`agent timed out after ${timeoutMs / 1000}s — see debug tail above`)
+    throw new Error(`claude CLI failed (${err?.code || err?.status}): ${err?.message}`)
   }
   let result
   try {
