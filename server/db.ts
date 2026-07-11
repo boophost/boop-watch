@@ -850,6 +850,20 @@ export function listLibraryFiles(): LibraryFileRow[] {
   return getDb().prepare('SELECT * FROM library_files ORDER BY path').all() as LibraryFileRow[]
 }
 
+/** Distinct torrent hashes that already have at least one imported library file.
+ * Lets `source.qbittorrent` drop already-imported torrents up front — before the
+ * expensive ffprobe/ffmpeg probe+mux nodes — instead of re-doing all that work
+ * only for `sink.library-import` to skip it at the finish line. Backed by the
+ * `idx_library_files_hash` index. */
+export function importedTorrentHashes(): Set<string> {
+  const rows = getDb()
+    .prepare(
+      `SELECT DISTINCT torrent_hash AS h FROM library_files WHERE torrent_hash IS NOT NULL AND torrent_hash <> ''`,
+    )
+    .all() as { h: string }[]
+  return new Set(rows.map((r) => r.h))
+}
+
 /** Record the on-disk copy of a candidate's art (see banners.ts `cacheBannerFile`). */
 export function setBannerLocalFile(bannerId: number, local_file: string): void {
   getDb().prepare('UPDATE series_banners SET local_file = ? WHERE id = ?').run(local_file, bannerId)
