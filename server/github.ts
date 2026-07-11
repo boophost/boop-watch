@@ -25,6 +25,12 @@ export function githubConfigured(): boolean {
   return Boolean(appId() && privateKey())
 }
 
+class GhError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+  }
+}
+
 async function gh<T>(path: string, token: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     ...init,
@@ -38,7 +44,7 @@ async function gh<T>(path: string, token: string, init?: RequestInit): Promise<T
     signal: AbortSignal.timeout(15_000),
   })
   const text = await res.text()
-  if (!res.ok) throw new Error(`GitHub ${init?.method ?? 'GET'} ${path} → ${res.status} ${text.slice(0, 200)}`)
+  if (!res.ok) throw new GhError(`GitHub ${init?.method ?? 'GET'} ${path} → ${res.status} ${text.slice(0, 200)}`, res.status)
   return (text ? JSON.parse(text) : null) as T
 }
 
@@ -79,10 +85,20 @@ export async function createIssue(opts: {
   labels?: string[]
 }): Promise<CreatedIssue> {
   if (!githubConfigured()) throw new Error('GitHub App is not configured (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY)')
-  const token = await installationToken()
-  const issue = await gh<{ number: number; html_url: string }>(`/repos/${githubRepo()}/issues`, token, {
-    method: 'POST',
-    body: JSON.stringify({ title: opts.title, body: opts.body, labels: opts.labels ?? [] }),
-  })
+  const post = async () =>
+    gh<{ number: number; html_url: string }>(`/repos/${githubRepo()}/issues`, await installationToken(), {
+      method: 'POST',
+      body: JSON.stringify({ title: opts.title, body: opts.body, labels: opts.labels ?? [] }),
+    })
+  let issue: { number: number; html_url: string }
+  try {
+    issue = await post()
+  } catch (err) {
+    // A cached installation token can be revoked before its expiry (App key
+    // rotation, uninstall/reinstall). Mint a fresh one and retry once.
+    if (!(err instanceof GhError) || err.status !== 401) throw err
+    cached = null
+    issue = await post()
+  }
   return { number: issue.number, url: issue.html_url }
 }
