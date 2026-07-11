@@ -19,7 +19,10 @@
  *   QA_ADMIN_EMAIL     admin email, must be in the preview's ADMIN_EMAILS
  *                      (default ethanwhi@gmail.com)
  *   QA_PLAYWRIGHT=1    allow the Playwright MCP for UI checks (optional)
- *   ANTHROPIC_API_KEY  read by the `claude` CLI (not needed for --dry-run)
+ *   CLAUDE_CODE_OAUTH_TOKEN  subscription auth for the `claude` CLI (from
+ *                      `claude setup-token`); or ANTHROPIC_API_KEY for API
+ *                      billing. Not needed for --dry-run.
+ *   QA_MODEL           agent model (default claude-haiku-4-5)
  *
  * `--dry-run` skips the agent (marks every item pass) to exercise the
  * parse → tick → comment pipeline without the API or a live preview.
@@ -122,7 +125,6 @@ function buildPrompt({ baseUrl, token, prTitle, changedFiles, items }) {
 // and bounded (a QA agent mostly curls endpoints — it doesn't need Opus).
 function runAgent(prompt) {
   const model = process.env.QA_MODEL || 'claude-haiku-4-5'
-  const budget = process.env.QA_MAX_BUDGET_USD || '2'
   const timeoutMs = Number(process.env.QA_TIMEOUT_MS || 8 * 60_000)
 
   const allowed = ['Bash']
@@ -130,8 +132,12 @@ function runAgent(prompt) {
     '-p', '--output-format', 'json',
     '--permission-mode', 'bypassPermissions',
     '--model', model,
-    '--max-budget-usd', budget,
   ]
+  // A dollar cap only makes sense for API-key billing; under subscription
+  // (CLAUDE_CODE_OAUTH_TOKEN) the timeout is the bound.
+  if (process.env.ANTHROPIC_API_KEY && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    args.push('--max-budget-usd', process.env.QA_MAX_BUDGET_USD || '2')
+  }
   if (process.env.QA_PLAYWRIGHT) {
     const cfg = join(mkdtempSync(join(tmpdir(), 'qa-mcp-')), 'mcp.json')
     writeFileSync(cfg, JSON.stringify({ mcpServers: { playwright: { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--headless'] } } }))
@@ -220,11 +226,13 @@ async function main() {
   }
   const changedFiles = files.map((f) => `- \`${f.filename}\``).join('\n')
 
-  // Fail fast on a missing API key rather than letting the CLI hang until the
-  // timeout — surface the config gap on the PR so a human can fix it.
-  if (!dryRun && !process.env.ANTHROPIC_API_KEY) {
-    await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — not run\n\n\`ANTHROPIC_API_KEY\` is not set on the runner, so the QA agent couldn't verify the test plan. Set the repo secret and re-run this job.`)
-    throw new Error('ANTHROPIC_API_KEY is not set — cannot run the QA agent')
+  // Fail fast on a missing credential rather than letting the CLI hang until the
+  // timeout — surface the config gap on the PR so a human can fix it. Prefer the
+  // subscription OAuth token (CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`);
+  // accept an ANTHROPIC_API_KEY too.
+  if (!dryRun && !process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.ANTHROPIC_API_KEY) {
+    await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — not run\n\nNo Claude credential on the runner. Set the \`CLAUDE_CODE_OAUTH_TOKEN\` repo secret (from \`claude setup-token\`, uses your subscription) — or \`ANTHROPIC_API_KEY\` — and re-run this job.`)
+    throw new Error('No Claude credential (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY) — cannot run the QA agent')
   }
 
   let verdicts

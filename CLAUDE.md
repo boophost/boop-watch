@@ -119,9 +119,10 @@ The ticks propagate for free: `update-promotion-pr.mjs` seeds a **checked** prom
 whenever a feature PR's test-plan line is already `[x]`, so QA-verified items arrive pre-checked on
 the `dev → main` promotion PR. Prereqs (outside this repo — see `boophost/boop-watch-ops`): the
 deployer kubeconfig's RBAC must allow CRUD of `boop-watch-pr-*` Deployments/Services/PVCs/
-IngressRoutes + pod exec/cp in `link-apps`; an `ANTHROPIC_API_KEY` repo secret; and wildcard
-`*-watch.boopurno.es` DNS. `preview-env.mjs` reads the *live* dev Deployment as its template, so it
-tracks dev's drift automatically.
+IngressRoutes + pod exec/cp in `link-apps`; a `CLAUDE_CODE_OAUTH_TOKEN` repo secret (from
+`claude setup-token` — uses your Claude subscription, not per-token API billing; `ANTHROPIC_API_KEY`
+also works); and wildcard `*-watch.boopurno.es` DNS. `preview-env.mjs` reads the *live* dev
+Deployment as its template, so it tracks dev's drift automatically.
 
 ### Library-import flow (custom indexer → library)
 
