@@ -208,7 +208,17 @@ function kubeNote(pr) {
 function buildPrompt({ baseUrl, token, prTitle, changedFiles, items, pr }) {
   const template = readFileSync(join(HERE, 'prompt.md'), 'utf8')
   const playwrightNote = process.env.QA_PLAYWRIGHT
-    ? 'The Playwright MCP (`mcp__playwright__*`) is available for UI checks that an API cannot prove.'
+    ? [
+        'A real browser is available via the Playwright MCP (`mcp__playwright__*`) —',
+        '  **use it for any item about rendering, clicking, menus, dialogs, or layout**; those are',
+        '  client-rendered (React SPA), so an HTTP call cannot prove them. Navigate to',
+        `  \`${baseUrl}\`, interact, and take a snapshot/screenshot as evidence.`,
+        '  The public portal (`/`, `/series/:id`, `/watch/:id`, `/schedule`) needs no login.',
+        '  `/manage` is behind Supabase auth: seed a session before navigating, e.g.',
+        '  `mcp__playwright__browser_evaluate` with',
+        "  `() => localStorage.setItem('sb-<ref>-auth-token', JSON.stringify({access_token:'<TOKEN>',token_type:'bearer',expires_at:9999999999,refresh_token:'x',user:{id:'qa',email:'qa@local'}}))`",
+        '  then reload. If a UI check genuinely cannot be driven, say exactly what blocked it.',
+      ].join('\n')
     : 'No browser is available — verify via HTTP; mark genuinely UI-only items `skip`.'
   return template
     .replaceAll('{{KUBE_NOTE}}', kubeNote(pr))
@@ -240,8 +250,23 @@ function runAgent(prompt, cred) {
     args.push('--max-budget-usd', process.env.QA_MAX_BUDGET_USD || '2')
   }
   if (process.env.QA_PLAYWRIGHT) {
-    const cfg = join(mkdtempSync(join(tmpdir(), 'qa-mcp-')), 'mcp.json')
-    writeFileSync(cfg, JSON.stringify({ mcpServers: { playwright: { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--headless'] } } }))
+    const dir = mkdtempSync(join(tmpdir(), 'qa-mcp-'))
+    // Chromium must be launched with --test-type (it otherwise shows an
+    // automation infobar that shifts layout and breaks screenshots), and CI has
+    // no sandbox namespace — both go in the MCP's own browser config file.
+    const pwCfg = join(dir, 'playwright.json')
+    writeFileSync(pwCfg, JSON.stringify({
+      browser: {
+        browserName: 'chromium',
+        launchOptions: { args: ['--test-type', '--no-sandbox', '--disable-dev-shm-usage'] },
+      },
+    }))
+    const cfg = join(dir, 'mcp.json')
+    writeFileSync(cfg, JSON.stringify({
+      mcpServers: {
+        playwright: { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--headless', '--config', pwCfg] },
+      },
+    }))
     args.push('--mcp-config', cfg, '--strict-mcp-config')
     allowed.push('mcp__playwright')
   }
