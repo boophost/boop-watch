@@ -199,6 +199,10 @@ jobs:
       CLAUDE_CODE_OAUTH_TOKEN_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
       CLAUDE_CODE_OAUTH_TOKEN_3: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_3 }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # Give the agent a real browser so it can verify UI items instead of
+      # skipping them (the portal and /manage are client-rendered SPAs — an API
+      # call can't prove a menu opens or a dialog saves).
+      QA_PLAYWRIGHT: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -219,6 +223,27 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.local/bin:$PATH"
           timeout 60 claude --version || { echo "::error::claude CLI won't start (AVX-less CPU? see k8s-cp cpu=host)"; exit 1; }
+      # Chromium for the Playwright MCP. Idempotent: after the first run the
+      # browser is cached in ~/.cache/ms-playwright and this is a no-op. System
+      # libs need root, but the *browser* must land in the runner user's cache —
+      # installing the browser under sudo would put it in /root and the agent
+      # (running as the runner user) would never find it.
+      - name: Ensure Chromium for Playwright
+        run: |
+          # Install the browser with the MCP's OWN bundled Playwright. Using
+          # `playwright@latest` instead installs a different chromium revision
+          # than the MCP expects (it pins a newer alpha), and the MCP then fails
+          # with "Chrome binary missing" — QA silently loses the browser.
+          # System libs need root; the browser must land in the runner user's
+          # cache (a sudo install would hide it in /root).
+          sudo -n env "PATH=$PATH" npx --yes --package=@playwright/mcp@latest -- playwright install-deps chromium
+          npx --yes --package=@playwright/mcp@latest -- playwright install chromium
+      # Prove the agent can actually drive a browser before we trust any UI
+      # verdict. A silently-broken MCP used to make it "verify" UI items with
+      # curl — for a client-rendered SPA that's a false pass. This reads the real
+      # tool_use blocks and fails if no browser tool was called.
+      - name: Verify the QA browser really works
+        run: node scripts/qa-agent/verify-browser.mjs
       - name: Run QA agent
         run: |
           export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"

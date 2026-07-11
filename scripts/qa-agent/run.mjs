@@ -182,6 +182,53 @@ function runAgentWithFailover(prompt, creds) {
   throw new RateLimitError(limits.join(' | ') || 'no Claude credentials available')
 }
 
+// One Playwright MCP definition, shared by the preflight and the real run so we
+// can never verify one configuration and then run a different one. Chromium
+// needs --test-type (the automation infobar otherwise shifts layout and breaks
+// screenshots) and CI has no sandbox namespace.
+let _pwMcp = null
+function playwrightMcp() {
+  if (_pwMcp) return _pwMcp
+  const dir = mkdtempSync(join(tmpdir(), 'qa-mcp-'))
+  const pwCfg = join(dir, 'playwright.json')
+  writeFileSync(pwCfg, JSON.stringify({
+    browser: {
+      browserName: 'chromium',
+      launchOptions: { args: ['--test-type', '--no-sandbox', '--disable-dev-shm-usage'] },
+    },
+  }))
+  const args = ['-y', '@playwright/mcp@latest', '--headless', '--config', pwCfg]
+  const mcpConfig = join(dir, 'mcp.json')
+  writeFileSync(mcpConfig, JSON.stringify({
+    mcpServers: { playwright: { command: 'npx', args } },
+  }))
+  _pwMcp = { args, mcpConfig }
+  return _pwMcp
+}
+
+// Preflight the browser: boot the Playwright MCP and confirm it exposes the
+// browser_* tools. Cached for the process. Without this the agent can silently
+// end up with no browser and "verify" UI items over HTTP instead — a false pass.
+let _browserWorks = null
+function browserWorks() {
+  if (!process.env.QA_PLAYWRIGHT) return false
+  if (_browserWorks !== null) return _browserWorks
+  const req = [
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'qa', version: '1' } } }),
+    JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+  ].join('\n') + '\n'
+  try {
+    const { args } = playwrightMcp()
+    const out = execFileSync('npx', args, { input: req, encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024, stdio: ['pipe', 'pipe', 'ignore'] })
+    _browserWorks = out.includes('browser_navigate')
+  } catch {
+    _browserWorks = false
+  }
+  if (!_browserWorks) console.warn('Playwright MCP did not expose browser tools — UI items will be skipped, not guessed.')
+  return _browserWorks
+}
+
 // Advertise kubectl only when it actually works here — an agent told it has a
 // tool it can't use wastes turns, and one not told it has kubectl needlessly
 // skips pod/env/mount claims it could have proven (seen in both directions).
@@ -207,8 +254,18 @@ function kubeNote(pr) {
 
 function buildPrompt({ baseUrl, token, prTitle, changedFiles, items, pr }) {
   const template = readFileSync(join(HERE, 'prompt.md'), 'utf8')
-  const playwrightNote = process.env.QA_PLAYWRIGHT
-    ? 'The Playwright MCP (`mcp__playwright__*`) is available for UI checks that an API cannot prove.'
+  const playwrightNote = browserWorks()
+    ? [
+        'A real browser is available via the Playwright MCP (`mcp__playwright__*`) —',
+        '  **use it for any item about rendering, clicking, menus, dialogs, or layout**; those are',
+        '  client-rendered (React SPA), so an HTTP call cannot prove them. Navigate to',
+        `  \`${baseUrl}\`, interact, and take a snapshot/screenshot as evidence.`,
+        '  The public portal (`/`, `/series/:id`, `/watch/:id`, `/schedule`) needs no login.',
+        '  `/manage` is behind Supabase auth: seed a session before navigating, e.g.',
+        '  `mcp__playwright__browser_evaluate` with',
+        "  `() => localStorage.setItem('sb-<ref>-auth-token', JSON.stringify({access_token:'<TOKEN>',token_type:'bearer',expires_at:9999999999,refresh_token:'x',user:{id:'qa',email:'qa@local'}}))`",
+        '  then reload. If a UI check genuinely cannot be driven, say exactly what blocked it.',
+      ].join('\n')
     : 'No browser is available — verify via HTTP; mark genuinely UI-only items `skip`.'
   return template
     .replaceAll('{{KUBE_NOTE}}', kubeNote(pr))
@@ -239,10 +296,8 @@ function runAgent(prompt, cred) {
   if (cred.kind === 'api-key') {
     args.push('--max-budget-usd', process.env.QA_MAX_BUDGET_USD || '2')
   }
-  if (process.env.QA_PLAYWRIGHT) {
-    const cfg = join(mkdtempSync(join(tmpdir(), 'qa-mcp-')), 'mcp.json')
-    writeFileSync(cfg, JSON.stringify({ mcpServers: { playwright: { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--headless'] } } }))
-    args.push('--mcp-config', cfg, '--strict-mcp-config')
+  if (browserWorks()) {
+    args.push('--mcp-config', playwrightMcp().mcpConfig, '--strict-mcp-config')
     allowed.push('mcp__playwright')
   }
   // --allowed-tools is variadic and would swallow a positional prompt, so the
@@ -265,6 +320,12 @@ function runAgent(prompt, cred) {
     DISABLE_ERROR_REPORTING: '1',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     ...cred.env,
+  }
+  // When run from inside a Claude Code session these leak into the child and
+  // silently suppress MCP loading — the agent then has no browser but happily
+  // "verifies" UI items over HTTP. Strip them so the child is a clean session.
+  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION']) {
+    delete env[k]
   }
 
   let raw

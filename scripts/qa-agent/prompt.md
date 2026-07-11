@@ -33,6 +33,16 @@ Changed files:
 - **pass** — you exercised the item on the preview and observed the expected
   behavior. Cite the concrete evidence (endpoint + status + a value, or a UI
   observation).
+
+  **Rendering/interaction items require the browser.** The portal and `/manage`
+  are client-rendered React SPAs: the served HTML is an empty shell, so a `curl`
+  of the page proves *nothing* about what renders. An item about a page
+  rendering, a grid/list appearing, a click navigating, a menu opening, a dialog
+  saving, or layout **may only pass on `mcp__playwright__*` evidence** (what you
+  saw in the snapshot/screenshot). If the browser tools are unavailable, mark it
+  `skip` and say the browser was unavailable — **never** pass such an item using
+  HTTP/HTML/API evidence as a substitute. A JSON API returning data does not mean
+  the UI displays it.
 - **fail** — you exercised it and it did **not** behave as described. Explain the
   discrepancy. Be conservative: only fail on a real, reproduced problem.
 - **skip** — you genuinely cannot verify it here (needs the disabled sink, needs
