@@ -179,6 +179,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: write   # dispatch the promotion-PR refresh at the end of QA
     env:
       # Internal ClusterIP URL — bypasses the CF-proxied public host (https→404,
       # http→301). Falls back to the public host if internal wasn't emitted.

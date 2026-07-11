@@ -283,11 +283,33 @@ async function main() {
 
   const passedIdx = verdicts.filter((v) => v.status === 'pass').map((v) => v.index)
   const newBody = tickPassed(lines, items, passedIdx)
-  if (newBody !== prData.body) {
+  const bodyChanged = newBody !== prData.body
+  if (bodyChanged) {
     await ghApi('PATCH', `/repos/${REPO}/pulls/${pr}`, { body: newBody })
   }
   await upsertComment(pr, buildComment(items, verdicts, baseUrl))
   console.log(`QA complete: ${passedIdx.length}/${items.length} items verified on ${baseUrl}`)
+
+  // Close the loop: refresh the rolling dev→main promotion PR so the ticks we
+  // just applied propagate into its checklist, which re-runs the promotion gate
+  // via the PR `edited` event. Best-effort and only when we actually changed
+  // something. Skip with QA_REFRESH_PROMOTION=0.
+  if (bodyChanged && passedIdx.length > 0) await refreshPromotion()
+}
+
+// Dispatch the rolling promotion workflow (workflow_dispatch on dev). It
+// re-aggregates merged feature PRs' current tick state into the promotion PR
+// body; editing that body re-runs the promotion-checklist gate. Needs the token
+// to have `actions: write`.
+async function refreshPromotion() {
+  if (process.env.QA_REFRESH_PROMOTION === '0') return
+  const wf = process.env.PROMOTION_WORKFLOW || 'rolling-dev-main-pr.yml'
+  try {
+    await ghApi('POST', `/repos/${REPO}/actions/workflows/${wf}/dispatches`, { ref: 'dev' })
+    console.log(`Triggered ${wf} to refresh the promotion PR + re-run its gate.`)
+  } catch (err) {
+    console.warn(`(promotion refresh skipped: ${String(err?.message || err).split('\n')[0]})`)
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
