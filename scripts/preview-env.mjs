@@ -35,6 +35,9 @@ const HOST_SUFFIX = '-watch.boopurno.es' // pr-<N>-watch.boopurno.es
 const DATA_MOUNT = '/app/data'
 const DB_FILE = `${DATA_MOUNT}/series.sqlite`
 const MAX_PREVIEWS = Number(process.env.MAX_PREVIEWS || 5)
+// Generous: a cold GHCR pull of the ~145MB image can take minutes on a DNS/
+// registry blip, and blowing the rollout wait fails the whole preview.
+const ROLLOUT_TIMEOUT = process.env.ROLLOUT_TIMEOUT || '420s'
 
 // Env keys and volumes that make the pod able to *write* the shared library /
 // drive qBittorrent. Stripped so parallel previews can't collide. POSTHOG_KEY is
@@ -192,12 +195,12 @@ function seedDb(pr) {
     // Wait for the preview pod, then swap the freshly-migrated empty DB for the
     // seed. rm unlinks the file the running app holds open (its fd survives);
     // the rollout-restart below then opens the seed cleanly.
-    kubectl(['rollout', 'status', `deployment/${n.deploy}`, '--timeout=180s'])
+    kubectl(['rollout', 'status', `deployment/${n.deploy}`, `--timeout=${ROLLOUT_TIMEOUT}`])
     const previewPod = podFor(n.deploy)
     kubectl(['exec', previewPod, '--', 'sh', '-c', `rm -f ${DB_FILE}*`])
     kubectl(['cp', localSeed, `${NS}/${previewPod}:${DB_FILE}`], { quiet: true })
     kubectl(['rollout', 'restart', `deployment/${n.deploy}`])
-    kubectl(['rollout', 'status', `deployment/${n.deploy}`, '--timeout=180s'])
+    kubectl(['rollout', 'status', `deployment/${n.deploy}`, `--timeout=${ROLLOUT_TIMEOUT}`])
   } finally {
     rmSync(tmp, { recursive: true, force: true })
   }
