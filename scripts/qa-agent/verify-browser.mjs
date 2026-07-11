@@ -41,6 +41,10 @@ const prompt = `You are QA. Verify this ONE item against ${BASE_URL}:
 
 0. The portal home page renders a grid of poster cards (not an empty state or an error)
 
+Navigate to EXACTLY \`${BASE_URL}\` — it is the complete, working base URL. Do NOT
+append a port, and do not "correct" it to :3000 or any other port (the app is
+behind a Service on port 80; adding a port makes it unreachable).
+
 The portal is a client-rendered React SPA: curling the HTML proves NOTHING about
 what renders. You MUST verify with the mcp__playwright__* browser tools (navigate,
 then snapshot/screenshot). If you have no browser tool, mark it skip — never pass

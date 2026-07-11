@@ -2709,7 +2709,83 @@ const animeStatus: NodeImpl = {
 // path remap) and ffmpeg/ffprobe on PATH.
 // ---------------------------------------------------------------------------
 const VIDEO_EXTS_DEFAULT = 'mkv,mp4,avi,m4v,mov'
-const WORK_DIR = () => process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
+// Where flow scratch lives. Defaults to DATA_DIR — but DATA_DIR is a *small*
+// node-disk PVC (1-2Gi), and the scratch nodes write GB-sized intermediates:
+// `enrich.trim-audio-tracks` alone emits 3.5GB `.trimmed.mkv` files. That filled
+// the node's disk and got the pod evicted (prod outage; staging nearly repeated
+// it). Set WORK_DIR to a path on the big media NFS (e.g. /data/.boopwork) so
+// scratch never lands on node disk. `.../work` is appended by the nodes.
+const WORK_DIR = () =>
+  process.env.WORK_DIR ?? process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
+
+// The library-import nodes (extract-subs, mux-tracks, …) drop intermediate
+// files — extracted subs, fonts, muxed MKVs — under DATA_DIR/work. Nothing ever
+// removed them, so on an unbounded local-path PVC they accumulated to 16GB,
+// filled the node's disk, and kubelet evicted prod (an outage). Prune entries
+// older than WORK_TTL_HOURS (default 24h) so scratch is self-limiting. The age
+// cutoff means an in-progress job (touched within the window) is never touched.
+export function pruneWorkDir(ttlHours = Number(process.env.WORK_TTL_HOURS ?? 24)): { removed: number; freedMB: number } {
+  const workDir = path.join(WORK_DIR(), 'work')
+  const cutoff = Date.now() - ttlHours * 3600_000
+  let removed = 0
+  let freedBytes = 0
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(workDir, { withFileTypes: true })
+  } catch {
+    return { removed: 0, freedMB: 0 } // no work dir yet
+  }
+  for (const ent of entries) {
+    const p = path.join(workDir, ent.name)
+    try {
+      // Use the *newest* mtime in the subtree so a dir with a recent write is
+      // kept even if its own mtime is old (a job actively writing into it).
+      const newest = newestMtime(p)
+      if (newest >= cutoff) continue
+      const size = dirSize(p)
+      fs.rmSync(p, { recursive: true, force: true })
+      removed++
+      freedBytes += size
+    } catch {
+      // best-effort; a file held open or a race just gets skipped this pass
+    }
+  }
+  if (removed > 0) {
+    console.log(`[work-prune] removed ${removed} stale entries (~${Math.round(freedBytes / 1e6)}MB) from ${workDir}`)
+  }
+  return { removed, freedMB: Math.round(freedBytes / 1e6) }
+}
+
+function newestMtime(p: string): number {
+  let newest = 0
+  const stack = [p]
+  while (stack.length) {
+    const cur = stack.pop() as string
+    let st: fs.Stats
+    try { st = fs.statSync(cur) } catch { continue }
+    if (st.mtimeMs > newest) newest = st.mtimeMs
+    if (st.isDirectory()) {
+      try { for (const c of fs.readdirSync(cur)) stack.push(path.join(cur, c)) } catch { /* skip */ }
+    }
+  }
+  return newest
+}
+
+function dirSize(p: string): number {
+  let total = 0
+  const stack = [p]
+  while (stack.length) {
+    const cur = stack.pop() as string
+    let st: fs.Stats
+    try { st = fs.statSync(cur) } catch { continue }
+    if (st.isDirectory()) {
+      try { for (const c of fs.readdirSync(cur)) stack.push(path.join(cur, c)) } catch { /* skip */ }
+    } else {
+      total += st.size
+    }
+  }
+  return total
+}
 
 function walkFiles(root: string, exts: Set<string>, out: string[]): void {
   let stat: fs.Stats
