@@ -18,9 +18,15 @@ on:
     types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
+# Keyed on the event too, so a PR run and the push run for the same ref never
+# share a group. They used to: merging #184 landed a `push` to dev and a
+# `pull_request` run on the same ref, and cancel-in-progress killed the *push*
+# run — the only one that carries deploy-dev — so the merge silently never
+# reached staging. Branch pushes are also never cancelled: a superseded deploy
+# is worse than a redundant one.
 concurrency:
-  group: build-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
