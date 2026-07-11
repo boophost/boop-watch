@@ -58,7 +58,8 @@ function FeaturedBanner({ items }: { items: FeaturedItem[] }) {
           <div className="feat-body">
             <h2 className="feat-title">{it.name}</h2>
             <div className="feat-meta">
-              <span className="badge badge-accent">{it.type === 'series' ? 'Series' : 'Movie'}</span>
+              {/* Series get Season/episode badges below, so the type label is redundant; keep it only for movies. */}
+              {it.type !== 'series' && <span className="badge badge-accent">Movie</span>}
               {it.year != null && <span className="badge badge-mono">{it.year}</span>}
               {it.season != null && <span className="badge">Season {it.season}</span>}
               {it.epCount != null && it.epCount > 0 && <span className="badge">{it.epCount} episodes</span>}
