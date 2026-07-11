@@ -118,10 +118,20 @@ function buildPrompt({ baseUrl, token, prTitle, changedFiles, items }) {
 }
 
 // Run the claude CLI in headless JSON mode and pull the verdict block out of the
-// assistant's final message.
+// assistant's final message. Fast model + budget/time caps keep a QA pass cheap
+// and bounded (a QA agent mostly curls endpoints — it doesn't need Opus).
 function runAgent(prompt) {
+  const model = process.env.QA_MODEL || 'claude-haiku-4-5'
+  const budget = process.env.QA_MAX_BUDGET_USD || '2'
+  const timeoutMs = Number(process.env.QA_TIMEOUT_MS || 8 * 60_000)
+
   const allowed = ['Bash']
-  const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions']
+  const args = [
+    '-p', '--output-format', 'json',
+    '--permission-mode', 'bypassPermissions',
+    '--model', model,
+    '--max-budget-usd', budget,
+  ]
   if (process.env.QA_PLAYWRIGHT) {
     const cfg = join(mkdtempSync(join(tmpdir(), 'qa-mcp-')), 'mcp.json')
     writeFileSync(cfg, JSON.stringify({ mcpServers: { playwright: { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--headless'] } } }))
@@ -131,7 +141,15 @@ function runAgent(prompt) {
   args.push('--allowed-tools', ...allowed)
   args.push(prompt) // positional prompt
 
-  const raw = execFileSync('claude', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 15 * 60_000 })
+  let raw
+  try {
+    raw = execFileSync('claude', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs })
+  } catch (err) {
+    if (err?.code === 'ETIMEDOUT') throw new Error(`agent timed out after ${timeoutMs / 1000}s — check the preview is reachable and the model is responding`)
+    // Surface stdout/stderr the CLI produced before dying (auth/model errors).
+    const detail = [err?.stdout, err?.stderr].filter(Boolean).join('\n').slice(-800)
+    throw new Error(`claude CLI failed (${err?.code || err?.status}): ${detail || err?.message}`)
+  }
   let result
   try {
     result = JSON.parse(raw).result ?? ''
@@ -201,6 +219,13 @@ async function main() {
     return
   }
   const changedFiles = files.map((f) => `- \`${f.filename}\``).join('\n')
+
+  // Fail fast on a missing API key rather than letting the CLI hang until the
+  // timeout — surface the config gap on the PR so a human can fix it.
+  if (!dryRun && !process.env.ANTHROPIC_API_KEY) {
+    await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — not run\n\n\`ANTHROPIC_API_KEY\` is not set on the runner, so the QA agent couldn't verify the test plan. Set the repo secret and re-run this job.`)
+    throw new Error('ANTHROPIC_API_KEY is not set — cannot run the QA agent')
+  }
 
   let verdicts
   if (dryRun) {
