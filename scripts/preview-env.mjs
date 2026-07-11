@@ -41,9 +41,11 @@ const ROLLOUT_TIMEOUT = process.env.ROLLOUT_TIMEOUT || '420s'
 
 // Env keys and volumes that make the pod able to *write* the shared library /
 // drive qBittorrent. Stripped so parallel previews can't collide. POSTHOG_KEY is
-// blanked too so preview traffic doesn't pollute the prod analytics project.
+// blanked too so preview traffic doesn't pollute the prod analytics project, and
+// the GitHub App key so a preview (or its QA agent) can't file real issues into
+// the real repo — the suggestion route 503s here, which is the intended state.
 const SINK_ENV_KEYS = ['QBIT_URL', 'QBIT_USERNAME', 'QBIT_PASSWORD', 'LIBRARY_DIR']
-const BLANK_ENV_KEYS = [...SINK_ENV_KEYS, 'POSTHOG_KEY']
+const BLANK_ENV_KEYS = [...SINK_ENV_KEYS, 'POSTHOG_KEY', 'GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY']
 
 // Snapshot the source series.sqlite inside the *dev* pod. The path must be
 // unique per preview: two previews created concurrently both exec into the same

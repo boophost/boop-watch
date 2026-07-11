@@ -7,6 +7,10 @@
     "boop-suggestions": {
       "command": "node",
       "args": ["mcp/suggestions-server.mjs"]
+    },
+    "boop-issues": {
+      "command": "node",
+      "args": ["mcp/issues-server.mjs"]
     }
   }
 }
