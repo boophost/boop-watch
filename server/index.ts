@@ -17,6 +17,7 @@ import { publicRouter, commentView } from './publicRoutes.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
+import { pruneWorkDir } from './flowNodes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
@@ -1139,5 +1140,12 @@ app.listen(PORT, () => {
   seriesDb.getDb()
   warmScope()
   startScheduler()
+  // Keep DATA_DIR/work from growing unbounded (it once hit 16GB and evicted prod
+  // off its node). Sweep on boot and every 6h; the pruner only removes scratch
+  // untouched for WORK_TTL_HOURS, so an in-flight job is safe.
+  try { pruneWorkDir() } catch (err) { console.warn('[work-prune] boot sweep failed:', err) }
+  setInterval(() => {
+    try { pruneWorkDir() } catch (err) { console.warn('[work-prune] periodic sweep failed:', err) }
+  }, 6 * 3600_000).unref()
   console.log(`Server running on http://localhost:${PORT}`)
 })
