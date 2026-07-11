@@ -230,8 +230,14 @@ jobs:
       # (running as the runner user) would never find it.
       - name: Ensure Chromium for Playwright
         run: |
-          sudo -n env "PATH=$PATH" npx --yes playwright@latest install-deps chromium
-          npx --yes playwright@latest install chromium
+          # Install the browser with the MCP's OWN bundled Playwright. Using
+          # `playwright@latest` instead installs a different chromium revision
+          # than the MCP expects (it pins a newer alpha), and the MCP then fails
+          # with "Chrome binary missing" — QA silently loses the browser.
+          # System libs need root; the browser must land in the runner user's
+          # cache (a sudo install would hide it in /root).
+          sudo -n env "PATH=$PATH" npx --yes --package=@playwright/mcp@latest -- playwright install-deps chromium
+          npx --yes --package=@playwright/mcp@latest -- playwright install chromium
       - name: Run QA agent
         run: |
           export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
