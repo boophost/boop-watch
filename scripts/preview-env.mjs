@@ -21,7 +21,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -45,14 +45,23 @@ const ROLLOUT_TIMEOUT = process.env.ROLLOUT_TIMEOUT || '420s'
 const SINK_ENV_KEYS = ['QBIT_URL', 'QBIT_USERNAME', 'QBIT_PASSWORD', 'LIBRARY_DIR']
 const BLANK_ENV_KEYS = [...SINK_ENV_KEYS, 'POSTHOG_KEY']
 
-// Snapshot the source series.sqlite to /tmp/seed.sqlite. sqlite3 `.backup` is
-// the primary path (image ships it); the node/better-sqlite3 `VACUUM INTO` is a
-// fallback for a source pod still on an image without the CLI.
-const SNAPSHOT_SH =
-  'rm -f /tmp/seed.sqlite*; ' +
-  'if command -v sqlite3 >/dev/null 2>&1; then ' +
-  'sqlite3 /app/data/series.sqlite ".backup /tmp/seed.sqlite"; ' +
-  'else cd /app && node -e \'require("better-sqlite3")("/app/data/series.sqlite",{readonly:true}).exec("VACUUM INTO \\x27/tmp/seed.sqlite\\x27")\'; fi'
+// Snapshot the source series.sqlite inside the *dev* pod. The path must be
+// unique per preview: two previews created concurrently both exec into the same
+// dev pod, and a shared /tmp/seed.sqlite meant one run's `rm -f` wiped the
+// other's snapshot mid-copy — the second env then came up with an EMPTY catalog.
+// (Found by actually running two previews at once; they looked healthy but one
+// had 0 series.) sqlite3 `.backup` is the primary path; better-sqlite3's
+// `VACUUM INTO` is a fallback for a source pod on an image without the CLI.
+const seedPath = (pr) => `/tmp/seed-pr-${pr}.sqlite`
+const snapshotSh = (pr) => {
+  const p = seedPath(pr)
+  return (
+    `rm -f ${p}*; ` +
+    'if command -v sqlite3 >/dev/null 2>&1; then ' +
+    `sqlite3 /app/data/series.sqlite ".backup ${p}"; ` +
+    `else cd /app && node -e 'require("better-sqlite3")("/app/data/series.sqlite",{readonly:true}).exec("VACUUM INTO \\x27${p}\\x27")'; fi`
+  )
+}
 
 const names = (pr) => ({
   deploy: `boop-watch-pr-${pr}`,
@@ -189,8 +198,16 @@ function seedDb(pr) {
     // (`.backup`); fall back to better-sqlite3's `VACUUM INTO` for source pods
     // on an image built before sqlite3 was added (both produce a clean file).
     const devPod = podFor(SRC_DEPLOY)
-    kubectl(['exec', devPod, '--', 'sh', '-c', SNAPSHOT_SH])
-    kubectl(['cp', `${NS}/${devPod}:/tmp/seed.sqlite`, localSeed], { quiet: true })
+    const remoteSeed = seedPath(pr) // per-PR: concurrent previews must not collide
+    kubectl(['exec', devPod, '--', 'sh', '-c', snapshotSh(pr)])
+    kubectl(['cp', `${NS}/${devPod}:${remoteSeed}`, localSeed], { quiet: true })
+    kubectl(['exec', devPod, '--', 'sh', '-c', `rm -f ${remoteSeed}*`]) // don't litter the dev pod
+
+    // Fail loudly if the snapshot didn't actually land — a silently-empty seed
+    // gives a healthy-looking preview with an empty catalog (exactly what the
+    // shared-/tmp race used to produce).
+    const seeded = statSync(localSeed, { throwIfNoEntry: false })
+    if (!seeded || seeded.size === 0) throw new Error(`DB seed for PR #${pr} is empty — snapshot failed`)
 
     // Wait for the preview pod, then swap the freshly-migrated empty DB for the
     // seed. rm unlinks the file the running app holds open (its fd survives);
@@ -276,6 +293,24 @@ async function up(pr, imageRef, { comment } = {}) {
     await sleep(3000)
   }
   if (health !== 'ok') throw new Error(`preview /health returned '${health}', expected 'ok'`)
+
+  // A healthy pod with an empty catalog is the failure the seed race produced —
+  // it looks fine and silently invalidates every QA verdict run against it. Gate
+  // on the DB actually having rows (dev's own catalog can legitimately be empty,
+  // so only assert when the source had rows).
+  const count = (deploy) => Number(
+    kubectl(['exec', `deploy/${deploy}`, '--', 'sqlite3', DB_FILE, 'select count(*) from series'], { quiet: true }) || 0,
+  )
+  try {
+    const src = count(SRC_DEPLOY)
+    const got = count(n.deploy)
+    if (src > 0 && got === 0) throw new Error(`preview DB is empty (dev has ${src} series) — the seed did not land`)
+    console.log(`Seeded catalog: ${got} series (dev has ${src}).`)
+  } catch (err) {
+    if (/seed did not land/.test(String(err?.message))) throw err
+    // sqlite3 missing on an older image — don't fail the preview over the check.
+    console.warn(`(catalog check skipped: ${String(err?.message).split('\n')[0]})`)
+  }
 
   // Internal URL for the QA agent: the Service ClusterIP, reachable from a
   // cluster node (kube-proxy) with no Cloudflare/TLS/Host-header in the way. The
