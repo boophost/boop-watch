@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Icon } from './Icon'
-import { submitSuggestion } from '@/lib/api'
+import { submitSuggestion, type SuggestionIssue } from '@/lib/api'
+import { getReplayUrl } from '@/lib/analytics'
 import { useAuth } from '@/lib/AuthContext'
 
 const MAX = 2000
@@ -21,7 +22,7 @@ export function SuggestProvider({ children }: { children: ReactNode }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [done, setDone] = useState(false)
+  const [done, setDone] = useState<SuggestionIssue | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const open = useCallback(() => {
@@ -29,7 +30,7 @@ export function SuggestProvider({ children }: { children: ReactNode }) {
     if (!user) return
     setText('')
     setError('')
-    setDone(false)
+    setDone(null)
     setIsOpen(true)
   }, [user])
 
@@ -60,9 +61,14 @@ export function SuggestProvider({ children }: { children: ReactNode }) {
     setBusy(true)
     setError('')
     try {
-      await submitSuggestion(body)
-      setDone(true)
-      setTimeout(() => setIsOpen(false), 1200)
+      // Where they were and what they saw — so the issue is actionable without
+      // a follow-up. Both are best-effort (replay is empty if analytics is off).
+      const issue = await submitSuggestion(body, {
+        page: window.location.pathname + window.location.search,
+        replayUrl: getReplayUrl(),
+      })
+      setDone(issue)
+      setTimeout(() => setIsOpen(false), 2600)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to submit suggestion')
     } finally {
@@ -96,7 +102,13 @@ export function SuggestProvider({ children }: { children: ReactNode }) {
             {done ? (
               <div className="suggest-done">
                 <Icon name="alert" size={22} />
-                <p>Thanks! Your suggestion was sent.</p>
+                <p>
+                  Thanks! Tracked as{' '}
+                  <a href={done.url} target="_blank" rel="noreferrer noopener">
+                    #{done.number}
+                  </a>
+                  .
+                </p>
               </div>
             ) : (
               <>

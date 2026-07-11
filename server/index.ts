@@ -26,9 +26,10 @@ import { warmScope, ensureScope, getPlayableIds } from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
+import { createIssue, githubConfigured } from './github.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
-import { posthogUiHost } from './posthogConfig.js'
+import { posthogUiHostEffective } from './posthogConfig.js'
 import { deleteUser, listAllUsers, setUserAdmin, isAdminViaEnv, isAdminForUserId } from './users.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -863,12 +864,32 @@ app.delete('/api/library/saved/:id', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
-// --- Suggestions (any logged-in user submits; admins review in /manage) ----
+// --- Suggestions ------------------------------------------------------------
+// Submitting opens a **GitHub issue** (via the App bot), not a DB row: prod and
+// staging each had their own suggestions table, so the boards drifted and
+// engineering work got mixed in with user requests. GitHub is now the single
+// tracker, and an issue links to the PR that fixes it. The GET/PATCH/DELETE
+// routes below still serve the pre-migration rows as a read-only archive.
 
 const SUGGESTION_MAX = 2000
+const TITLE_MAX = 72
 
-app.post('/api/suggestions', requireAuth, (req, res) => {
-  const body = String((req.body as { body?: unknown })?.body ?? '').trim()
+// Each submission becomes a real, notification-generating GitHub issue, so one
+// user must not be able to flood the tracker. In-memory is enough: single pod,
+// and the map is bounded by the (small) user count. The clock starts only when
+// an issue is actually filed — a failed attempt doesn't lock the user out.
+const SUGGESTION_COOLDOWN_MS = 60_000
+const lastSuggestionAt = new Map<string, number>()
+
+/** First line of the suggestion, trimmed to a sane issue title. */
+function issueTitle(body: string): string {
+  const first = body.split(/\r?\n/, 1)[0].trim() || body.trim()
+  return first.length > TITLE_MAX ? `${first.slice(0, TITLE_MAX - 1)}…` : first
+}
+
+app.post('/api/suggestions', requireAuth, async (req, res) => {
+  const payload = req.body as { body?: unknown, page?: unknown, replayUrl?: unknown } | undefined
+  const body = String(payload?.body ?? '').trim()
   if (!body) {
     res.status(400).json({ error: 'Suggestion cannot be empty' })
     return
@@ -877,12 +898,62 @@ app.post('/api/suggestions', requireAuth, (req, res) => {
     res.status(400).json({ error: `Suggestion is too long (max ${SUGGESTION_MAX} characters)` })
     return
   }
-  const row = seriesDb.addSuggestion(
-    res.locals.username as string,
-    (res.locals.email as string) || null,
-    body,
-  )
-  res.status(201).json({ suggestion: row })
+  const userKey = String(res.locals.username)
+  const last = lastSuggestionAt.get(userKey) ?? 0
+  if (Date.now() - last < SUGGESTION_COOLDOWN_MS) {
+    res.status(429).json({ error: 'Please wait a minute between suggestions' })
+    return
+  }
+  if (!githubConfigured()) {
+    // Never pretend a suggestion was received when it wasn't.
+    res.status(503).json({ error: 'Suggestions are temporarily unavailable' })
+    return
+  }
+
+  // Context that makes a report actionable — page + session replay. Deliberately
+  // no email: issues shouldn't carry user PII. Both fields are client-supplied,
+  // so they get the same distrust as the display name below: `page` lands in a
+  // code span (strip backticks/newlines), and the replay link is only trusted
+  // when it points at our own PostHog UI host and can't break out of the
+  // markdown link it's wrapped in.
+  const page = typeof payload?.page === 'string'
+    ? payload.page.replace(/[`\r\n]/g, '').slice(0, 300)
+    : ''
+  const replayUrl = typeof payload?.replayUrl === 'string'
+    && payload.replayUrl.startsWith(`${posthogUiHostEffective()}/`)
+    && payload.replayUrl.length <= 500
+    && /^[\w\-.~:/?&=%#]+$/.test(payload.replayUrl)
+    ? payload.replayUrl
+    : ''
+  // The display name is user-chosen, and it lands in a markdown document. Strip
+  // the characters that would let it break out of the attribution line and forge
+  // extra context (newlines, emphasis, links, @-mentions).
+  const who = String(res.locals.displayName || 'a user')
+    .replace(/[\r\n`*_[\]()@<>#|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60) || 'a user'
+
+  const context = [
+    '',
+    '---',
+    `_From **${who}** via the in-app suggestion button._`,
+    page ? `_Page:_ \`${page}\`` : '',
+    replayUrl ? `_[Session replay](${replayUrl})_` : '',
+  ].filter(Boolean).join('\n')
+
+  try {
+    const issue = await createIssue({
+      title: issueTitle(body),
+      body: `${body}\n${context}\n`,
+      labels: ['suggestion'],
+    })
+    lastSuggestionAt.set(userKey, Date.now())
+    res.status(201).json({ issue })
+  } catch (err) {
+    console.error('suggestion -> GitHub issue failed:', err)
+    res.status(502).json({ error: 'Could not file your suggestion. Please try again.' })
+  }
 })
 
 app.get('/api/suggestions', requireAuth, requireAdmin, (_req, res) => {
@@ -1113,7 +1184,7 @@ app.get('/config.js', (req, res) => {
     SUPABASE_URL: ${JSON.stringify(SUPABASE_URL)},
     SUPABASE_ANON_KEY: ${JSON.stringify(SUPABASE_ANON_KEY)},
     POSTHOG_KEY: ${JSON.stringify(process.env.POSTHOG_KEY || '')},
-    POSTHOG_UI_HOST: ${JSON.stringify(process.env.POSTHOG_UI_HOST || posthogUiHost())}
+    POSTHOG_UI_HOST: ${JSON.stringify(posthogUiHostEffective())}
   };`)
 })
 

@@ -20,3 +20,9 @@ export function posthogAssetHost(region: PosthogRegion = posthogRegion()): strin
 export function posthogUiHost(region: PosthogRegion = posthogRegion()): string {
   return region === 'eu' ? 'https://eu.posthog.com' : 'https://us.posthog.com'
 }
+
+/** The UI host the browser SDK is actually configured with (env override wins).
+ * Also the only origin accepted for client-supplied session-replay links. */
+export function posthogUiHostEffective(): string {
+  return (process.env.POSTHOG_UI_HOST || posthogUiHost()).replace(/\/+$/, '')
+}

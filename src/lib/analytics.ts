@@ -95,3 +95,15 @@ export function resetAnalytics(): void {
   if (!initialized) return
   posthog.reset()
 }
+
+/** Deep link to the current session's replay, for attaching to a bug report.
+ * Empty when analytics is off (unset key) or blocked (ad blocker) — callers
+ * should omit the field rather than send a broken link. */
+export function getReplayUrl(): string {
+  if (!initialized) return ''
+  try {
+    return posthog.get_session_replay_url({ withTimestamp: true }) || ''
+  } catch {
+    return ''
+  }
+}

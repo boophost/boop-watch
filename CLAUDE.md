@@ -195,6 +195,34 @@ a manual process for now).
   Optional `POSTHOG_HOST` (`https://us.i.posthog.com` or EU equivalent — selects proxy region)
   and `POSTHOG_UI_HOST` (defaults from region). In PostHog project settings, set **Authorized URLs**
   to `https://watch.boopurno.es` and `http://localhost:5173`.
+- `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (PEM; `\n`-escaped is accepted), `GITHUB_REPO`
+  (default `boophost/boop-watch`) — the **suggestion bot** (`server/github.ts`). Unset ⇒
+  `POST /api/suggestions` 503s (it never silently drops a suggestion).
+
+## Issue tracking — GitHub, not the DB
+
+**Engineering work, bugs, and user suggestions all live in GitHub Issues**, on one org-level
+Project board (`github.com/orgs/boophost/projects/1`) that aggregates **both** `boophost/boop-watch`
+and `boophost/link`. Issues auto-link to the PRs and commits that fix them; the board spans both
+repos, which the old tracker couldn't.
+
+The in-app **suggestion button stays** — it just files an issue now. `POST /api/suggestions` calls
+`createIssue()` (`server/github.ts`), which mints a GitHub **App** installation token and opens a
+`suggestion`-labelled issue authored by the `boop-watch[bot]` identity. The body carries the
+suggestion verbatim plus the **page** the user was on and a **PostHog session-replay link** —
+deliberately **no email**: user PII does not belong in a repo.
+
+**Why the move:** suggestions used to be rows in `series.sqlite`, so **prod and staging each had
+their own board** — they drifted, and engineering items filed against staging were invisible from
+prod. The `/manage` Suggestions page is now a **read-only archive** of those pre-migration rows;
+`GET`/`PATCH`/`DELETE` still serve it, but nothing new is written there.
+
+Drive issues with the `boop-issues` MCP server / CLI (`mcp/issues-server.mjs` — wraps `gh`; see
+`mcp/README.md`).
+
+> Gotcha: granting `issues: write` on the **App** is not enough — the **installation** must accept
+> the upgraded permission (org settings → Installations → *Accept new permissions*). Until it does,
+> issue *creation* still works but **labels are silently dropped** (403 on the labels endpoint).
 
 ## Routes
 

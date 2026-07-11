@@ -809,6 +809,31 @@ export default function Suggestions() {
       </header>
 
       <main className="flex-1 p-4 md:p-6">
+        {/* New suggestions open a GitHub issue (the portal's suggest button files
+            one via the App bot). These rows pre-date that move — kept for history. */}
+        <div className="mb-4 rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm">
+          <span className="font-medium">Archive.</span>{' '}
+          New suggestions now open a{' '}
+          <a
+            className="underline underline-offset-2"
+            href="https://github.com/boophost/boop-watch/issues?q=is%3Aissue+label%3Asuggestion"
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            GitHub issue
+          </a>
+          {' '}— tracked on the{' '}
+          <a
+            className="underline underline-offset-2"
+            href="https://github.com/orgs/boophost/projects/1"
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            project board
+          </a>
+          . The items below were submitted before that change.
+        </div>
+
         {error ? <p className="mb-4 text-sm text-destructive">{error}</p> : null}
 
         {loading && rows.length === 0 ? (
