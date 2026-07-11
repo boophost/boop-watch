@@ -978,6 +978,42 @@ body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 .player .eprow.watched .epprog {
   background: var(--fg-subtle);
 }
+
+/* Mark-as-watched toggle — a check button inside the episode-row link. Faint by
+ * default, brightens on row hover, and shows the accent when the episode is
+ * marked watched. It sits above the row's watched-dim (which lowers row opacity)
+ * so its state stays legible. */
+.kagura .eprow .epwatch,
+.player .eprow .epwatch {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--fg-subtle);
+  opacity: 0.35;
+  transition: background .14s, color .14s, opacity .14s;
+}
+.kagura .eprow:hover .epwatch,
+.player .eprow:hover .epwatch,
+.kagura .eprow .epwatch.on,
+.player .eprow .epwatch.on {
+  opacity: 1;
+}
+.kagura .eprow .epwatch:hover,
+.player .eprow .epwatch:hover {
+  background: var(--accent-soft);
+  color: var(--accent-soft-fg);
+}
+.kagura .eprow .epwatch.on,
+.player .eprow .epwatch.on {
+  color: var(--accent);
+}
 /* Status lives outside the 30px play-icon .go slot so "airs in …" isn't clipped. */
 .kagura .eprow .ep-status-slot,
 .player .eprow .ep-status-slot {
