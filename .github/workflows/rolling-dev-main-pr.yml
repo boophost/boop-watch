@@ -26,7 +26,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The org disables write for the default GITHUB_TOKEN, so it can't *create*
+      # PRs (editing an existing one is fine). Mint a short-lived token from the
+      # promotion GitHub App instead, when it's configured. app-id lives in a repo
+      # *variable* (not secret) so it can gate this step — secrets can't be used in
+      # `if:`. When the App isn't set up yet, this step is skipped and the script
+      # falls back to GITHUB_TOKEN (which self-handles the create-denied case).
+      - name: Generate promotion App token
+        id: app-token
+        if: ${{ vars.PROMOTION_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.PROMOTION_APP_ID }}
+          private-key: ${{ secrets.PROMOTION_APP_PRIVATE_KEY }}
+
       - name: Update rolling promotion PR
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         run: node scripts/update-promotion-pr.mjs
