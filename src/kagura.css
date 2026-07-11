@@ -629,6 +629,11 @@
   & .wrap { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px;
     width: 100%; max-width: 1560px; margin: 0 auto; padding: 20px; align-items: start; }
   & .wrap.no-eps { grid-template-columns: minmax(0, 1fr); max-width: 1280px; }
+  /* Each grid column is its own independent flex stack (video+comments on the
+     left, episodes+OST on the right) so the two columns' heights don't couple —
+     a shared-row grid would otherwise push the comments below the OST row and
+     leave the OST floating below the taller video column. */
+  & .col-main, & .col-side { min-width: 0; display: flex; flex-direction: column; gap: 20px; }
   & .col-video { min-width: 0; }
   /* The .vid box owns the player's geometry: a fixed 16/9 (clamped to 78vh on
      short windows) that exists before the player mounts and never changes with
@@ -746,7 +751,7 @@
   & .eprow.watched .epn, & .eprow.watched .ept { color: var(--fg-subtle); }
 
   /* OST rail under the episode sidebar: MAL OP/ED themes + iTunes cover art. */
-  & .col-ost { grid-column: 2; overflow: hidden; }
+  & .col-ost { overflow: hidden; }
   & .ost-list { padding: 6px; display: flex; flex-direction: column; }
   & .ostrow { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 9px;
     transition: background .14s; }
@@ -762,12 +767,11 @@
   & .ost-meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
   & .ost-kind { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); }
   & .ost-eps { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-subtle); }
-  & .wrap.no-eps .col-ost { grid-column: 1; }
 
   /* Per-episode comments, below the player in the video column (the episode
      sidebar stays sticky beside them). Composer for signed-in users; the list
      reads fine anonymously. */
-  & .comments { grid-column: 1; min-width: 0; }
+  & .comments { min-width: 0; }
   & .cmt-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px;
     border-bottom: 1px solid var(--border); font-weight: 600; font-size: 14px; }
   & .cmt-head .badge { font-family: var(--font-mono); font-size: 11px; font-weight: 500;
@@ -811,8 +815,13 @@
 
   @media (max-width: 980px) {
     & .wrap { grid-template-columns: minmax(0, 1fr); }
-    & .col-eps { max-height: 420px; }
-    & .col-ost { grid-column: 1; }
+    /* Collapse the two column stacks so all four blocks share the single
+       column, then order them video → episodes → OST → comments. */
+    & .col-main, & .col-side { display: contents; }
+    & .col-video { order: 1; }
+    & .col-eps { order: 2; max-height: 420px; }
+    & .col-ost { order: 3; }
+    & .comments { order: 4; }
   }
 
   /* Phone layout: brand collapses to just the mark, the search takes the

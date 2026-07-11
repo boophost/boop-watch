@@ -97,6 +97,33 @@ Production is served at `watch.boopurno.es`. The public DNS record is **grey-clo
 proxy off) so video bypasses CF's free-tier video ToS. The SQLite DB needs a persistent volume
 mounted at `DATA_DIR`.
 
+### Per-PR preview environments + autonomous QA
+
+Every **dev-targeted feature PR** gets its own **ephemeral preview environment** so QA runs in
+parallel *before* merge (not just on the one shared `boop-watch-dev` after). Wired into
+`.github/workflows/docker-publish.yml`:
+
+- The `build` job **pushes** dev-PR images (tag `pr-<N>` + digest); main-PRs stay push-free.
+- `preview-up` (self-hosted, in-cluster) runs `scripts/preview-env.mjs up <N> <digest>`: it clones
+  the live `boop-watch-dev` Deployment into `boop-watch-pr-<N>` — its **own** PVC/Service/Traefik
+  `IngressRoute` (`pr-<N>-watch.boopurno.es`), `series.sqlite` **seeded from dev**, and the flow
+  **sink disabled** (no `QBIT_*`/`LIBRARY_DIR`, no media-NFS mount). That last part is what makes
+  previews parallel-safe: they can't collide on the shared library / qBittorrent. Portal, `/manage`,
+  and flow **dry-runs** all work; live library imports do not. Capped at `MAX_PREVIEWS` (default 5).
+- `qa-agent` runs `scripts/qa-agent/run.mjs`: reads the PR's `## Test plan`, drives each item against
+  the preview (headless `claude` CLI + a minted admin JWT), **ticks `[x]`** the verified items on the
+  PR, and comments an evidence table. It **never merges or promotes** — a human still approves.
+- `preview-down` tears the env down on PR close (`kubectl delete -l boop-watch.dev/preview-pr=<N>`).
+
+The ticks propagate for free: `update-promotion-pr.mjs` seeds a **checked** promotion-checklist box
+whenever a feature PR's test-plan line is already `[x]`, so QA-verified items arrive pre-checked on
+the `dev → main` promotion PR. Prereqs (outside this repo — see `boophost/boop-watch-ops`): the
+deployer kubeconfig's RBAC must allow CRUD of `boop-watch-pr-*` Deployments/Services/PVCs/
+IngressRoutes + pod exec/cp in `link-apps`; a `CLAUDE_CODE_OAUTH_TOKEN` repo secret (from
+`claude setup-token` — uses your Claude subscription, not per-token API billing; `ANTHROPIC_API_KEY`
+also works); and wildcard `*-watch.boopurno.es` DNS. `preview-env.mjs` reads the *live* dev
+Deployment as its template, so it tracks dev's drift automatically.
+
 ### Library-import flow (custom indexer → library)
 
 The **"Library import"** seed flow (`server/flowsDb.ts`) takes over where the "Missing videos"

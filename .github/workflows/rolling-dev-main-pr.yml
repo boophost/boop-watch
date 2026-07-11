@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  actions: write   # re-run the promotion-checklist gate after refreshing the PR
 
 concurrency:
   group: rolling-dev-main-pr
@@ -44,3 +45,19 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         run: node scripts/update-promotion-pr.mjs
+
+      # Re-evaluate the checklist gate against the freshly-updated PR body. The
+      # gate normally re-runs on the PR `edited` event, but bot-token edits don't
+      # reliably cascade — dispatch it explicitly so the gate always reflects the
+      # current checklist (e.g. after the QA agent ticks items).
+      - name: Re-run promotion checklist gate
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          pr=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number')
+          if [ -n "$pr" ]; then
+            echo "Re-running promotion checklist gate for #$pr"
+            gh workflow run promotion-checklist-gate.yml -f pr_number="$pr"
+          else
+            echo "No open promotion PR; nothing to gate."
+          fi
