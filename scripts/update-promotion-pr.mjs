@@ -238,23 +238,69 @@ function main() {
   if (openPr) {
     sh('gh', ['pr', 'edit', String(openPr.number), '--title', title, '--body-file', bodyFile])
     console.log(`Updated promotion PR #${openPr.number}`)
-  } else {
+    return
+  }
+
+  // No open promotion PR — create one. This is the only step that can be
+  // denied: `GITHUB_TOKEN` can freely *edit* an existing PR (the branch above),
+  // but *creating* one is gated by the org/repo "Allow GitHub Actions to create
+  // and approve pull requests" policy. When that's off, don't fail the whole
+  // workflow (the PR is recreated every promotion cycle, so this would go red on
+  // every dev push) — hand the maintainer a ready-to-open PR instead.
+  try {
     const url = sh('gh', [
-      'pr',
-      'create',
-      '--base',
-      'main',
-      '--head',
-      'dev',
-      '--title',
-      title,
-      '--body-file',
-      bodyFile,
-      '--label',
-      PROMOTION_LABEL,
+      'pr', 'create',
+      '--base', 'main',
+      '--head', 'dev',
+      '--title', title,
+      '--body-file', bodyFile,
+      '--label', PROMOTION_LABEL,
     ])
     console.log(`Created promotion PR: ${url}`)
+  } catch (err) {
+    const msg = String(err?.stderr || err?.message || err)
+    if (!/not permitted to create or approve pull requests|createPullRequest/i.test(msg)) throw err
+    reportManualCreateNeeded({ title, body, bodyFile })
   }
+}
+
+// The create policy is off: surface the intended PR so a human can open it with
+// one click, and exit 0 so the workflow stays green.
+function reportManualCreateNeeded({ title, body, bodyFile }) {
+  const compareUrl = 'https://github.com/boophost/boop-watch/compare/main...dev?expand=1'
+  console.log('::notice title=Promotion PR::GitHub Actions may not create PRs here; create the dev→main promotion PR manually.')
+  console.log(`No open promotion PR, and Actions can't create one (org/repo policy). Open it manually:`)
+  console.log(`  ${compareUrl}`)
+  console.log(`  or: gh pr create --base main --head dev --title '${title}' --body-file <file> --label ${PROMOTION_LABEL}`)
+  console.log('Once it exists, later dev pushes update it automatically.')
+
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY
+  if (summaryPath) {
+    const summary = [
+      '## Promotion PR needs manual creation',
+      '',
+      "GitHub Actions isn't permitted to create PRs in this repo, so the rolling dev→main promotion PR",
+      `couldn't be opened automatically. [**Create it here**](${compareUrl}), then paste the body below`,
+      '(later `dev` pushes will keep it updated).',
+      '',
+      `**Title:** \`${title}\``,
+      '',
+      '<details><summary>PR body</summary>',
+      '',
+      '```markdown',
+      body,
+      '```',
+      '',
+      '</details>',
+      '',
+    ].join('\n')
+    try {
+      writeFileSync(summaryPath, summary)
+    } catch {
+      // step summary is best-effort
+    }
+  }
+  console.log(`(PR body also written to ${bodyFile})`)
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main()
