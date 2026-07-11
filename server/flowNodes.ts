@@ -2709,7 +2709,14 @@ const animeStatus: NodeImpl = {
 // path remap) and ffmpeg/ffprobe on PATH.
 // ---------------------------------------------------------------------------
 const VIDEO_EXTS_DEFAULT = 'mkv,mp4,avi,m4v,mov'
-const WORK_DIR = () => process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
+// Where flow scratch lives. Defaults to DATA_DIR — but DATA_DIR is a *small*
+// node-disk PVC (1-2Gi), and the scratch nodes write GB-sized intermediates:
+// `enrich.trim-audio-tracks` alone emits 3.5GB `.trimmed.mkv` files. That filled
+// the node's disk and got the pod evicted (prod outage; staging nearly repeated
+// it). Set WORK_DIR to a path on the big media NFS (e.g. /data/.boopwork) so
+// scratch never lands on node disk. `.../work` is appended by the nodes.
+const WORK_DIR = () =>
+  process.env.WORK_DIR ?? process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
 
 // The library-import nodes (extract-subs, mux-tracks, …) drop intermediate
 // files — extracted subs, fonts, muxed MKVs — under DATA_DIR/work. Nothing ever
