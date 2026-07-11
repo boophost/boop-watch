@@ -81,7 +81,10 @@ const normLoose = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 /** `Romaji (日本語)` → `{ main: 'Romaji', paren: '日本語' | null }`. */
 function splitParen(s: string): { main: string; paren: string | null } {
   const m = /^(.*?)\s*\(([^)]+)\)\s*$/.exec(s.trim())
-  if (m && m[1]) return { main: m[1].trim(), paren: m[2].trim() }
+  if (m && m[1]) {
+    const p = m[2].trim().replace(/^CV:\s*/i, '')
+    return { main: m[1].trim(), paren: p }
+  }
   return { main: s.trim(), paren: null }
 }
 
@@ -92,7 +95,7 @@ async function itunesSearch(term: string): Promise<ItunesTrack[]> {
   u.searchParams.set('term', term)
   u.searchParams.set('media', 'music')
   u.searchParams.set('entity', 'song')
-  u.searchParams.set('limit', '5')
+  u.searchParams.set('limit', '200')
   const res = await limitedFetch('itunes', u, {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(10_000),
@@ -113,13 +116,22 @@ export async function artForSong(title: string, artist: string | null): Promise<
   if (hit && Date.now() - hit.at < (hit.url ? ART_TTL : ART_NEG_TTL)) return hit.url
 
   const t = splitParen(title)
-  const a = splitParen(artist ?? '')
-  const artistNorms = [a.main, a.paren].filter(Boolean).map((s) => normLoose(s as string))
-  const terms = [...new Set(
-    [t.paren, t.main]
-      .filter((x): x is string => !!x)
-      .map((x) => `${x} ${a.main}`.trim()),
-  )]
+  const rawArtists = (artist ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+  if (rawArtists.length === 0) rawArtists.push('')
+  const parsedArtists = rawArtists.map(splitParen)
+  
+  const artistNorms = parsedArtists.flatMap((a) => [a.main, a.paren]).filter(Boolean).map((s) => normLoose(s as string))
+  
+  const titleParts = [t.paren, t.main].filter((x): x is string => !!x)
+  const termsSet = new Set<string>()
+  for (const tPart of titleParts) {
+    for (const a of parsedArtists) {
+      if (a.paren) termsSet.add(`${tPart} ${a.paren}`.trim())
+      if (a.main) termsSet.add(`${tPart} ${a.main}`.trim())
+    }
+    termsSet.add(tPart)
+  }
+  const terms = [...termsSet].filter(Boolean)
 
   let url: string | null = null
   for (const term of terms) {
