@@ -63,6 +63,22 @@ const tokens = [
   process.env.CLAUDE_CODE_OAUTH_TOKEN_3,
 ].filter((t) => t?.trim())
 
+// Read the structured `result` event rather than string-sniffing the whole
+// stream: a *previous* credential's 429 text lingers in the buffer and would
+// otherwise make a working credential look rate limited — the guard would then
+// silently disable itself, which is worse than having no guard at all.
+function isRateLimited(stream) {
+  for (const line of stream.split('\n')) {
+    if (!line.trim()) continue
+    let ev
+    try { ev = JSON.parse(line) } catch { continue }
+    if (ev.type !== 'result') continue
+    if (ev.api_error_status === 429) return true
+    if (/session limit|usage limit|rate limit/i.test(String(ev.result ?? ''))) return true
+  }
+  return false
+}
+
 let raw = ''
 let rateLimited = false
 for (const token of tokens.length ? tokens : [null]) {
@@ -78,7 +94,7 @@ for (const token of tokens.length ? tokens : [null]) {
   } catch (err) {
     raw = [err?.stdout, err?.stderr].filter(Boolean).join('\n')
   }
-  rateLimited = /rate[_ ]limit|"api_error_status"\s*:\s*429|session limit|usage limit/i.test(raw)
+  rateLimited = isRateLimited(raw)
   if (!rateLimited) break
 }
 if (rateLimited) {
