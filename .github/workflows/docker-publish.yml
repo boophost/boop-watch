@@ -201,11 +201,13 @@ jobs:
           DISABLE_TELEMETRY: '1'
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
         run: |
-          npm i -g @anthropic-ai/claude-code
-          echo "=== claude --version (native-build warmup) ==="
-          timeout 120 claude --version || echo "::warning::claude --version hung/failed"
-          echo "=== trivial -p smoke test (isolates from preview) ==="
-          printf 'Reply with exactly: SMOKE_OK' | timeout 120 claude -p --output-format text --model claude-haiku-4-5 || echo "::warning::trivial claude -p hung/failed (rc=$?)"
+          # Native install (fetches the platform binary up front) rather than the
+          # npm wrapper's lazy first-run download. NB: the binary is Bun-compiled
+          # and needs an AVX-capable CPU — the runner VM must expose `host` CPU.
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          timeout 60 claude --version || { echo "::error::claude CLI won't start (AVX-less CPU? see k8s-cp cpu=host)"; exit 1; }
       - name: Run QA agent
         run: |
           export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
