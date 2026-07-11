@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Copy, Layers, Lightbulb, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react'
+import { Check, ChevronRight, Copy, Layers, Lightbulb, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -13,6 +20,7 @@ import {
   updateSuggestion,
   updateSuggestionGroup,
   type SuggestionGroup,
+  type SuggestionPatch,
   type SuggestionRow,
   type SuggestionStatus,
 } from '@/lib/suggestions'
@@ -42,6 +50,7 @@ function Card({
   busy,
   onEdit,
   onDelete,
+  onContextMenu,
   onDragStart,
   onDragEnd,
 }: {
@@ -50,6 +59,7 @@ function Card({
   busy: boolean
   onEdit: () => void
   onDelete: () => void
+  onContextMenu: (e: ReactMouseEvent) => void
   onDragStart: () => void
   onDragEnd: () => void
 }) {
@@ -58,6 +68,7 @@ function Card({
       draggable={!busy}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
+      onContextMenu={onContextMenu}
       className={cn(
         'group relative cursor-grab rounded-lg border border-border bg-card p-3 shadow-sm active:cursor-grabbing',
         busy && 'pointer-events-none opacity-50',
@@ -480,6 +491,207 @@ function EpicRow({
 }
 
 // ---------------------------------------------------------------------------
+// Right-click context menu
+// ---------------------------------------------------------------------------
+
+const MENU_W = 224 // w-56
+
+function MenuItem({
+  label,
+  danger,
+  active,
+  hasSub,
+  onClick,
+  onMouseEnter,
+}: {
+  label: string
+  danger?: boolean
+  active?: boolean
+  hasSub?: boolean
+  onClick?: () => void
+  onMouseEnter?: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={onMouseEnter}
+      className={cn(
+        'flex w-full items-center justify-between gap-3 rounded px-2 py-1.5 text-left text-sm hover:bg-muted focus-visible:bg-muted focus-visible:outline-none',
+        danger && 'text-destructive hover:bg-destructive/10',
+      )}
+    >
+      <span className="truncate">{label}</span>
+      {hasSub ? (
+        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+      ) : active ? (
+        <Check className="size-3.5 shrink-0 text-violet-400" />
+      ) : null}
+    </button>
+  )
+}
+
+function Flyout({ openLeft, children }: { openLeft: boolean; children: ReactNode }) {
+  return (
+    <div
+      className={cn(
+        'absolute top-0 max-h-[70vh] w-56 overflow-y-auto rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-xl',
+        openLeft ? 'right-full mr-1' : 'left-full ml-1',
+      )}
+    >
+      {children}
+    </div>
+  )
+}
+
+function CardContextMenu({
+  menu,
+  rows,
+  groups,
+  onClose,
+  onPatch,
+  onEdit,
+  onDelete,
+}: {
+  menu: { x: number; y: number; row: SuggestionRow }
+  rows: SuggestionRow[]
+  groups: SuggestionGroup[]
+  onClose: () => void
+  onPatch: (id: number, patch: SuggestionPatch) => void
+  onEdit: (row: SuggestionRow) => void
+  onDelete: (row: SuggestionRow) => void
+}) {
+  const { x, y, row } = menu
+  const [sub, setSub] = useState<'status' | 'epic' | 'dup' | null>(null)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // Keep the menu on-screen; flip submenus to the left near the right edge.
+  const left = Math.min(x, window.innerWidth - MENU_W - 8)
+  const top = Math.min(y, window.innerHeight - 300)
+  const openLeft = x > window.innerWidth - MENU_W - 240
+
+  const act = (patch: SuggestionPatch) => {
+    onPatch(row.id, patch)
+    onClose()
+  }
+  const others = rows.filter((r) => r.id !== row.id)
+
+  return (
+    // Full-screen catcher: any click/right-click outside the menu dismisses it.
+    <div
+      className="fixed inset-0 z-50"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        if (e.target === e.currentTarget) onClose()
+      }}
+    >
+      <div
+        className="absolute w-56 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-xl"
+        style={{ left, top }}
+      >
+        <div className="truncate px-2 py-1 text-xs text-muted-foreground">
+          #{row.id} · {row.title ?? row.body}
+        </div>
+        <div className="my-1 h-px bg-border" />
+
+        <div className="relative" onMouseEnter={() => setSub('status')}>
+          <MenuItem label="Move to" hasSub />
+          {sub === 'status' && (
+            <Flyout openLeft={openLeft}>
+              {COLUMNS.map((c) => (
+                <MenuItem
+                  key={c.status}
+                  label={c.label}
+                  active={row.status === c.status}
+                  onClick={() => act({ status: c.status })}
+                />
+              ))}
+            </Flyout>
+          )}
+        </div>
+
+        <div className="relative" onMouseEnter={() => setSub('epic')}>
+          <MenuItem label="Set epic" hasSub />
+          {sub === 'epic' && (
+            <Flyout openLeft={openLeft}>
+              <MenuItem label="None" active={row.group_id == null} onClick={() => act({ group_id: null })} />
+              {groups.length > 0 && <div className="my-1 h-px bg-border" />}
+              {groups.length === 0 ? (
+                <div className="px-2 py-1.5 text-xs text-muted-foreground">No epics yet</div>
+              ) : (
+                groups.map((g) => (
+                  <MenuItem
+                    key={g.id}
+                    label={g.title}
+                    active={row.group_id === g.id}
+                    onClick={() => act({ group_id: g.id })}
+                  />
+                ))
+              )}
+            </Flyout>
+          )}
+        </div>
+
+        <div className="relative" onMouseEnter={() => setSub('dup')}>
+          <MenuItem label="Mark duplicate of" hasSub />
+          {sub === 'dup' && (
+            <Flyout openLeft={openLeft}>
+              {row.duplicate_of != null && (
+                <>
+                  <MenuItem label="Clear duplicate" onClick={() => act({ duplicate_of: null })} />
+                  <div className="my-1 h-px bg-border" />
+                </>
+              )}
+              {others.length === 0 ? (
+                <div className="px-2 py-1.5 text-xs text-muted-foreground">No other suggestions</div>
+              ) : (
+                others.map((o) => (
+                  <MenuItem
+                    key={o.id}
+                    label={`#${o.id} ${o.title ?? o.body}`}
+                    active={row.duplicate_of === o.id}
+                    onClick={() => act({ duplicate_of: o.id })}
+                  />
+                ))
+              )}
+            </Flyout>
+          )}
+        </div>
+
+        <div className="my-1 h-px bg-border" onMouseEnter={() => setSub(null)} />
+        <div onMouseEnter={() => setSub(null)}>
+          <MenuItem
+            label="Edit…"
+            onClick={() => {
+              onEdit(row)
+              onClose()
+            }}
+          />
+          <MenuItem
+            label="Delete"
+            danger
+            onClick={() => {
+              onClose()
+              onDelete(row)
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -493,6 +705,7 @@ export default function Suggestions() {
   const [dragOver, setDragOver] = useState<SuggestionStatus | null>(null)
   const [editing, setEditing] = useState<SuggestionRow | null>(null)
   const [showEpics, setShowEpics] = useState(false)
+  const [menu, setMenu] = useState<{ x: number; y: number; row: SuggestionRow } | null>(null)
 
   const groupById = useMemo(() => new Map(groups.map((g) => [g.id, g])), [groups])
   const groupCounts = useMemo(() => {
@@ -535,6 +748,23 @@ export default function Suggestions() {
     } catch (e) {
       setRows(prev)
       setError(e instanceof Error ? e.message : 'Failed to move suggestion')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  // General optimistic patch (context-menu actions: status / epic / duplicate).
+  const patchRow = async (id: number, patch: SuggestionPatch) => {
+    const prev = rows
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)))
+    setBusyId(id)
+    setError('')
+    try {
+      const updated = await updateSuggestion(id, patch)
+      setRows((rs) => rs.map((r) => (r.id === updated.id ? updated : r)))
+    } catch (e) {
+      setRows(prev)
+      setError(e instanceof Error ? e.message : 'Failed to update suggestion')
     } finally {
       setBusyId(null)
     }
@@ -630,6 +860,10 @@ export default function Suggestions() {
                         busy={busyId === row.id}
                         onEdit={() => setEditing(row)}
                         onDelete={() => void remove(row)}
+                        onContextMenu={(e) => {
+                          e.preventDefault()
+                          setMenu({ x: e.clientX, y: e.clientY, row })
+                        }}
                         onDragStart={() => setDragId(row.id)}
                         onDragEnd={() => {
                           setDragId(null)
@@ -665,6 +899,17 @@ export default function Suggestions() {
           counts={groupCounts}
           onClose={() => setShowEpics(false)}
           onChanged={() => void load()}
+        />
+      )}
+      {menu && (
+        <CardContextMenu
+          menu={menu}
+          rows={rows}
+          groups={groups}
+          onClose={() => setMenu(null)}
+          onPatch={(id, patch) => void patchRow(id, patch)}
+          onEdit={(row) => setEditing(row)}
+          onDelete={(row) => void remove(row)}
         />
       )}
     </div>
