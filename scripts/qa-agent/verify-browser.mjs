@@ -55,13 +55,36 @@ Output a single fenced json block, nothing after:
 const env = { ...process.env }
 for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION']) delete env[k]
 
-const raw = execFileSync('claude', [
-  '-p', '--output-format', 'stream-json', '--verbose',
-  '--permission-mode', 'bypassPermissions',
-  '--model', process.env.QA_MODEL || 'claude-haiku-4-5',
-  '--mcp-config', mcpConfig, '--strict-mcp-config',
-  '--allowed-tools', 'Bash', 'mcp__playwright',
-], { input: prompt, env, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, timeout: 10 * 60_000 })
+// Try each pooled credential, same as run.mjs — a capped account must not look
+// like a broken browser.
+const tokens = [
+  process.env.CLAUDE_CODE_OAUTH_TOKEN,
+  process.env.CLAUDE_CODE_OAUTH_TOKEN_2,
+  process.env.CLAUDE_CODE_OAUTH_TOKEN_3,
+].filter((t) => t?.trim())
+
+let raw = ''
+let rateLimited = false
+for (const token of tokens.length ? tokens : [null]) {
+  const runEnv = token ? { ...env, CLAUDE_CODE_OAUTH_TOKEN: token } : env
+  try {
+    raw = execFileSync('claude', [
+      '-p', '--output-format', 'stream-json', '--verbose',
+      '--permission-mode', 'bypassPermissions',
+      '--model', process.env.QA_MODEL || 'claude-haiku-4-5',
+      '--mcp-config', mcpConfig, '--strict-mcp-config',
+      '--allowed-tools', 'Bash', 'mcp__playwright',
+    ], { input: prompt, env: runEnv, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, timeout: 10 * 60_000 })
+  } catch (err) {
+    raw = [err?.stdout, err?.stderr].filter(Boolean).join('\n')
+  }
+  rateLimited = /rate[_ ]limit|"api_error_status"\s*:\s*429|session limit|usage limit/i.test(raw)
+  if (!rateLimited) break
+}
+if (rateLimited) {
+  console.warn('⚠️  All credentials rate limited — cannot verify the browser here. Skipping the guard (the agent itself will still refuse to pass UI items without a browser).')
+  process.exit(0)
+}
 
 const toolCalls = []
 let finalResult = ''
