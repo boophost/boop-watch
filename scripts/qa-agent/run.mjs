@@ -144,12 +144,13 @@ function runAgent(prompt) {
     args.push('--mcp-config', cfg, '--strict-mcp-config')
     allowed.push('mcp__playwright')
   }
+  // --allowed-tools is variadic and would swallow a positional prompt, so the
+  // prompt goes on stdin (the CLI reads it there in --print mode).
   args.push('--allowed-tools', ...allowed)
-  args.push(prompt) // positional prompt
 
   let raw
   try {
-    raw = execFileSync('claude', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs })
+    raw = execFileSync('claude', args, { input: prompt, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs })
   } catch (err) {
     if (err?.code === 'ETIMEDOUT') throw new Error(`agent timed out after ${timeoutMs / 1000}s — check the preview is reachable and the model is responding`)
     // Surface stdout/stderr the CLI produced before dying (auth/model errors).

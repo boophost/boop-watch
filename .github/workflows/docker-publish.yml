@@ -132,6 +132,7 @@ jobs:
       pull-requests: write
     outputs:
       url: ${{ steps.preview.outputs.url }}
+      internal_url: ${{ steps.preview.outputs.internal_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -147,7 +148,9 @@ jobs:
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.digest }}"
           node scripts/preview-env.mjs up "${{ github.event.pull_request.number }}" "$IMAGE" | tee preview.log
           url=$(grep '^PREVIEW_URL=' preview.log | tail -1 | cut -d= -f2-)
+          internal=$(grep '^PREVIEW_INTERNAL_URL=' preview.log | tail -1 | cut -d= -f2-)
           echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "internal_url=$internal" >> "$GITHUB_OUTPUT"
       - name: Comment preview URL
         uses: actions/github-script@v7
         with:
@@ -177,7 +180,9 @@ jobs:
       contents: read
       pull-requests: write
     env:
-      BASE_URL: ${{ needs.preview-up.outputs.url }}
+      # Internal ClusterIP URL — bypasses the CF-proxied public host (https→404,
+      # http→301). Falls back to the public host if internal wasn't emitted.
+      BASE_URL: ${{ needs.preview-up.outputs.internal_url || needs.preview-up.outputs.url }}
       GITHUB_TOKEN: ${{ github.token }}
       # Subscription/session auth (from `claude setup-token`) — NOT per-token API
       # billing. Falls back to ANTHROPIC_API_KEY if that's the one that's set.

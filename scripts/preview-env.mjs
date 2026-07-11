@@ -274,8 +274,14 @@ async function up(pr, imageRef, { comment } = {}) {
   }
   if (health !== 'ok') throw new Error(`preview /health returned '${health}', expected 'ok'`)
 
-  console.log(`\nPreview ready: http://${n.host}`)
-  console.log(`PREVIEW_URL=http://${n.host}`) // consumed by the workflow
+  // Internal URL for the QA agent: the Service ClusterIP, reachable from a
+  // cluster node (kube-proxy) with no Cloudflare/TLS/Host-header in the way. The
+  // public host goes through the CF-proxied wildcard, which is for humans only.
+  const clusterIp = kubectl(['get', 'svc', n.svc, '-o', 'jsonpath={.spec.clusterIP}'], { quiet: true })
+
+  console.log(`\nPreview ready: http://${n.host}  (internal: http://${clusterIp})`)
+  console.log(`PREVIEW_URL=http://${n.host}`) // public, for the human comment
+  console.log(`PREVIEW_INTERNAL_URL=http://${clusterIp}`) // for the QA agent
   if (comment) upsertComment(pr, n.host)
 }
 
