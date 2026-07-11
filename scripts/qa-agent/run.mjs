@@ -43,6 +43,7 @@ import { CHECKBOX_RE } from '../lib/promotion-checklist.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLAN_HEADING = '## test plan'
 const BODY_MARKER = '<!-- qa-agent -->'
+const NS = process.env.QA_NAMESPACE || 'link-apps'
 const REPO = process.env.GITHUB_REPOSITORY || process.env.QA_REPO
 const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
 
@@ -181,12 +182,36 @@ function runAgentWithFailover(prompt, creds) {
   throw new RateLimitError(limits.join(' | ') || 'no Claude credentials available')
 }
 
-function buildPrompt({ baseUrl, token, prTitle, changedFiles, items }) {
+// Advertise kubectl only when it actually works here — an agent told it has a
+// tool it can't use wastes turns, and one not told it has kubectl needlessly
+// skips pod/env/mount claims it could have proven (seen in both directions).
+function kubeNote(pr) {
+  try {
+    execFileSync('kubectl', ['-n', NS, 'get', 'deploy', `boop-watch-pr-${pr}`, '-o', 'name'], { stdio: 'pipe', timeout: 20_000 })
+  } catch {
+    return '- No cluster access — mark items that need `kubectl` as `skip`.'
+  }
+  return [
+    `- \`kubectl\` **works** (namespace \`${NS}\`). The preview's objects are:`,
+    `  Deployment/Service \`boop-watch-pr-${pr}\`, PVC \`boop-watch-pr-${pr}-data\`,`,
+    `  IngressRoute \`boop-watch-pr-${pr}\` (all labelled \`boop-watch.dev/preview-pr=${pr}\`).`,
+    '  Use it to prove pod-level claims rather than skipping them, e.g.:',
+    `  \`kubectl -n ${NS} get pods -l app.kubernetes.io/name=boop-watch-pr-${pr}\`,`,
+    `  \`kubectl -n ${NS} exec deploy/boop-watch-pr-${pr} -- env\` (check QBIT_*/LIBRARY_DIR are empty),`,
+    `  \`kubectl -n ${NS} exec deploy/boop-watch-pr-${pr} -- sh -c 'ls /data || echo no-mount'\`.`,
+    '  Staging is `boop-watch-dev` and prod is `boop-watch` — a test-plan item naming those',
+    '  refers to the *shared* env, which this PR has not been deployed to yet: verify the',
+    '  equivalent behavior on the preview instead, and say so in the evidence.',
+  ].join('\n')
+}
+
+function buildPrompt({ baseUrl, token, prTitle, changedFiles, items, pr }) {
   const template = readFileSync(join(HERE, 'prompt.md'), 'utf8')
   const playwrightNote = process.env.QA_PLAYWRIGHT
     ? 'The Playwright MCP (`mcp__playwright__*`) is available for UI checks that an API cannot prove.'
     : 'No browser is available — verify via HTTP; mark genuinely UI-only items `skip`.'
   return template
+    .replaceAll('{{KUBE_NOTE}}', kubeNote(pr))
     .replaceAll('{{BASE_URL}}', baseUrl)
     .replaceAll('{{TOKEN}}', token)
     .replaceAll('{{PR_TITLE}}', prTitle)
@@ -358,7 +383,7 @@ async function main() {
     verdicts = items.map((_, i) => ({ index: i, status: 'pass', evidence: 'dry-run: not actually verified' }))
   } else {
     try {
-      verdicts = runAgentWithFailover(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items }), creds)
+      verdicts = runAgentWithFailover(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items, pr }), creds)
     } catch (err) {
       // Every credential is capped — nothing was verified, but that's not a QA
       // failure either. Say so on the PR, tick nothing, and exit clean so the

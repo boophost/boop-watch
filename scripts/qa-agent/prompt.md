@@ -15,6 +15,7 @@ item by actually exercising the preview, and return a structured verdict. You do
   need no auth. Admin routes: `/api/flows`, `/api/schedules`, `/api/series`,
   `/api/users`, `/api/search/anime`.
 - Tooling: `Bash` (use `curl -s`). {{PLAYWRIGHT_NOTE}}
+{{KUBE_NOTE}}
 
 ## PR under test
 
