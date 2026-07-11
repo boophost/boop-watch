@@ -14,6 +14,8 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+    # `closed` is needed to tear preview envs down; build is gated off it below.
+    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 concurrency:
@@ -26,7 +28,8 @@ env:
 
 jobs:
   build:
-    if: github.repository == 'boophost/boop-watch' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # Skip on PR `closed` (nothing to build — the preview-down job handles it).
+    if: github.repository == 'boophost/boop-watch' && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -63,13 +66,17 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,prefix=
+            # pr-<N> for dev-targeted PRs — the preview env pulls it by digest.
+            type=ref,event=pr,enable=${{ github.base_ref == 'dev' }}
 
       - name: Build and push
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
+          # Push on branch builds, and on dev-targeted PRs (the preview env needs
+          # a real, pullable image). main-targeted PRs stay push-free (validation).
+          push: ${{ github.event_name != 'pull_request' || github.base_ref == 'dev' }}
           build-args: |
             GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -109,3 +116,98 @@ jobs:
           export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
           kubectl -n link-apps set image deployment/boop-watch-dev boop-watch-dev=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.digest }}
           kubectl -n link-apps rollout status deployment/boop-watch-dev --timeout=180s
+
+  # Per-PR preview environment: an isolated clone of boop-watch-dev (own DB
+  # seeded from dev, flow sink disabled) at pr-<N>-watch.boopurno.es. Provisioned
+  # on every dev-targeted PR (open/sync), torn down on close (preview-down).
+  # Requires the deployer kubeconfig's RBAC to allow create/delete of
+  # Deployments/Services/PVCs/IngressRoutes + pods/exec for boop-watch-pr-* in
+  # link-apps (see boophost/boop-watch-ops).
+  preview-up:
+    needs: build
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.action != 'closed'
+    runs-on: [self-hosted, k3s-cp]
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      url: ${{ steps.preview.outputs.url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Provision preview environment
+        id: preview
+        run: |
+          set -o pipefail
+          export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.digest }}"
+          node scripts/preview-env.mjs up "${{ github.event.pull_request.number }}" "$IMAGE" | tee preview.log
+          url=$(grep '^PREVIEW_URL=' preview.log | tail -1 | cut -d= -f2-)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+      - name: Comment preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- preview-env -->'
+            const url = ${{ toJSON(steps.preview.outputs.url) }}
+            const body = `${marker}\n### 🔎 Preview environment\n\n**URL:** ${url}\n\nIsolated per-PR clone of staging (own DB seeded from dev, flow sink disabled). Torn down when this PR closes. The QA agent verifies the test plan here.`
+            const { owner, repo } = context.repo
+            const issue_number = context.payload.pull_request.number
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number })
+            const existing = comments.find((c) => c.body?.includes(marker))
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body })
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body })
+            }
+
+  # Autonomous QA: drive the PR's `## Test plan` against its preview env, tick off
+  # verified items on the PR, and comment evidence. Never merges or promotes. The
+  # ticks propagate into the dev→main promotion PR (update-promotion-pr.mjs seeds
+  # a checked promotion box from a `[x]` feature-PR line).
+  qa-agent:
+    needs: preview-up
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.action != 'closed'
+    runs-on: [self-hosted, k3s-cp]
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      BASE_URL: ${{ needs.preview-up.outputs.url }}
+      GITHUB_TOKEN: ${{ github.token }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude CLI
+        run: npm i -g @anthropic-ai/claude-code
+      - name: Run QA agent
+        run: |
+          export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
+          export JWT_SECRET="$(kubectl -n link-apps get secret boop-watch-dev-secret -o jsonpath='{.data.JWT_SECRET}' | base64 -d)"
+          node scripts/qa-agent/run.mjs "${{ github.event.pull_request.number }}"
+
+  preview-down:
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.action == 'closed'
+    runs-on: [self-hosted, k3s-cp]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tear down preview environment
+        run: |
+          export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
+          node scripts/preview-env.mjs down "${{ github.event.pull_request.number }}"
