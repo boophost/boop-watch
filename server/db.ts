@@ -121,11 +121,25 @@ export function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_history_user ON watch_history(username);
 
+    -- Epics that bundle several related suggestions under one admin-authored
+    -- writeup. Suggestions attach via suggestions.group_id (nullable). Created and
+    -- edited by admins / the boop-suggestions MCP driver, never by portal users.
+    CREATE TABLE IF NOT EXISTS suggestion_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- Free-text suggestions from logged-in portal users, reviewed on the
     -- /manage "Suggestions" kanban. user_id is the Supabase account id; email is
     -- captured at submit time so admins can see who asked without a lookup.
     -- status is the kanban column (unread | todo | working | staged | done);
     -- resolved is kept for back-compat and mirrors status = 'done'.
+    -- body is the user's verbatim words and is never edited; title and notes
+    -- are admin-authored triage/resolution metadata. duplicate_of points at the
+    -- canonical suggestion this one duplicates; group_id links it to an epic.
     CREATE TABLE IF NOT EXISTS suggestions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
@@ -133,7 +147,12 @@ export function getDb(): Database.Database {
       body TEXT NOT NULL,
       resolved INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'unread',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      title TEXT,
+      notes TEXT,
+      duplicate_of INTEGER,
+      group_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_suggestions_created ON suggestions(created_at);
 
@@ -246,6 +265,23 @@ export function getDb(): Database.Database {
     instance.exec(`ALTER TABLE suggestions ADD COLUMN status TEXT NOT NULL DEFAULT 'todo'`)
     instance.exec(`UPDATE suggestions SET status = 'done' WHERE resolved = 1`)
   }
+  // Additive migration: admin triage metadata (title/notes), duplicate links, and
+  // epic grouping landed with the boop-suggestions MCP driver. All nullable, so a
+  // plain ADD COLUMN backfills existing rows with NULL (untriaged, ungrouped).
+  for (const [name, type] of [
+    ['title', 'TEXT'],
+    ['notes', 'TEXT'],
+    ['duplicate_of', 'INTEGER'],
+    ['group_id', 'INTEGER'],
+    ['updated_at', 'TEXT'],
+  ] as const) {
+    if (!suggestionCols.has(name)) instance.exec(`ALTER TABLE suggestions ADD COLUMN ${name} ${type}`)
+  }
+  // Index on group_id lives here, not in the schema block above: on an existing
+  // DB the CREATE TABLE IF NOT EXISTS is a no-op, so group_id only exists once the
+  // ALTER above has run. Creating it in the schema block would reference a column
+  // that isn't there yet on already-provisioned deployments.
+  instance.exec(`CREATE INDEX IF NOT EXISTS idx_suggestions_group ON suggestions(group_id)`)
 
   // Additive migration: `thumb_url` arrived with the provider-artwork sources,
   // whose candidate lists are far too large to cache in full (see banners.ts).
@@ -362,7 +398,24 @@ export interface SuggestionRow {
   body: string
   resolved: number
   status: SuggestionStatus
+  /** Admin-authored short title (the user's `body` stays verbatim). */
+  title: string | null
+  /** Admin-authored triage / resolution notes. */
+  notes: string | null
+  /** Canonical suggestion id this one duplicates, or null. */
+  duplicate_of: number | null
+  /** Epic (suggestion_groups.id) this belongs to, or null. */
+  group_id: number | null
   created_at: string
+  updated_at: string | null
+}
+
+export interface SuggestionGroupRow {
+  id: number
+  title: string
+  description: string | null
+  created_at: string
+  updated_at: string
 }
 
 export function addSuggestion(user_id: string, email: string | null, body: string): SuggestionRow {
@@ -381,16 +434,120 @@ export function listSuggestions(): SuggestionRow[] {
     .all() as SuggestionRow[]
 }
 
-/** Move a suggestion to a kanban column. `resolved` is kept in sync (= 'done'). */
-export function setSuggestionStatus(id: number, status: SuggestionStatus): SuggestionRow | undefined {
-  getDb()
-    .prepare('UPDATE suggestions SET status = ?, resolved = ? WHERE id = ?')
-    .run(status, status === 'done' ? 1 : 0, id)
+export function getSuggestion(id: number): SuggestionRow | undefined {
   return getDb().prepare('SELECT * FROM suggestions WHERE id = ?').get(id) as SuggestionRow | undefined
 }
 
+/** Fields an admin (or the MCP driver) may edit on a suggestion. `body` is never
+ * editable — it's the user's verbatim words. Every key is optional; only the ones
+ * present in the patch are written. Pass `null` to clear a nullable field. */
+export interface SuggestionPatch {
+  status?: SuggestionStatus
+  title?: string | null
+  notes?: string | null
+  duplicate_of?: number | null
+  group_id?: number | null
+}
+
+/**
+ * Apply a partial edit to a suggestion. `resolved` is kept in sync with status
+ * (= 'done'), and `updated_at` is stamped. Returns the fresh row, or undefined if
+ * the id doesn't exist.
+ */
+export function updateSuggestion(id: number, patch: SuggestionPatch): SuggestionRow | undefined {
+  const existing = getSuggestion(id)
+  if (!existing) return undefined
+  const sets: string[] = []
+  const vals: unknown[] = []
+  if (patch.status !== undefined) {
+    sets.push('status = ?', 'resolved = ?')
+    vals.push(patch.status, patch.status === 'done' ? 1 : 0)
+  }
+  if (patch.title !== undefined) {
+    sets.push('title = ?')
+    vals.push(patch.title)
+  }
+  if (patch.notes !== undefined) {
+    sets.push('notes = ?')
+    vals.push(patch.notes)
+  }
+  if (patch.duplicate_of !== undefined) {
+    sets.push('duplicate_of = ?')
+    vals.push(patch.duplicate_of)
+  }
+  if (patch.group_id !== undefined) {
+    sets.push('group_id = ?')
+    vals.push(patch.group_id)
+  }
+  if (sets.length === 0) return existing
+  sets.push("updated_at = datetime('now')")
+  getDb().prepare(`UPDATE suggestions SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id)
+  return getSuggestion(id)
+}
+
+/** Back-compat shim for the status-only move (kanban drag). */
+export function setSuggestionStatus(id: number, status: SuggestionStatus): SuggestionRow | undefined {
+  return updateSuggestion(id, { status })
+}
+
 export function deleteSuggestion(id: number): boolean {
-  return getDb().prepare('DELETE FROM suggestions WHERE id = ?').run(id).changes > 0
+  const db = getDb()
+  return db.transaction((): boolean => {
+    // Don't leave dangling references: clear this id from any suggestion that
+    // pointed at it as a duplicate canonical.
+    db.prepare('UPDATE suggestions SET duplicate_of = NULL WHERE duplicate_of = ?').run(id)
+    return db.prepare('DELETE FROM suggestions WHERE id = ?').run(id).changes > 0
+  })()
+}
+
+// --- Suggestion groups (epics) ---------------------------------------------
+
+export function listSuggestionGroups(): SuggestionGroupRow[] {
+  return getDb()
+    .prepare('SELECT * FROM suggestion_groups ORDER BY created_at DESC')
+    .all() as SuggestionGroupRow[]
+}
+
+export function getSuggestionGroup(id: number): SuggestionGroupRow | undefined {
+  return getDb().prepare('SELECT * FROM suggestion_groups WHERE id = ?').get(id) as SuggestionGroupRow | undefined
+}
+
+export function addSuggestionGroup(title: string, description: string | null): SuggestionGroupRow {
+  const info = getDb()
+    .prepare('INSERT INTO suggestion_groups (title, description) VALUES (?, ?)')
+    .run(title, description)
+  return getSuggestionGroup(Number(info.lastInsertRowid))!
+}
+
+export function updateSuggestionGroup(
+  id: number,
+  patch: { title?: string; description?: string | null },
+): SuggestionGroupRow | undefined {
+  const existing = getSuggestionGroup(id)
+  if (!existing) return undefined
+  const sets: string[] = []
+  const vals: unknown[] = []
+  if (patch.title !== undefined) {
+    sets.push('title = ?')
+    vals.push(patch.title)
+  }
+  if (patch.description !== undefined) {
+    sets.push('description = ?')
+    vals.push(patch.description)
+  }
+  if (sets.length === 0) return existing
+  sets.push("updated_at = datetime('now')")
+  getDb().prepare(`UPDATE suggestion_groups SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id)
+  return getSuggestionGroup(id)
+}
+
+/** Delete an epic; detach (not delete) its member suggestions. */
+export function deleteSuggestionGroup(id: number): boolean {
+  const db = getDb()
+  return db.transaction((): boolean => {
+    db.prepare('UPDATE suggestions SET group_id = NULL WHERE group_id = ?').run(id)
+    return db.prepare('DELETE FROM suggestion_groups WHERE id = ?').run(id).changes > 0
+  })()
 }
 
 export interface CommentRow {

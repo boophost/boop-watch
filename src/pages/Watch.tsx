@@ -597,6 +597,7 @@ export default function Watch() {
       </div>
 
       <div className={`wrap${data.episodes.length ? '' : ' no-eps'}`}>
+        <div className="col-main">
         <div className="col-video">
           <div className="vid">
             {src && (
@@ -683,7 +684,10 @@ export default function Watch() {
             </button>
           </div>
         </div>
+        <Comments itemId={data.id} />
+        </div>
 
+        <div className="col-side">
         {data.episodes.length > 0 && (
           <aside className="col-eps panel">
             <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span><span className="badge">{data.episodes.length}</span></div>
@@ -733,8 +737,7 @@ export default function Watch() {
         ) : null}
 
         <OstPanel titleId={data.seriesId ?? data.id} season={data.season} />
-
-        <Comments itemId={data.id} />
+        </div>
       </div>
     </PlayerShell>
   )

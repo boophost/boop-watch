@@ -38,8 +38,9 @@ RUN npm run build:server
 # Final production stage
 FROM node:22-alpine
 # ffmpeg/ffprobe are used by the library-import flow nodes (probe + subtitle
-# extraction).
-RUN apk add --no-cache ffmpeg
+# extraction). sqlite is the CLI (`sqlite3`) for DB ops — the preview-env seed
+# does a `.backup` snapshot of series.sqlite, and it's handy for exec debugging.
+RUN apk add --no-cache ffmpeg sqlite
 WORKDIR /app
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build-frontend /app/dist ./dist

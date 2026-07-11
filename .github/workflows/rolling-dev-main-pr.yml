@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  actions: write   # re-run the promotion-checklist gate after refreshing the PR
 
 concurrency:
   group: rolling-dev-main-pr
@@ -26,7 +27,37 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The org disables write for the default GITHUB_TOKEN, so it can't *create*
+      # PRs (editing an existing one is fine). Mint a short-lived token from the
+      # promotion GitHub App instead, when it's configured. app-id lives in a repo
+      # *variable* (not secret) so it can gate this step — secrets can't be used in
+      # `if:`. When the App isn't set up yet, this step is skipped and the script
+      # falls back to GITHUB_TOKEN (which self-handles the create-denied case).
+      - name: Generate promotion App token
+        id: app-token
+        if: ${{ vars.PROMOTION_APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.PROMOTION_APP_ID }}
+          private-key: ${{ secrets.PROMOTION_APP_PRIVATE_KEY }}
+
       - name: Update rolling promotion PR
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         run: node scripts/update-promotion-pr.mjs
+
+      # Re-evaluate the checklist gate against the freshly-updated PR body. The
+      # gate normally re-runs on the PR `edited` event, but bot-token edits don't
+      # reliably cascade — dispatch it explicitly so the gate always reflects the
+      # current checklist (e.g. after the QA agent ticks items).
+      - name: Re-run promotion checklist gate
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          pr=$(gh pr list --base main --head dev --state open --json number --jq '.[0].number')
+          if [ -n "$pr" ]; then
+            echo "Re-running promotion checklist gate for #$pr"
+            gh workflow run promotion-checklist-gate.yml -f pr_number="$pr"
+          else
+            echo "No open promotion PR; nothing to gate."
+          fi
