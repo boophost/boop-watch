@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react'
-import { Routes, Route, Navigate, Outlet } from 'react-router-dom'
+import { Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './lib/AuthContext'
 import { APP_VERSION, APP_COMMIT } from './version'
 import Login from './pages/Login'
@@ -24,6 +24,7 @@ import PersonalLibrary from './pages/PersonalLibrary'
 
 function RequireAuth() {
   const { user, loading } = useAuth()
+  const location = useLocation()
 
   if (loading) {
     return (
@@ -33,12 +34,14 @@ function RequireAuth() {
     )
   }
 
-  if (!user) return <Navigate to="/login" replace />
+  // Stash where the user was headed so Login can send them back after sign-in.
+  if (!user) return <Navigate to="/login" replace state={{ from: location }} />
   return <Outlet />
 }
 
 function RequireAuthSignup() {
   const { user, loading } = useAuth()
+  const location = useLocation()
 
   if (loading) {
     return (
@@ -48,7 +51,7 @@ function RequireAuthSignup() {
     )
   }
 
-  if (!user) return <Navigate to="/signup" replace />
+  if (!user) return <Navigate to="/signup" replace state={{ from: location }} />
   return <Outlet />
 }
 

@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import type { AuthChangeEvent, Session, UserIdentity } from '@supabase/supabase-js'
 import { supabase } from './supabase'
 import { identifyUser, resetAnalytics, track } from './analytics'
+import { DEFAULT_AUTH_TARGET, safeInternalPath } from './returnPath'
 
 interface User {
   username: string
@@ -123,7 +124,7 @@ interface AuthContextType {
   adminReady: boolean
   login: (email: string, password: string) => Promise<void>
   signup: (email: string, password: string) => Promise<void>
-  loginWithProvider: (provider: 'google' | 'discord') => Promise<void>
+  loginWithProvider: (provider: 'google' | 'discord', next?: string) => Promise<void>
   linkProvider: (provider: 'google' | 'discord') => Promise<void>
   unlinkProvider: (identity: UserIdentity) => Promise<void>
   updateProfile: (patch: ProfilePatch) => Promise<void>
@@ -215,12 +216,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (error) throw error
   }
 
-  const loginWithProvider = async (provider: 'google' | 'discord') => {
+  // OAuth round-trips through the provider, so the return target can't ride in
+  // in-memory router state — it's encoded into the redirectTo URL as `?next=`
+  // and read back on the /profile landing (see Profile.tsx). The landing path
+  // stays /profile (a known-good, allowlisted redirect URL); only the query
+  // param varies. `next` is validated as an internal path to avoid smuggling an
+  // open redirect through the URL.
+  const loginWithProvider = async (provider: 'google' | 'discord', next?: string) => {
+    const target = safeInternalPath(next)
+    const redirectTo =
+      target && target !== DEFAULT_AUTH_TARGET
+        ? `${window.location.origin}${DEFAULT_AUTH_TARGET}?next=${encodeURIComponent(target)}`
+        : window.location.origin + DEFAULT_AUTH_TARGET
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
-      options: {
-        redirectTo: window.location.origin + '/profile'
-      }
+      options: { redirectTo },
     })
     if (error) throw error
   }

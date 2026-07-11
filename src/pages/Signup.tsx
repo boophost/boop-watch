@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { useAuth } from '@/lib/AuthContext'
 import { resetAnalytics, track } from '@/lib/analytics'
+import { returnTarget } from '@/lib/returnPath'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -11,6 +12,9 @@ import { PortalLayout } from '@/components/PortalLayout'
 export default function Signup() {
   const { signup, loginWithProvider } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  // Where a route guard bounced the user from (falls back to /profile).
+  const next = returnTarget(location)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -24,7 +28,7 @@ export default function Signup() {
       await signup(email, password)
       resetAnalytics()
       track('user_signed_up', { method: 'email', auth_state: 'authenticated' })
-      navigate('/profile', { replace: true })
+      navigate(next, { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Signup failed')
     } finally {
@@ -81,10 +85,10 @@ export default function Signup() {
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <Button variant="outline" type="button" onClick={() => loginWithProvider('google')} disabled={loading}>
+            <Button variant="outline" type="button" onClick={() => loginWithProvider('google', next)} disabled={loading}>
               Google
             </Button>
-            <Button variant="outline" type="button" onClick={() => loginWithProvider('discord')} disabled={loading}>
+            <Button variant="outline" type="button" onClick={() => loginWithProvider('discord', next)} disabled={loading}>
               Discord
             </Button>
           </div>
