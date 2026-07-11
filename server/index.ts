@@ -26,6 +26,7 @@ import { warmScope, ensureScope, getPlayableIds } from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
+import { createIssue, githubConfigured } from './github.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
 import { posthogUiHost } from './posthogConfig.js'
@@ -863,12 +864,25 @@ app.delete('/api/library/saved/:id', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
-// --- Suggestions (any logged-in user submits; admins review in /manage) ----
+// --- Suggestions ------------------------------------------------------------
+// Submitting opens a **GitHub issue** (via the App bot), not a DB row: prod and
+// staging each had their own suggestions table, so the boards drifted and
+// engineering work got mixed in with user requests. GitHub is now the single
+// tracker, and an issue links to the PR that fixes it. The GET/PATCH/DELETE
+// routes below still serve the pre-migration rows as a read-only archive.
 
 const SUGGESTION_MAX = 2000
+const TITLE_MAX = 72
 
-app.post('/api/suggestions', requireAuth, (req, res) => {
-  const body = String((req.body as { body?: unknown })?.body ?? '').trim()
+/** First line of the suggestion, trimmed to a sane issue title. */
+function issueTitle(body: string): string {
+  const first = body.split(/\r?\n/, 1)[0].trim() || body.trim()
+  return first.length > TITLE_MAX ? `${first.slice(0, TITLE_MAX - 1)}…` : first
+}
+
+app.post('/api/suggestions', requireAuth, async (req, res) => {
+  const payload = req.body as { body?: unknown, page?: unknown, replayUrl?: unknown } | undefined
+  const body = String(payload?.body ?? '').trim()
   if (!body) {
     res.status(400).json({ error: 'Suggestion cannot be empty' })
     return
@@ -877,12 +891,46 @@ app.post('/api/suggestions', requireAuth, (req, res) => {
     res.status(400).json({ error: `Suggestion is too long (max ${SUGGESTION_MAX} characters)` })
     return
   }
-  const row = seriesDb.addSuggestion(
-    res.locals.username as string,
-    (res.locals.email as string) || null,
-    body,
-  )
-  res.status(201).json({ suggestion: row })
+  if (!githubConfigured()) {
+    // Never pretend a suggestion was received when it wasn't.
+    res.status(503).json({ error: 'Suggestions are temporarily unavailable' })
+    return
+  }
+
+  // Context that makes a report actionable — page + session replay. Deliberately
+  // no email: issues shouldn't carry user PII.
+  const page = typeof payload?.page === 'string' ? payload.page.slice(0, 300) : ''
+  const replayUrl = typeof payload?.replayUrl === 'string' && /^https?:\/\//.test(payload.replayUrl)
+    ? payload.replayUrl.slice(0, 500)
+    : ''
+  // The display name is user-chosen, and it lands in a markdown document. Strip
+  // the characters that would let it break out of the attribution line and forge
+  // extra context (newlines, emphasis, links, @-mentions).
+  const who = String(res.locals.displayName || 'a user')
+    .replace(/[\r\n`*_[\]()@<>#|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60) || 'a user'
+
+  const context = [
+    '',
+    '---',
+    `_From **${who}** via the in-app suggestion button._`,
+    page ? `_Page:_ \`${page}\`` : '',
+    replayUrl ? `_[Session replay](${replayUrl})_` : '',
+  ].filter(Boolean).join('\n')
+
+  try {
+    const issue = await createIssue({
+      title: issueTitle(body),
+      body: `${body}\n${context}\n`,
+      labels: ['suggestion'],
+    })
+    res.status(201).json({ issue })
+  } catch (err) {
+    console.error('suggestion -> GitHub issue failed:', err)
+    res.status(502).json({ error: 'Could not file your suggestion. Please try again.' })
+  }
 })
 
 app.get('/api/suggestions', requireAuth, requireAdmin, (_req, res) => {

@@ -1,16 +1,40 @@
 # boop-watch MCP servers / CLIs
 
-Local drivers for the admin REST API so `/manage` surfaces can be operated from
-Claude Code (or a shell) instead of clicking through the UI. There are two:
+Local drivers so the project's surfaces can be operated from Claude Code (or a
+shell) instead of clicking through a UI. There are three:
 
 - **`boop-flows`** (`flows-server.mjs`) — author, inspect, and run flows.
-- **`boop-suggestions`** (`suggestions-server.mjs`) — triage portal user
-  suggestions: move them across the kanban, write titles/notes, mark duplicates,
-  and bundle related ones into epics.
+- **`boop-issues`** (`issues-server.mjs`) — the **tracker**: list/file/label/close
+  GitHub issues across `boophost/boop-watch` *and* `boophost/link`, and add them
+  to the org Project board. This is where engineering work and user suggestions
+  now live.
+- **`boop-suggestions`** (`suggestions-server.mjs`) — the **pre-migration archive**
+  of the SQLite suggestions board. Kept read-capable for history; new suggestions
+  open GitHub issues instead, so reach for `boop-issues` for anything current.
 
-Both are **not** part of the app image — they run on your workstation and talk to
-a deployment's REST API, and they **share the same auth + `mcp/flows.env`**
-config (see Setup below).
+`boop-flows` and `boop-suggestions` are **not** part of the app image — they run on
+your workstation and talk to a deployment's REST API, and they **share the same
+auth + `mcp/flows.env`** config (see Setup below). `boop-issues` needs no
+`flows.env`: it shells out to `gh`, which already holds credentials (the Project
+tools additionally need `gh auth refresh -s project`).
+
+# Issues MCP server / CLI
+
+```bash
+node mcp/issues-server.mjs list                          # open issues on boop-watch
+node mcp/issues-server.mjs list --label suggestion       # just the user suggestions
+node mcp/issues-server.mjs list --repo boophost/link     # platform work
+node mcp/issues-server.mjs list all                      # include closed
+node mcp/issues-server.mjs get 199                       # body + labels + comments
+node mcp/issues-server.mjs create "Title" "Body" bug p1  # trailing args are labels
+node mcp/issues-server.mjs comment 199 "…"
+node mcp/issues-server.mjs label 199 p0 p1               # add p0, remove p1
+node mcp/issues-server.mjs close 199 "fixed in #204"
+node mcp/issues-server.mjs project-add 199              # onto the org board
+```
+
+Override the defaults with `ISSUES_REPO` / `ISSUES_PROJECT_OWNER` /
+`ISSUES_PROJECT_NUMBER`.
 
 # Flow MCP server / CLI
 

@@ -283,12 +283,24 @@ export async function deleteComment(id: number): Promise<void> {
   }
 }
 
-export async function submitSuggestion(body: string): Promise<void> {
+/** The GitHub issue a suggestion opened. */
+export interface SuggestionIssue {
+  number: number
+  url: string
+}
+
+/** Submitting opens a GitHub issue (server-side, via the App bot). `page` and
+ * `replayUrl` ride along so the issue is actionable without a follow-up. */
+export async function submitSuggestion(
+  body: string,
+  context?: { page?: string, replayUrl?: string },
+): Promise<SuggestionIssue> {
   const r = await fetchAuth('/api/suggestions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body }),
+    body: JSON.stringify({ body, ...context }),
   })
-  const data = await parseAuthJson<{ error?: string }>(r)
-  if (!r.ok) throw new Error(data.error || 'Failed to submit suggestion')
+  const data = await parseAuthJson<{ issue?: SuggestionIssue, error?: string }>(r)
+  if (!r.ok || !data.issue) throw new Error(data.error || 'Failed to submit suggestion')
+  return data.issue
 }
