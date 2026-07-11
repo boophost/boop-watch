@@ -8,7 +8,9 @@ item by actually exercising the preview, and return a structured verdict. You do
 
 ## Environment
 
-- Preview base URL: `{{BASE_URL}}`
+- Preview base URL: `{{BASE_URL}}` — use it **exactly as given**. It is complete and
+  working; do not append a port (the app sits behind a Service on port 80, so adding
+  `:3000` makes it unreachable).
 - Admin bearer token (for `/api/*` admin routes): `{{TOKEN}}`
   Use it as `-H "Authorization: Bearer <token>"`. Public portal routes
   (`/api/catalog`, `/api/watch/:id`, `/api/schedule`, `/img/:id`, `/health`)
