@@ -2725,14 +2725,23 @@ const WORK_DIR = () =>
 
 // Boot guard: the library-import flow writes GB-sized intermediates, so scratch
 // must never land on the small node PVC (see WORK_DIR above — that's what took
-// prod down on 2026-07-11). Stat the volume WORK_DIR resolves to and throw if
-// its total capacity is below WORK_MIN_GIB (default 10Gi), which cleanly
-// separates the 1-2Gi node PVC from the media NFS. Only call this where flows
-// actually execute — a management-only environment (SCHEDULER_ENABLED=false)
-// never writes scratch, so its small PVC is fine.
+// prod down on 2026-07-11). Only call this where flows actually execute — a
+// management-only environment (SCHEDULER_ENABLED=false) never writes scratch,
+// so its small PVC is fine.
+//
+// Primary check is filesystem *identity*, not raw size: scratch must live on the
+// same filesystem as LIBRARY_DIR (the big media NFS). That's also what lets
+// sink.library-import hardlink the finished file into the library instead of
+// copying it across filesystems. A raw capacity floor can't do this job —
+// local-path PVCs don't enforce their requested size, so statfs on the node PVC
+// reports the *whole node disk* (observed: 38Gi for a nominally 2Gi PVC), which
+// a size threshold can't tell apart from the NFS. The device id can: if WORK_DIR
+// is forgotten it falls back to DATA_DIR (the node PVC), a different device from
+// the library NFS, and we refuse to start. When there's no LIBRARY_DIR to
+// compare against, fall back to a best-effort capacity floor (WORK_MIN_GIB).
 export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB ?? 10)): void {
   const workDir = WORK_DIR()
-  // statfs needs an existing path; walk up to the nearest ancestor that exists
+  // stat needs an existing path; walk up to the nearest ancestor that exists
   // (the `work` subdir is created lazily by the nodes on first write).
   let probe = path.resolve(workDir)
   while (!fs.existsSync(probe)) {
@@ -2740,6 +2749,32 @@ export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB
     if (parent === probe) break // reached the filesystem root
     probe = parent
   }
+
+  // Primary: scratch and the media library must share a filesystem.
+  const libDir = LIBRARY_DIR()
+  if (libDir && fs.existsSync(libDir)) {
+    let workDev: number | undefined
+    let libDev: number | undefined
+    try { workDev = fs.statSync(probe).dev } catch { /* fall through to floor */ }
+    try { libDev = fs.statSync(libDir).dev } catch { /* fall through to floor */ }
+    if (workDev != null && libDev != null) {
+      if (workDev !== libDev) {
+        const src = process.env.WORK_DIR ? 'WORK_DIR' : process.env.DATA_DIR ? 'DATA_DIR' : 'the default'
+        throw new Error(
+          `flow scratch dir "${workDir}" (from ${src}) is on a different filesystem than the media library ` +
+          `"${libDir}". Scratch has fallen back to the small node PVC instead of the media NFS; the ` +
+          `library-import flow writes GB-sized intermediates (trim-audio-tracks alone emits ~3.5GB per ` +
+          `episode) and will fill the node disk and evict the pod. Set WORK_DIR to a path on the same ` +
+          `filesystem as LIBRARY_DIR (the media NFS), or set SCHEDULER_ENABLED=false for a management-only ` +
+          `environment.`,
+        )
+      }
+      console.log(`[work-guard] scratch dir "${workDir}" shares the media filesystem with "${libDir}" — ok`)
+      return
+    }
+  }
+
+  // Fallback: no LIBRARY_DIR to compare against — best-effort capacity floor.
   let totalGiB: number
   try {
     const st = fs.statfsSync(probe)
