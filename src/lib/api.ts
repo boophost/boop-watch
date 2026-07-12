@@ -62,7 +62,7 @@ export interface RecentItem {
 // Scope-cache metadata for a playable id — enough to render a history card.
 export interface ItemSummary {
   id: string
-  type: 'episode' | 'movie'
+  type: 'episode' | 'movie' | 'series'
   seriesId: string | null
   name: string
   season: number | null
@@ -97,6 +97,8 @@ export interface SeasonInfo {
   /** Full display name from Jellyfin (e.g. "Season 2", "Final Season"). */
   name: string
   episodes: number
+  /** This season's own premiere year, distinct from the series' overall year. */
+  year: number | null
 }
 export interface SeriesDetail {
   type: 'series'
@@ -129,7 +131,7 @@ export interface MovieDetail {
 export type TitleDetail = SeriesDetail | MovieDetail
 
 export interface AudioTrack { index: number; lang: string; label: string; detail: string; def: boolean }
-export interface SubTrack { index: number; group: string }
+export interface SubTrack { index: number; group: string; sel: string }
 export interface QualityPreset { key: string; label: string; h: number; vb: number }
 export interface WatchEpisode { id: string; num: string; name: string; current: boolean }
 export interface Segment { type: 'intro' | 'outro'; start: number; end: number }

@@ -2,20 +2,28 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { PortalLayout } from '@/components/PortalLayout'
 import { Icon } from '@/components/Icon'
-import { getSavedAnimes, loadCatalog, getWatch, imgUrl, type CatalogItem, type WatchData } from '@/lib/api'
+import { getSavedAnimes, getItemSummaries, imgUrl, type ItemSummary } from '@/lib/api'
 import { supabase } from '@/lib/supabase'
 
 export default function PersonalLibrary() {
-  const [savedIds, setSavedIds] = useState<string[]>([])
+  const [savedItems, setSavedItems] = useState<ItemSummary[]>([])
   const [historyItems, setHistoryItems] = useState<{ id: string; position: number; duration: number; watched: boolean }[]>([])
   const [historyPage, setHistoryPage] = useState(0)
   const [historyTotal, setHistoryTotal] = useState(0)
-  const [catalog, setCatalog] = useState<CatalogItem[]>([])
-  const [historyDetails, setHistoryDetails] = useState<Record<string, WatchData>>({})
-  
+  const [historyDetails, setHistoryDetails] = useState<Record<string, ItemSummary>>({})
+
+  // Resolve saved-title ids to name/type in one batch call rather than pulling
+  // the whole catalog and filtering it client-side.
   useEffect(() => {
-    loadCatalog().then(c => setCatalog(c.items)).catch(console.error)
-    getSavedAnimes().then(r => setSavedIds(r.saved.map(s => s.item_id))).catch(console.error)
+    getSavedAnimes()
+      .then(async r => {
+        const ids = r.saved.map(s => s.item_id)
+        if (!ids.length) { setSavedItems([]); return }
+        const { items } = await getItemSummaries(ids)
+        const byId = new Map(items.map(s => [s.id, s]))
+        setSavedItems(ids.map(id => byId.get(id)).filter((s): s is ItemSummary => !!s))
+      })
+      .catch(console.error)
   }, [])
 
   useEffect(() => {
@@ -34,14 +42,17 @@ export default function PersonalLibrary() {
             watched: r.watched
           }))
           setHistoryItems(items)
-          items.forEach(it => {
-            getWatch(it.id).then(wd => setHistoryDetails(prev => ({ ...prev, [it.id]: wd }))).catch(() => {})
-          })
+          // One batch metadata call for the page's rows instead of an N+1
+          // getWatch() fan-out (each of which spun up a transcode probe).
+          const ids = items.map(it => it.id)
+          if (ids.length) {
+            getItemSummaries(ids)
+              .then(({ items: sums }) => setHistoryDetails(Object.fromEntries(sums.map(s => [s.id, s]))))
+              .catch(() => {})
+          }
         }
       })
   }, [historyPage])
-
-  const savedItems = catalog.filter(c => savedIds.includes(c.id))
 
   return (
     <PortalLayout>
@@ -57,9 +68,9 @@ export default function PersonalLibrary() {
           ) : (
             <div className="grid">
               {savedItems.map(it => (
-                <Link key={it.id} className="poster-card" to={it.type === 'Series' ? `/series/${it.id}` : `/movie/${it.id}`}>
+                <Link key={it.id} className="poster-card" to={it.type === 'series' ? `/series/${it.id}` : `/movie/${it.id}`}>
                   <img src={imgUrl(it.id)} loading="lazy" alt="" onError={(e) => e.currentTarget.remove()} />
-                  <span className="type-tag"><Icon name={it.type === 'Series' ? 'tv' : 'film'} size={11} />{it.type === 'Series' ? 'Series' : 'Movie'}</span>
+                  <span className="type-tag"><Icon name={it.type === 'series' ? 'tv' : 'film'} size={11} />{it.type === 'series' ? 'Series' : 'Movie'}</span>
                   <div className="poster-overlay">
                     <div className="poster-title">{it.name}</div>
                   </div>
@@ -96,13 +107,13 @@ export default function PersonalLibrary() {
             <div className="grid">
               {historyItems.filter(it => it.watched || (it.duration > 0 && (it.position / it.duration) > 0.05)).map(it => {
                 const data = historyDetails[it.id]
-                const title = data ? (data.isEpisode ? data.back.label : data.title) : 'Loading...'
-                const epText = data && data.isEpisode ? (data.epNum || 'Episode') : 'Movie'
+                const title = data ? data.name : 'Loading...'
+                const epText = data ? (data.type === 'episode' ? (data.epLabel || 'Episode') : 'Movie') : ''
                 const pct = it.watched ? 100 : (it.duration > 0 ? Math.min(100, (it.position / it.duration) * 100) : 0)
 
                 return (
                   <Link key={it.id} className="poster-card" to={`/watch/${it.id}`}>
-                    <img src={imgUrl(it.id)} loading="lazy" alt="" onError={(e) => e.currentTarget.remove()} />
+                    <img src={imgUrl(data?.seriesId || it.id)} loading="lazy" alt="" onError={(e) => e.currentTarget.remove()} />
                     <span className="type-tag"><Icon name="play" size={11} />Watched</span>
                     <div className="poster-overlay">
                       <div className="poster-title">{title}</div>

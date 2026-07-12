@@ -58,7 +58,7 @@
   &.shell[data-collapsed="true"] .snav { width: 64px; }
   & .snav-inner { position: sticky; top: 56px; height: calc(100vh - 56px); display: flex; flex-direction: column;
     gap: 2px; padding: 14px 12px; overflow: hidden; }
-  & .snav-link { display: flex; align-items: center; gap: 11px; height: 38px; padding: 0 11px;
+  & .snav-link { display: flex; align-items: center; gap: 11px; width: 100%; height: 38px; padding: 0 11px;
     border-radius: 9px; border: none; background: transparent; cursor: pointer;
     font: 500 13.5px var(--font-sans); color: var(--fg-muted); white-space: nowrap;
     transition: background .14s ease, color .14s ease; }
@@ -657,6 +657,16 @@
     background: linear-gradient(100deg, transparent 35%, oklch(1 0 0 / 5%) 50%, transparent 65%);
     background-size: 200% 100%; animation: skel-shimmer 1.6s linear infinite; }
 
+  /* Stall/error overlay: covers the spinning player when the transcode never
+     produces a playable stream, giving the viewer a visible retry instead of an
+     endless spinner. Sits above Vidstack's own UI inside the .vid box. */
+  & .vid-error { position: absolute; inset: 0; z-index: 50; display: flex;
+    flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    padding: 24px; text-align: center; background: oklch(0 0 0 / 78%);
+    backdrop-filter: blur(2px); color: var(--fg); }
+  & .vid-error svg { color: var(--fg-muted); }
+  & .vid-error-msg { margin: 0; max-width: 32ch; color: var(--fg-muted); font-size: 14px; }
+
   /* Skeleton fills for the control bar + episode list while /api/watch loads. */
   & .skel-pill { display: inline-block; height: 38px; width: 96px; border-radius: 9px;
     background: var(--bg-elev-2); border: 1px solid var(--border);
@@ -967,6 +977,42 @@ body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 .kagura .eprow.watched .epprog,
 .player .eprow.watched .epprog {
   background: var(--fg-subtle);
+}
+
+/* Mark-as-watched toggle — a check button inside the episode-row link. Faint by
+ * default, brightens on row hover, and shows the accent when the episode is
+ * marked watched. It sits above the row's watched-dim (which lowers row opacity)
+ * so its state stays legible. */
+.kagura .eprow .epwatch,
+.player .eprow .epwatch {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--fg-subtle);
+  opacity: 0.35;
+  transition: background .14s, color .14s, opacity .14s;
+}
+.kagura .eprow:hover .epwatch,
+.player .eprow:hover .epwatch,
+.kagura .eprow .epwatch.on,
+.player .eprow .epwatch.on {
+  opacity: 1;
+}
+.kagura .eprow .epwatch:hover,
+.player .eprow .epwatch:hover {
+  background: var(--accent-soft);
+  color: var(--accent-soft-fg);
+}
+.kagura .eprow .epwatch.on,
+.player .eprow .epwatch.on {
+  color: var(--accent);
 }
 /* Status lives outside the 30px play-icon .go slot so "airs in …" isn't clipped. */
 .kagura .eprow .ep-status-slot,

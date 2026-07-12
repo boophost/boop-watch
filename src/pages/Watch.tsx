@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   MediaPlayer, MediaProvider, canFullscreen, isHLSProvider, isVideoProvider,
@@ -10,6 +10,7 @@ import { Icon, type IconName } from '@/components/Icon'
 import { Comments } from '@/components/Comments'
 import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { SearchBar } from '@/components/SearchBar'
+import { WatchedToggle } from '@/components/WatchedToggle'
 import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
 import { getWatch, getThemes, type Segment, type WatchData, type ThemeSong } from '@/lib/api'
@@ -99,10 +100,27 @@ function loadScript(src: string): Promise<void> {
 // which the pendingSeek restore already handles.
 const BURN_IN_SUBS = !canFullscreen()
 
+// How long to wait for the player to produce a playable stream (initial start or
+// after a mid-playback buffer stall) before giving up and offering a retry. Kept
+// generous so a legitimately slow-but-working transcode start isn't cut off.
+const STALL_TIMEOUT_MS = 20000
+
 const PREF_KEY = 'bw:pref'
-type Pref = { audioLang?: string; quality?: string; subGroup?: string }
+// Audio/quality persist by stable identifiers (lang / preset key) globally.
+// Subtitles persist per series+season (`subs` map: scope -> track selector, or
+// the sentinel 'off'), because a sub choice is meaningful within a season but the
+// old single global release-group string reset on every episode whose track
+// lacked a bracket group. See `subScope` / `SubTrack.sel`.
+type Pref = { audioLang?: string; quality?: string; subs?: Record<string, string> }
 const readPref = (): Pref => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') } catch { return {} } }
 const savePref = (patch: Pref) => { try { localStorage.setItem(PREF_KEY, JSON.stringify({ ...readPref(), ...patch })) } catch { /* ignore */ } }
+
+// The scope a subtitle choice is remembered under: a series' season for episodes
+// (so it carries across every episode of that season), else the item id.
+const subScope = (d: WatchData): string => (d.seriesId ? `${d.seriesId}:${d.season ?? ''}` : d.id)
+// Remember (or clear) the sub selection for this scope, merging the scope map.
+const rememberSub = (d: WatchData, sel: string) =>
+  savePref({ subs: { ...readPref().subs, [subScope(d)]: sel } })
 
 export default function Watch() {
   const { id = '' } = useParams()
@@ -133,6 +151,16 @@ export default function Watch() {
   const [showNext, setShowNext] = useState(false)
   // Media duration, needed to place the segment marks on the timeline.
   const [duration, setDuration] = useState(0)
+
+  // Playback watchdog: the transcode behind /api/play can be slow to produce a
+  // playable stream (ffmpeg spin-up) or stall mid-buffer, and hls.js just keeps
+  // spinning with no error. Detect "no playable data within STALL_TIMEOUT_MS"
+  // and surface a retry instead of an infinite spinner. '' = healthy.
+  const [playbackFailed, setPlaybackFailed] = useState<'' | 'stall' | 'error'>('')
+  // Bumped by the retry button to force Vidstack to reload the transcode (the
+  // server ignores the extra query param; it only changes the source URL).
+  const [reloadNonce, setReloadNonce] = useState(0)
+  const stallTimer = useRef<number | null>(null)
 
   // selections
   const [audioIndex, setAudioIndex] = useState<string | null>(null)
@@ -198,9 +226,13 @@ export default function Watch() {
     }
     setAudioIndex(audio)
     setQKey(pref.quality && data.quality.some((q) => q.key === pref.quality) ? pref.quality : 'auto')
+    // Restore only on an exact selector match; leave subs off otherwise (rather
+    // than guessing subs[0], which landed users on the wrong track and read as a
+    // reset). 'off' and no-saved-choice both mean off.
     let sub = ''
-    if (pref.subGroup && pref.subGroup !== 'off' && data.subs.length) {
-      const m = data.subs.find((s) => s.group === pref.subGroup) || data.subs[0]
+    const savedSel = pref.subs?.[subScope(data)]
+    if (savedSel && savedSel !== 'off') {
+      const m = data.subs.find((s) => s.sel === savedSel)
       if (m) sub = String(m.index)
     }
     setSubIndex(sub)
@@ -232,9 +264,43 @@ export default function Watch() {
     if (quality.h) params.set('h', String(quality.h))
     if (quality.vb) params.set('vb', String(quality.vb))
     if (BURN_IN_SUBS && subIndex !== '') params.set('sub', subIndex)
+    if (reloadNonce) params.set('_r', String(reloadNonce))
     const qs = params.toString()
     return `/api/play/${encodeURIComponent(data.id)}/master.m3u8${qs ? `?${qs}` : ''}`
-  }, [data, selReady, audioIndex, quality, subIndex])
+  }, [data, selReady, audioIndex, quality, subIndex, reloadNonce])
+
+  // Arm/disarm the stall watchdog. active=true (re)starts the countdown; the
+  // player disarms it once real playback starts and re-arms it whenever it drops
+  // back into buffering, so a stall at any point surfaces the retry.
+  const setWatchdog = useCallback((active: boolean) => {
+    if (stallTimer.current != null) { clearTimeout(stallTimer.current); stallTimer.current = null }
+    if (active) {
+      stallTimer.current = window.setTimeout(() => {
+        stallTimer.current = null
+        setPlaybackFailed((s) => (s ? s : 'stall'))
+      }, STALL_TIMEOUT_MS)
+    }
+  }, [])
+
+  // A truthy source means the player is (re)loading a transcode — start the
+  // watchdog and clear any prior failure. Disarms on source change/unmount.
+  useEffect(() => {
+    if (!src) return
+    setPlaybackFailed('')
+    setWatchdog(true)
+    return () => setWatchdog(false)
+  }, [src, setWatchdog])
+
+  // Surface the failure in analytics so slow/stuck starts show up as a gap
+  // between page loads and real playback. Fires once per transition into a
+  // failed state (src changes reset it to '').
+  useEffect(() => {
+    if (!playbackFailed || !data) return
+    track(playbackFailed === 'error' ? 'playback_error' : 'playback_stalled', {
+      item_id: data.id,
+      auth_state: user ? 'authenticated' : 'anonymous',
+    })
+  }, [playbackFailed, data, user])
 
   // Use our bundled hls.js (not Vidstack's CDN default) and grab the real <video>
   // element so JASSUB can render the ASS overlay onto it.
@@ -251,6 +317,9 @@ export default function Watch() {
   // First load seeks the saved resume point; later loads (audio/quality switch)
   // restore the position + play-state captured before the source changed.
   const onCanPlay = () => {
+    // Playable data arrived — the transcode is alive; stand the watchdog down.
+    setWatchdog(false)
+    setPlaybackFailed('')
     const p = playerRef.current
     if (!p || !data) return
     if (Number.isFinite(p.duration) && p.duration > 0) setDuration((d) => d || p.duration)
@@ -342,8 +411,17 @@ export default function Watch() {
     pendingSeek.current = p ? { time: p.currentTime, play: !p.paused } : null
   }
 
+  // Retry after a stall/error: reload the transcode from scratch, restoring the
+  // current position (captureSeek) so a mid-playback stall resumes in place.
+  const retryPlayback = () => {
+    captureSeek()
+    setPlaybackFailed('')
+    setReloadNonce((n) => n + 1)
+  }
+
   // Auto-advance when the episode ends.
   const onEnded = () => {
+    setWatchdog(false)
     if (!data) return
     void markComplete(data.nextId)
   }
@@ -614,7 +692,14 @@ export default function Watch() {
                 onCanPlay={onCanPlay}
                 onTimeUpdate={onTimeUpdate}
                 onEnded={onEnded}
-                onPlay={() => {
+                onPlay={() => presenceRef.current(false)}
+                onPlaying={() => {
+                  // Real playback (frames flowing), not just play intent — stand
+                  // the watchdog down and count this as a true start. Firing
+                  // playback_started here (not on onPlay) means a stalled load
+                  // that never plays shows up as a page-load with no start.
+                  setWatchdog(false)
+                  setPlaybackFailed('')
                   presenceRef.current(false)
                   if (!playbackTracked.current && data) {
                     playbackTracked.current = true
@@ -624,7 +709,9 @@ export default function Watch() {
                     })
                   }
                 }}
-                onPause={() => presenceRef.current(true)}
+                onWaiting={() => setWatchdog(true)}
+                onPause={() => { setWatchdog(false); presenceRef.current(true) }}
+                onError={() => setPlaybackFailed((s) => (s ? s : 'error'))}
               >
                 <MediaProvider />
                 <DefaultVideoLayout icons={defaultLayoutIcons} />
@@ -641,6 +728,19 @@ export default function Watch() {
                   )}
                 </div>
               </MediaPlayer>
+            )}
+            {playbackFailed && (
+              <div className="vid-error" role="alert">
+                <Icon name="alert" size={30} />
+                <p className="vid-error-msg">
+                  {playbackFailed === 'error'
+                    ? 'Something went wrong playing this episode.'
+                    : 'This episode is taking too long to start.'}
+                </p>
+                <button type="button" className="btn btn-primary" onClick={retryPlayback}>
+                  Try again
+                </button>
+              </div>
             )}
           </div>
           <div className="pbar">
@@ -663,11 +763,11 @@ export default function Watch() {
             {data.subs.length > 0 && (
               <Menu kind="subs" icon="captions" title="Subtitles" label={`Subtitles: ${subLabel}`}>
                 <PopItem active={subIndex === ''} label="Off"
-                  onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(''); savePref({ subGroup: 'off' }) }} />
+                  onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(''); rememberSub(data, 'off') }} />
                 {data.subs.map((s, i) => (
                   <PopItem key={s.index} active={String(s.index) === subIndex} label="English"
                     detail={s.group || (data.subs.length > 1 ? `Track ${i + 1}` : 'Full')}
-                    onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(String(s.index)); savePref({ subGroup: s.group || 'on' }) }} />
+                    onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(String(s.index)); rememberSub(data, s.sel) }} />
                 ))}
               </Menu>
             )}
@@ -706,6 +806,11 @@ export default function Watch() {
                   >
                     <span className="epn">{ep.num}</span>
                     <span className="ept">{ep.name}</span>
+                    <WatchedToggle
+                      id={ep.id}
+                      watched={watched}
+                      onChange={(eid, prog) => setProgMap((m) => ({ ...m, [eid]: prog }))}
+                    />
                     {ep.current && <span className="epnow"><Icon name="play" size={12} fill="currentColor" /></span>}
                     {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
                   </Link>

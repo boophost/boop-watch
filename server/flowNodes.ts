@@ -8,7 +8,13 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
-import { listSeries, upsertSeriesMetadata, recordLibraryFile, forgetLibraryFile } from './db.js'
+import {
+  listSeries,
+  upsertSeriesMetadata,
+  recordLibraryFile,
+  forgetLibraryFile,
+  importedTorrentHashes,
+} from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
@@ -863,6 +869,9 @@ interface QbitInfo {
   size: number
   save_path?: string
   content_path?: string
+  // qBittorrent unix seconds; completion is -1/0 until the torrent finishes.
+  added_on?: number
+  completion_on?: number
 }
 
 const qbittorrentSource: NodeImpl = {
@@ -880,6 +889,8 @@ const qbittorrentSource: NodeImpl = {
       { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
       { key: 'category', label: 'Category', kind: 'text', default: 'anime', help: 'Empty = all categories.' },
       { key: 'completedOnly', label: 'Completed only', kind: 'boolean', default: true, help: 'Only emit torrents that finished downloading (ready to import).' },
+      { key: 'skipImported', label: 'Skip already imported', kind: 'boolean', default: true, help: 'Drop torrents whose hash is already in the library ledger before the expensive probe/mux nodes, so a fresh download is not starved behind re-processing the backlog. Turn off to force a re-import.' },
+      { key: 'newestFirst', label: 'Newest first', kind: 'boolean', default: true, help: 'Emit the most recently completed torrents first, so a just-finished download is processed ahead of older backlog work. Also exposes torrent_completed_on / torrent_added_on for filter.sort.' },
       { key: 'pathFrom', label: 'Download path (qBit)', kind: 'text', default: '', help: 'Path prefix as qBittorrent sees it, e.g. /downloads.' },
       { key: 'pathTo', label: 'Download path (pod)', kind: 'text', default: '', help: 'Where that same prefix is mounted here, e.g. /downloads. Both empty = no rewrite.' },
     ],
@@ -888,6 +899,8 @@ const qbittorrentSource: NodeImpl = {
     const { base, user, pass } = qbitCreds(config)
     const category = str(config, 'category', 'anime')
     const completedOnly = bool(config, 'completedOnly', true)
+    const skipImported = bool(config, 'skipImported', true)
+    const newestFirst = bool(config, 'newestFirst', true)
     const from = str(config, 'pathFrom', '')
     const to = str(config, 'pathTo', '')
 
@@ -900,7 +913,31 @@ const qbittorrentSource: NodeImpl = {
       signal: AbortSignal.timeout(15_000),
     })
     if (!res.ok) throw new Error(`qBittorrent list failed (${res.status})`)
-    const torrents = (await res.json()) as QbitInfo[]
+    let torrents = (await res.json()) as QbitInfo[]
+
+    // Newest-completed first (fall back to when it was added) so a
+    // just-finished download is processed ahead of the older backlog rather
+    // than starved behind it.
+    if (newestFirst) {
+      torrents = [...torrents].sort((a, b) => {
+        const ac = a.completion_on ?? 0
+        const bc = b.completion_on ?? 0
+        if (bc !== ac) return bc - ac
+        return (b.added_on ?? 0) - (a.added_on ?? 0)
+      })
+    }
+
+    // Drop torrents already in the library ledger before they reach the
+    // expensive probe/mux nodes. Only exact re-imports (same torrent hash) are
+    // dropped — a quality upgrade is a *new* torrent (new hash, not yet in the
+    // ledger), so it still runs.
+    let skipped = 0
+    if (skipImported) {
+      const imported = importedTorrentHashes()
+      const before = torrents.length
+      torrents = torrents.filter((t) => !imported.has(t.hash))
+      skipped = before - torrents.length
+    }
 
     const items = torrents.map((t): FlowItem => {
       const contentPath = remapPath(String(t.content_path ?? ''), from, to)
@@ -914,6 +951,8 @@ const qbittorrentSource: NodeImpl = {
         torrent_category: t.category,
         torrent_tags: t.tags ?? '',
         torrent_size: t.size ?? null,
+        torrent_added_on: t.added_on ?? null,
+        torrent_completed_on: t.completion_on ?? null,
         save_path: remapPath(String(t.save_path ?? ''), from, to),
         content_path: contentPath,
         // `ep:` from the tag is what we asked for; the name is only a guess.
@@ -922,7 +961,10 @@ const qbittorrentSource: NodeImpl = {
         ...parseTorrentTags(t.tags),
       }
     })
-    ctx.notes.push(`${items.length} torrent(s)${completedOnly ? ' (completed)' : ''}${category ? ` in "${category}"` : ''}`)
+    ctx.notes.push(
+      `${items.length} torrent(s)${completedOnly ? ' (completed)' : ''}${category ? ` in "${category}"` : ''}` +
+        (skipped ? `, skipped ${skipped} already imported` : ''),
+    )
     return { items }
   },
 }
@@ -2715,8 +2757,88 @@ const VIDEO_EXTS_DEFAULT = 'mkv,mp4,avi,m4v,mov'
 // the node's disk and got the pod evicted (prod outage; staging nearly repeated
 // it). Set WORK_DIR to a path on the big media NFS (e.g. /data/.boopwork) so
 // scratch never lands on node disk. `.../work` is appended by the nodes.
+//
+// Safe by construction: `assertScratchVolumeSafe()` (called at boot on any
+// environment that *runs* flows) refuses to start when this resolves to a
+// volume below WORK_MIN_GIB — so a forgotten WORK_DIR fails loudly at deploy
+// instead of silently filling the node PVC and evicting the pod at 3am.
 const WORK_DIR = () =>
   process.env.WORK_DIR ?? process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
+
+// Boot guard: the library-import flow writes GB-sized intermediates, so scratch
+// must never land on the small node PVC (see WORK_DIR above — that's what took
+// prod down on 2026-07-11). Only call this where flows actually execute — a
+// management-only environment (SCHEDULER_ENABLED=false) never writes scratch,
+// so its small PVC is fine.
+//
+// Primary check is filesystem *identity*, not raw size: scratch must live on the
+// same filesystem as LIBRARY_DIR (the big media NFS). That's also what lets
+// sink.library-import hardlink the finished file into the library instead of
+// copying it across filesystems. A raw capacity floor can't do this job —
+// local-path PVCs don't enforce their requested size, so statfs on the node PVC
+// reports the *whole node disk* (observed: 38Gi for a nominally 2Gi PVC), which
+// a size threshold can't tell apart from the NFS. The device id can: if WORK_DIR
+// is forgotten it falls back to DATA_DIR (the node PVC), a different device from
+// the library NFS, and we refuse to start. When there's no LIBRARY_DIR to
+// compare against, fall back to a best-effort capacity floor (WORK_MIN_GIB).
+export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB ?? 10)): void {
+  const workDir = WORK_DIR()
+  // stat needs an existing path; walk up to the nearest ancestor that exists
+  // (the `work` subdir is created lazily by the nodes on first write).
+  let probe = path.resolve(workDir)
+  while (!fs.existsSync(probe)) {
+    const parent = path.dirname(probe)
+    if (parent === probe) break // reached the filesystem root
+    probe = parent
+  }
+
+  // Primary: scratch and the media library must share a filesystem.
+  const libDir = LIBRARY_DIR()
+  if (libDir && fs.existsSync(libDir)) {
+    let workDev: number | undefined
+    let libDev: number | undefined
+    try { workDev = fs.statSync(probe).dev } catch { /* fall through to floor */ }
+    try { libDev = fs.statSync(libDir).dev } catch { /* fall through to floor */ }
+    if (workDev != null && libDev != null) {
+      if (workDev !== libDev) {
+        const src = process.env.WORK_DIR ? 'WORK_DIR' : process.env.DATA_DIR ? 'DATA_DIR' : 'the default'
+        throw new Error(
+          `flow scratch dir "${workDir}" (from ${src}) is on a different filesystem than the media library ` +
+          `"${libDir}". Scratch has fallen back to the small node PVC instead of the media NFS; the ` +
+          `library-import flow writes GB-sized intermediates (trim-audio-tracks alone emits ~3.5GB per ` +
+          `episode) and will fill the node disk and evict the pod. Set WORK_DIR to a path on the same ` +
+          `filesystem as LIBRARY_DIR (the media NFS), or set SCHEDULER_ENABLED=false for a management-only ` +
+          `environment.`,
+        )
+      }
+      console.log(`[work-guard] scratch dir "${workDir}" shares the media filesystem with "${libDir}" — ok`)
+      return
+    }
+  }
+
+  // Fallback: no LIBRARY_DIR to compare against — best-effort capacity floor.
+  let totalGiB: number
+  try {
+    const st = fs.statfsSync(probe)
+    totalGiB = (st.blocks * st.bsize) / 2 ** 30
+  } catch (err) {
+    // Can't stat (unusual FS / permissions) — warn but don't block boot; the
+    // pruner and ephemeral-storage limit are still in place as backstops.
+    console.warn(`[work-guard] could not stat scratch volume at ${probe}; skipping capacity check:`, err)
+    return
+  }
+  if (totalGiB < minGiB) {
+    const src = process.env.WORK_DIR ? 'WORK_DIR' : process.env.DATA_DIR ? 'DATA_DIR' : 'the default'
+    throw new Error(
+      `flow scratch dir "${workDir}" (from ${src}) is on a ${totalGiB.toFixed(1)}Gi volume, below the ` +
+      `${minGiB}Gi floor. The library-import flow writes GB-sized intermediates (trim-audio-tracks alone ` +
+      `emits ~3.5GB per episode) and will fill this volume and evict the pod. Point WORK_DIR at the big ` +
+      `media NFS (e.g. a .boopwork dir on the same filesystem as LIBRARY_DIR), set SCHEDULER_ENABLED=false ` +
+      `for a management-only environment, or lower the floor with WORK_MIN_GIB.`,
+    )
+  }
+  console.log(`[work-guard] scratch volume "${workDir}" ok (${totalGiB.toFixed(0)}Gi ≥ ${minGiB}Gi floor)`)
+}
 
 // The library-import nodes (extract-subs, mux-tracks, …) drop intermediate
 // files — extracted subs, fonts, muxed MKVs — under DATA_DIR/work. Nothing ever

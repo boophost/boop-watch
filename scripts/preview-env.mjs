@@ -132,7 +132,15 @@ function buildDeployment(pr, imageRef, src) {
             env,
             envFrom: srcContainer.envFrom, // reuse boop-watch-dev-secret (JWT_SECRET, etc.)
             volumeMounts,
-            resources: { requests: { cpu: '100m', memory: '256Mi' }, limits: { memory: '640Mi' } },
+            // Cap ephemeral storage so a runaway scratch dir kills only this
+            // container instead of filling the node disk and evicting the pod
+            // off its node (the shape of the 2026-07-11 prod outage). Previews
+            // disable the flow sink so they never write big scratch, but the
+            // limit is defense-in-depth and mirrors the prod pod spec.
+            resources: {
+              requests: { cpu: '100m', memory: '256Mi', 'ephemeral-storage': '256Mi' },
+              limits: { memory: '640Mi', 'ephemeral-storage': '2Gi' },
+            },
             // dev has no probe, so `rollout status` returns before Express binds
             // :3000. Gate readiness on /health so status/Service/health-check all
             // wait for a pod that actually serves.

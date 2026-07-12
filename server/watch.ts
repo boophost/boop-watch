@@ -22,7 +22,10 @@ export const QUALITY_PRESETS = [
 ]
 
 export interface AudioTrack { index: number; lang: string; label: string; detail: string; def: boolean }
-export interface SubTrack { index: number; group: string }
+// `sel` is a stable, cross-episode selector for remembering the sub choice: the
+// media-stream `index` shuffles between episodes, so we key on the release group
+// (consistent within a season) and fall back to the track's ordinal position.
+export interface SubTrack { index: number; group: string; sel: string }
 export interface WatchEpisode { id: string; num: string; name: string; current: boolean }
 // Intro/outro skip ranges (seconds), sourced from Jellyfin Media Segments.
 export interface Segment { type: 'intro' | 'outro'; start: number; end: number }
@@ -85,12 +88,20 @@ export function buildWatchData(id: string, item: JfItem, siblings: JfItem[], seg
   const engSubs = streams.filter((s) => s.Type === 'Subtitle' && isTextSub(s) && isEngSub(s))
   let subPool = engSubs.filter((s) => subCat(s) === 'full')
   if (!subPool.length) subPool = engSubs                       // fallback: whatever English we have
+  const selSeen: Record<string, number> = {}
   const subs: SubTrack[] = subPool
     .sort((a, b) => {
       const ass = (/^(ass|ssa)$/i.test(b.Codec || '') ? 1 : 0) - (/^(ass|ssa)$/i.test(a.Codec || '') ? 1 : 0)
       return ass || a.Index - b.Index
     })
-    .map((s) => ({ index: s.Index, group: subGroup(s) }))
+    .map((s, i) => {
+      const group = subGroup(s)
+      // Prefer the release group (stable across a season's episodes); groupless
+      // tracks fall back to their ordinal in this deterministic ordering.
+      const base = group ? `g:${group.toLowerCase()}` : `i:${i}`
+      const n = (selSeen[base] = (selSeen[base] ?? 0) + 1)
+      return { index: s.Index, group, sel: n > 1 ? `${base}#${n}` : base }
+    })
 
   const episodes: WatchEpisode[] = siblings.map((ep) => ({
     id: ep.Id, num: epLabel(ep), name: ep.Name || 'Episode', current: ep.Id === id,

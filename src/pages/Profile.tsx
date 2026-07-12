@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuth } from '../lib/AuthContext'
 import { PortalLayout, Avatar } from '../components/PortalLayout'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams, Navigate } from 'react-router-dom'
+import { safeInternalPath } from '../lib/returnPath'
 import {
   getPresenceStatus, presenceAuthorizeUrl, unlinkPresence, type PresenceStatus,
 } from '../lib/presence'
@@ -87,6 +88,10 @@ export default function Profile() {
   // Discord watch status (independent of the Discord *login* identity above:
   // it needs its own OAuth grant with the activities.write scope).
   const [searchParams, setSearchParams] = useSearchParams()
+  // OAuth logins land here carrying the page the user came from (see
+  // loginWithProvider). If present, forward them there instead of showing the
+  // profile — validated to an internal path to block open redirects.
+  const oauthNext = safeInternalPath(searchParams.get('next'))
   const [presence, setPresence] = useState<PresenceStatus | null>(null)
   const [presenceError, setPresenceError] = useState('')
   const [presencePending, setPresencePending] = useState(false)
@@ -153,6 +158,10 @@ export default function Profile() {
   }
 
   const canUnlink = (user?.identities.length ?? 0) > 1
+
+  // Forward an OAuth return target before rendering the profile, so the user
+  // isn't flashed the profile page on their way to where they were headed.
+  if (oauthNext) return <Navigate to={oauthNext} replace />
 
   return (
     <PortalLayout>
