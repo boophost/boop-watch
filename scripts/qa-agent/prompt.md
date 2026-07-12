@@ -56,10 +56,15 @@ when it proves the same thing. Sanity-check `GET {{BASE_URL}}/health` returns
 
 ## Output (required, last thing you emit)
 
-A single fenced ```json block, nothing after it:
+A single fenced ```json block, nothing after it, with **one JSON object per
+line** — one line per test-plan index:
 
 ```json
-{"verdicts":[{"index":0,"status":"pass","evidence":"GET /api/catalog → 200, 11 items incl. 'Evangelion'"}]}
+{"index":0,"status":"pass","evidence":"GET /api/catalog → 200, 11 items incl. 'Evangelion'"}
+{"index":1,"status":"skip","evidence":"UI-only item, browser unavailable"}
 ```
 
-Exactly one verdict per test-plan index above. `evidence` is one concise line.
+Keep each object entirely on its own line — no line breaks inside a line — so
+that one malformed line can't discard the rest. `status` is one of
+`pass`/`fail`/`skip`; `evidence` is one concise line. Emit exactly one line per
+test-plan index above.
