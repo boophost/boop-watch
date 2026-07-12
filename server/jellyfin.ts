@@ -313,7 +313,14 @@ export async function proxy(
   res.status(upstream.status)
   for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control']) {
     const v = upstream.headers.get(h)
-    if (v) res.set(h, v)
+    if (!v) continue
+    // A lifetime the route already set wins over Jellyfin's. JF answers image
+    // requests with a bare `cache-control: public` (no max-age), and copying it
+    // over the route's `public, max-age=3600` silently deleted the max-age — so
+    // the poster/season/backdrop routes have never actually cached for an hour
+    // despite setting the header. Everything else still mirrors upstream.
+    if (h === 'cache-control' && res.get('cache-control')) continue
+    res.set(h, v)
   }
   // Never cache a failure. Routes set their own long max-age *before* calling
   // us (posters an hour, subtitles a day), and Jellyfin's error responses carry
