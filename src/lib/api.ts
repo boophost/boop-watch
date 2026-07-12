@@ -62,7 +62,7 @@ export interface RecentItem {
 // Scope-cache metadata for a playable id — enough to render a history card.
 export interface ItemSummary {
   id: string
-  type: 'episode' | 'movie'
+  type: 'episode' | 'movie' | 'series'
   seriesId: string | null
   name: string
   season: number | null
