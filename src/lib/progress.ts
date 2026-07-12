@@ -40,11 +40,29 @@ export function saveLocalProgress(id: string, p: Progress) {
   try {
     if (p.watched || p.position <= 5) localStorage.removeItem(POS_PREFIX + id)
     else localStorage.setItem(POS_PREFIX + id, String(Math.floor(p.position)))
-    if (p.watched) {
-      const w = readLegacyWatched()
-      if (!w[id]) { w[id] = 1; localStorage.setItem(WATCHED_KEY, JSON.stringify(w)) }
-    }
+    const w = readLegacyWatched()
+    if (p.watched && !w[id]) { w[id] = 1; localStorage.setItem(WATCHED_KEY, JSON.stringify(w)) }
+    // An explicit un-mark must clear the legacy flag too, or localProgress would
+    // read it back as watched for any tab that misses the PROG_KEY entry.
+    else if (!p.watched && w[id]) { delete w[id]; localStorage.setItem(WATCHED_KEY, JSON.stringify(w)) }
   } catch { /* ignore */ }
+}
+
+/** Manually set an episode's watched flag (the mark-as-watched toggle), routing
+ * around the player's "never downgrade a completed mark" guard — that guard only
+ * blocks the mid-playback auto-save from clearing `watched`; an explicit toggle
+ * writes the new value straight through. Marking keeps a full-length progress
+ * bar; un-marking resets to a clean unwatched row. Local is written
+ * synchronously; the account row is upserted in the background when signed in.
+ * Returns the Progress just written so callers can update their view instantly. */
+export function setWatched(id: string, watched: boolean, userId: string | null): Progress {
+  const base = localProgress(id)
+  const prog: Progress = watched
+    ? { position: base?.duration || base?.position || 0, duration: base?.duration || 0, watched: true }
+    : { position: 0, duration: 0, watched: false }
+  saveLocalProgress(id, prog)
+  if (userId) saveAccountProgress(userId, id, prog).catch(() => { /* local still set */ })
+  return prog
 }
 
 /** Progress for a set of items: account rows when logged in (local fills the

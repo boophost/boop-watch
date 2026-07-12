@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { EpisodeStatus } from '@/components/EpisodeStatus'
+import { WatchedToggle } from '@/components/WatchedToggle'
 import { PortalLayout, BackCrumb } from '@/components/PortalLayout'
 import { getTitle, imgUrl, backdropUrl, seasonImgUrl, saveAnime, unsaveAnime, getSavedAnimes, type TitleDetail } from '@/lib/api'
 import type { ChaseState } from '@/lib/chase'
@@ -287,6 +288,11 @@ export default function Title() {
                     >
                       <span className="num">{ep.num}</span>
                       <span className="et">{ep.name}</span>
+                      <WatchedToggle
+                        id={ep.id}
+                        watched={watched}
+                        onChange={(eid, prog) => setProgMap((m) => ({ ...m, [eid]: prog }))}
+                      />
                       <span className="go"><Icon name="play" size={13} fill="currentColor" /></span>
                       {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
                     </Link>

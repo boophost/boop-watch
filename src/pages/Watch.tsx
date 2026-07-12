@@ -10,6 +10,7 @@ import { Icon, type IconName } from '@/components/Icon'
 import { Comments } from '@/components/Comments'
 import { EpisodeStatus } from '@/components/EpisodeStatus'
 import { SearchBar } from '@/components/SearchBar'
+import { WatchedToggle } from '@/components/WatchedToggle'
 import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
 import { getWatch, getThemes, type Segment, type WatchData, type ThemeSong } from '@/lib/api'
@@ -805,6 +806,11 @@ export default function Watch() {
                   >
                     <span className="epn">{ep.num}</span>
                     <span className="ept">{ep.name}</span>
+                    <WatchedToggle
+                      id={ep.id}
+                      watched={watched}
+                      onChange={(eid, prog) => setProgMap((m) => ({ ...m, [eid]: prog }))}
+                    />
                     {ep.current && <span className="epnow"><Icon name="play" size={12} fill="currentColor" /></span>}
                     {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
                   </Link>
