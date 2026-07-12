@@ -17,7 +17,7 @@ import { publicRouter, commentView } from './publicRoutes.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
-import { pruneWorkDir } from './flowNodes.js'
+import { pruneWorkDir, assertScratchVolumeSafe } from './flowNodes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
@@ -1218,6 +1218,15 @@ app.listen(PORT, () => {
   if (process.env.SCHEDULER_ENABLED === 'false') {
     console.log('Scheduler disabled (SCHEDULER_ENABLED=false) — flows are editable but will not execute here.')
   } else {
+    // Fail loudly at boot if flow scratch would land on a volume too small to
+    // hold the GB-sized intermediates — a forgotten WORK_DIR once filled the
+    // node PVC and evicted prod. Only enforced where flows actually run.
+    try {
+      assertScratchVolumeSafe()
+    } catch (err) {
+      console.error('[work-guard] refusing to start:', err instanceof Error ? err.message : err)
+      process.exit(1)
+    }
     startScheduler()
   }
   // Keep DATA_DIR/work from growing unbounded (it once hit 16GB and evicted prod
