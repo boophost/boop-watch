@@ -1,6 +1,6 @@
 // Jellyfin access layer (ported from the legacy single-file server).
 // All Jellyfin access is server-side; the api_key never reaches the browser.
-import { Readable } from 'node:stream'
+import { Readable, pipeline } from 'node:stream'
 import type { Request, Response } from 'express'
 import { syncJellyfinToPortal } from './sync.js'
 import { getPortalCollectionItems, getPortalScopeEpisodes, getPortalPlayableIds, PortalItem } from './portalDb.js'
@@ -307,7 +307,17 @@ export async function proxy(
   const playlist = isPlaylist || /mpegurl/i.test(ct)
 
   if (playlist) {
-    const body = stripCreds(await upstream.text())
+    // Reading the body can reject too (the upstream can die between headers and
+    // the last byte), and this one is awaited — so keep the 502 shape the fetch
+    // failure above already uses rather than letting it surface as a 500.
+    let text: string
+    try {
+      text = await upstream.text()
+    } catch {
+      res.status(502).type('text').send('upstream error')
+      return
+    }
+    const body = stripCreds(text)
     res.status(upstream.status)
     res.set('content-type', ct || 'application/vnd.apple.mpegurl')
     res.set('cache-control', 'no-store')
@@ -338,5 +348,14 @@ export async function proxy(
     res.end()
     return
   }
-  Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]).pipe(res)
+  // `.pipe()` leaves the body stream's 'error' event unhandled, and an unhandled
+  // 'error' on a stream takes the whole process down. Upstream drops mid-body are
+  // routine here — Jellyfin ends a transcode, restarts, or the viewer seeks/closes
+  // the tab and undici aborts the fetch — so a single interrupted segment used to
+  // crash the server for every viewer. pipeline() owns the error and tears both
+  // sides down instead. Headers are already flushed by now, so there is no status
+  // code left to send: just destroy the response.
+  pipeline(Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]), res, () => {
+    res.destroy()
+  })
 }
