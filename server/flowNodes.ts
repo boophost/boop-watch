@@ -2057,8 +2057,15 @@ const indexerMatch: NodeImpl = {
       const hay = norm(item[queryField])
       return { hay, collapsed: hay.replace(/ /g, '') }
     }
+    // Overlap weighted by word length, not word count. Counting words treats
+    // every word as equally identifying, which they are not: "inuyashiki" names
+    // a show, "hero" and "last" do not. Long words are rare words, so charging
+    // by length is a cheap stand-in for distinctiveness — it lets a release that
+    // carries only the show's name ("Inuyashiki - 10") match a longer catalog
+    // title, while denying a match to one that merely shares a filler word.
+    const weigh = (toks: string[]) => toks.reduce((n, t) => n + t.length, 0)
     const bestByTokens = (
-      rows: (typeof catalog),
+      rows: typeof catalog,
       hay: string,
       collapsed: string,
     ): { row: (typeof catalog)[number] | undefined; score: number } => {
@@ -2068,8 +2075,8 @@ const indexerMatch: NodeImpl = {
         for (const variant of titleVariants(s)) {
           const toks = significantTokens(variant)
           if (toks.length === 0) continue
-          const present = toks.filter((t) => hay.includes(t) || collapsed.includes(t)).length
-          rowScore = Math.max(rowScore, present / toks.length)
+          const present = toks.filter((t) => hay.includes(t) || collapsed.includes(t))
+          rowScore = Math.max(rowScore, weigh(present) / weigh(toks))
         }
         if (rowScore > best.score) best = { row: s, score: rowScore }
       }
@@ -2393,10 +2400,22 @@ const QUALITY_TOKENS = new Set([
   'sub', 'batch', 'complete', 'completed', 'uncensored', 'remux', 'season', 'part', 'ova',
 ])
 
+// Function words identify nothing. They have to go before the >=3-char filter
+// can be trusted: "the" survives it, so "The Quintessential Quintuplets" used to
+// offer {the, quintessential, quintuplets}, and *any* release name containing the
+// word "the" scored 1/3 against it — over indexerMatch's season floor. That is
+// how a 12-episode show grew episodes 13-25 out of two unrelated series.
+// (Shorter function words — of, in, as, a — the length filter already drops.)
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'from', 'with', 'that', 'this', 'these', 'those', 'you', 'your', 'our',
+  'its', 'their', 'not', 'but', 'are', 'was', 'were', 'has', 'had', 'out', 'all', 'into', 'over',
+  'than', 'then', 'who', 'why', 'how', 'what', 'when', 'where', 'been', 'being',
+])
+
 function significantTokens(s: string): string[] {
   return norm(s)
     .split(' ')
-    .filter((t) => t.length >= 3 && !QUALITY_TOKENS.has(t) && !/^\d+$/.test(t))
+    .filter((t) => t.length >= 3 && !QUALITY_TOKENS.has(t) && !STOPWORDS.has(t) && !/^\d+$/.test(t))
 }
 
 // How well a candidate matches the show we asked for, most-confident first:
