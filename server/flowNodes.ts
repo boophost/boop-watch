@@ -8,7 +8,13 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
-import { listSeries, upsertSeriesMetadata, recordLibraryFile, forgetLibraryFile } from './db.js'
+import {
+  listSeries,
+  upsertSeriesMetadata,
+  recordLibraryFile,
+  forgetLibraryFile,
+  importedTorrentHashes,
+} from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
@@ -863,6 +869,9 @@ interface QbitInfo {
   size: number
   save_path?: string
   content_path?: string
+  // qBittorrent unix seconds; completion is -1/0 until the torrent finishes.
+  added_on?: number
+  completion_on?: number
 }
 
 const qbittorrentSource: NodeImpl = {
@@ -880,6 +889,8 @@ const qbittorrentSource: NodeImpl = {
       { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
       { key: 'category', label: 'Category', kind: 'text', default: 'anime', help: 'Empty = all categories.' },
       { key: 'completedOnly', label: 'Completed only', kind: 'boolean', default: true, help: 'Only emit torrents that finished downloading (ready to import).' },
+      { key: 'skipImported', label: 'Skip already imported', kind: 'boolean', default: true, help: 'Drop torrents whose hash is already in the library ledger before the expensive probe/mux nodes, so a fresh download is not starved behind re-processing the backlog. Turn off to force a re-import.' },
+      { key: 'newestFirst', label: 'Newest first', kind: 'boolean', default: true, help: 'Emit the most recently completed torrents first, so a just-finished download is processed ahead of older backlog work. Also exposes torrent_completed_on / torrent_added_on for filter.sort.' },
       { key: 'pathFrom', label: 'Download path (qBit)', kind: 'text', default: '', help: 'Path prefix as qBittorrent sees it, e.g. /downloads.' },
       { key: 'pathTo', label: 'Download path (pod)', kind: 'text', default: '', help: 'Where that same prefix is mounted here, e.g. /downloads. Both empty = no rewrite.' },
     ],
@@ -888,6 +899,8 @@ const qbittorrentSource: NodeImpl = {
     const { base, user, pass } = qbitCreds(config)
     const category = str(config, 'category', 'anime')
     const completedOnly = bool(config, 'completedOnly', true)
+    const skipImported = bool(config, 'skipImported', true)
+    const newestFirst = bool(config, 'newestFirst', true)
     const from = str(config, 'pathFrom', '')
     const to = str(config, 'pathTo', '')
 
@@ -900,7 +913,31 @@ const qbittorrentSource: NodeImpl = {
       signal: AbortSignal.timeout(15_000),
     })
     if (!res.ok) throw new Error(`qBittorrent list failed (${res.status})`)
-    const torrents = (await res.json()) as QbitInfo[]
+    let torrents = (await res.json()) as QbitInfo[]
+
+    // Newest-completed first (fall back to when it was added) so a
+    // just-finished download is processed ahead of the older backlog rather
+    // than starved behind it.
+    if (newestFirst) {
+      torrents = [...torrents].sort((a, b) => {
+        const ac = a.completion_on ?? 0
+        const bc = b.completion_on ?? 0
+        if (bc !== ac) return bc - ac
+        return (b.added_on ?? 0) - (a.added_on ?? 0)
+      })
+    }
+
+    // Drop torrents already in the library ledger before they reach the
+    // expensive probe/mux nodes. Only exact re-imports (same torrent hash) are
+    // dropped — a quality upgrade is a *new* torrent (new hash, not yet in the
+    // ledger), so it still runs.
+    let skipped = 0
+    if (skipImported) {
+      const imported = importedTorrentHashes()
+      const before = torrents.length
+      torrents = torrents.filter((t) => !imported.has(t.hash))
+      skipped = before - torrents.length
+    }
 
     const items = torrents.map((t): FlowItem => {
       const contentPath = remapPath(String(t.content_path ?? ''), from, to)
@@ -914,6 +951,8 @@ const qbittorrentSource: NodeImpl = {
         torrent_category: t.category,
         torrent_tags: t.tags ?? '',
         torrent_size: t.size ?? null,
+        torrent_added_on: t.added_on ?? null,
+        torrent_completed_on: t.completion_on ?? null,
         save_path: remapPath(String(t.save_path ?? ''), from, to),
         content_path: contentPath,
         // `ep:` from the tag is what we asked for; the name is only a guess.
@@ -922,7 +961,10 @@ const qbittorrentSource: NodeImpl = {
         ...parseTorrentTags(t.tags),
       }
     })
-    ctx.notes.push(`${items.length} torrent(s)${completedOnly ? ' (completed)' : ''}${category ? ` in "${category}"` : ''}`)
+    ctx.notes.push(
+      `${items.length} torrent(s)${completedOnly ? ' (completed)' : ''}${category ? ` in "${category}"` : ''}` +
+        (skipped ? `, skipped ${skipped} already imported` : ''),
+    )
     return { items }
   },
 }
