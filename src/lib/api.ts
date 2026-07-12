@@ -97,6 +97,8 @@ export interface SeasonInfo {
   /** Full display name from Jellyfin (e.g. "Season 2", "Final Season"). */
   name: string
   episodes: number
+  /** This season's own premiere year, distinct from the series' overall year. */
+  year: number | null
 }
 export interface SeriesDetail {
   type: 'series'
