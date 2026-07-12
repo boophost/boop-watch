@@ -180,6 +180,14 @@ a manual process for now).
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
 - `LIBRARY_DIR` — where the **library-import** flow places files (default `/library`);
   point at the Jellyfin media library dir mounted into the pod (see below)
+- `WORK_DIR` — flow scratch root (default `DATA_DIR`); must share a filesystem with `LIBRARY_DIR`
+  (the boot guard `assertScratchVolumeSafe` refuses to start otherwise). `WORK_TTL_HOURS` (default
+  24) and `WORK_MAX_GIB` (default 40) bound `WORK_DIR/work`: the periodic sweep drops entries past
+  the TTL, then evicts oldest-first if what remains still exceeds the GiB ceiling (a same-day burst
+  the TTL can't catch). Steady-state scratch is kept near zero by per-run cleanup (`trim-audio-tracks`
+  /`mux-tracks` intermediates are deleted when the run ends) + a free-space check before each
+  multi-GB write; the sweep is the backstop. `WORK_MIN_GIB` (default 10) is the boot-guard capacity
+  floor used only when there's no `LIBRARY_DIR` to compare against.
 - `JIMAKU_API_KEY`, `JIMAKU_URL` — external subtitle fallback (`enrich.fetch-subs`);
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free

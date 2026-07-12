@@ -10,6 +10,8 @@ import {
   portCompatible,
   isRecordType,
   recordLCA,
+  createScratchRegistry,
+  type ScratchRegistry,
   type PortDataType,
   type TriggerEvent,
   type FireRequest,
@@ -208,6 +210,11 @@ export interface RunFlowOptions {
   /** The named event firing this run: only a matching `trigger.start` emits its
    * payload. Omitted/null = a manual whole-flow run (every trigger fires). */
   trigger?: TriggerEvent | null
+  /** Scratch registry to reuse instead of creating a fresh one. Passed by
+   * flow.subflow so a nested run's intermediates are swept by the OUTERMOST
+   * run (once the parent has consumed the subflow's outputs), not prematurely
+   * when the nested run returns. */
+  scratch?: ScratchRegistry
 }
 
 export interface RunFlowResult extends RunReport {
@@ -233,8 +240,13 @@ export async function runFlow(
   dryRun: boolean,
   hooksOrOptions?: RunHooks | RunFlowOptions,
 ): Promise<RunFlowResult> {
-  const { hooks, injectOutput, qualifyId, resolveSpec, trigger } = normalizeRunOptions(hooksOrOptions)
+  const { hooks, injectOutput, qualifyId, resolveSpec, trigger, scratch: parentScratch } =
+    normalizeRunOptions(hooksOrOptions)
   const qid = qualifyId ?? ((id: string) => id)
+  // Reuse the parent's registry for a nested (subflow) run so its scratch is
+  // swept by the outermost run; only the top-level run owns the sweep.
+  const scratch = parentScratch ?? createScratchRegistry()
+  const ownsScratch = !parentScratch
   const startedAt = new Date().toISOString()
   const t0 = Date.now()
   const reports: Record<string, NodeReport> = {}
@@ -252,6 +264,7 @@ export async function runFlow(
   const buffers = new Map<string, Record<string, FlowItem[]>>()
   const failed = new Set<string>()
 
+  try {
   for (const node of order) {
     if (isEditorNode(node.type)) continue
     const impl = NODE_REGISTRY.get(node.type)!
@@ -311,6 +324,7 @@ export async function runFlow(
       hooks,
       trigger: trigger ?? null,
       fireQueue,
+      scratch,
       mergeNestedReports: (nested) => {
         Object.assign(reports, nested)
       },
@@ -341,6 +355,20 @@ export async function runFlow(
       }
     }
     hooks?.onNodeDone?.(reportKey, reports[reportKey])
+  }
+  } finally {
+    // Sweep GB-sized scratch intermediates the run produced (trimmed/muxed
+    // files) — on success AND on failure, so a run never leaves orphans behind.
+    // Only the outermost run owns the sweep; a nested subflow run defers to it
+    // so files it hands back up aren't deleted before the parent consumes them.
+    if (ownsScratch) {
+      const swept = scratch.cleanup()
+      if (swept.removed > 0) {
+        console.log(
+          `[work-scratch] swept ${swept.removed} intermediate(s) (~${Math.round(swept.freedBytes / 1e6)}MB) after run`,
+        )
+      }
+    }
   }
 
   const ok = Object.values(reports).every((r) => r.status === 'ok')
