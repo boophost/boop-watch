@@ -100,9 +100,21 @@ function loadScript(src: string): Promise<void> {
 const BURN_IN_SUBS = !canFullscreen()
 
 const PREF_KEY = 'bw:pref'
-type Pref = { audioLang?: string; quality?: string; subGroup?: string }
+// Audio/quality persist by stable identifiers (lang / preset key) globally.
+// Subtitles persist per series+season (`subs` map: scope -> track selector, or
+// the sentinel 'off'), because a sub choice is meaningful within a season but the
+// old single global release-group string reset on every episode whose track
+// lacked a bracket group. See `subScope` / `SubTrack.sel`.
+type Pref = { audioLang?: string; quality?: string; subs?: Record<string, string> }
 const readPref = (): Pref => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') } catch { return {} } }
 const savePref = (patch: Pref) => { try { localStorage.setItem(PREF_KEY, JSON.stringify({ ...readPref(), ...patch })) } catch { /* ignore */ } }
+
+// The scope a subtitle choice is remembered under: a series' season for episodes
+// (so it carries across every episode of that season), else the item id.
+const subScope = (d: WatchData): string => (d.seriesId ? `${d.seriesId}:${d.season ?? ''}` : d.id)
+// Remember (or clear) the sub selection for this scope, merging the scope map.
+const rememberSub = (d: WatchData, sel: string) =>
+  savePref({ subs: { ...readPref().subs, [subScope(d)]: sel } })
 
 export default function Watch() {
   const { id = '' } = useParams()
@@ -198,9 +210,13 @@ export default function Watch() {
     }
     setAudioIndex(audio)
     setQKey(pref.quality && data.quality.some((q) => q.key === pref.quality) ? pref.quality : 'auto')
+    // Restore only on an exact selector match; leave subs off otherwise (rather
+    // than guessing subs[0], which landed users on the wrong track and read as a
+    // reset). 'off' and no-saved-choice both mean off.
     let sub = ''
-    if (pref.subGroup && pref.subGroup !== 'off' && data.subs.length) {
-      const m = data.subs.find((s) => s.group === pref.subGroup) || data.subs[0]
+    const savedSel = pref.subs?.[subScope(data)]
+    if (savedSel && savedSel !== 'off') {
+      const m = data.subs.find((s) => s.sel === savedSel)
       if (m) sub = String(m.index)
     }
     setSubIndex(sub)
@@ -663,11 +679,11 @@ export default function Watch() {
             {data.subs.length > 0 && (
               <Menu kind="subs" icon="captions" title="Subtitles" label={`Subtitles: ${subLabel}`}>
                 <PopItem active={subIndex === ''} label="Off"
-                  onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(''); savePref({ subGroup: 'off' }) }} />
+                  onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(''); rememberSub(data, 'off') }} />
                 {data.subs.map((s, i) => (
                   <PopItem key={s.index} active={String(s.index) === subIndex} label="English"
                     detail={s.group || (data.subs.length > 1 ? `Track ${i + 1}` : 'Full')}
-                    onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(String(s.index)); savePref({ subGroup: s.group || 'on' }) }} />
+                    onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(String(s.index)); rememberSub(data, s.sel) }} />
                 ))}
               </Menu>
             )}
