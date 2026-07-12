@@ -189,22 +189,31 @@ export default function Title() {
     return <PortalLayout crumb={BackCrumb}><main><p className="empty">Loading…</p></main></PortalLayout>
   }
 
-  const subParts: string[] = []
-  if (data.genres.length) subParts.push(data.genres.slice(0, 3).join(' · '))
-  if (data.year) subParts.push(String(data.year))
-  const sub = subParts.join('  ·  ')
-
   if (data.type === 'series') {
     const playableCount = data.episodes.filter((ep) => ep.id).length
     const seasons = data.seasons ?? []
     const season = data.season ?? null
-    const seasonList = data.seasonList ?? seasons.map((s) => ({ season: s, name: `Season ${s}`, episodes: 0 }))
+    const seasonList = data.seasonList ?? seasons.map((s) => ({ season: s, name: `Season ${s}`, episodes: 0, year: null }))
+    const multiSeason = seasonList.length > 1
+    const activeSeason = season != null ? seasonList.find((s) => s.season === season) ?? null : null
+    // Only worth calling out when it's a real name (JoJo's "Stardust Crusaders"),
+    // not a generic "Season 3" that would just repeat the S3 badge as words.
+    const namedSeason = activeSeason && activeSeason.name !== `Season ${activeSeason.season}` ? activeSeason.name : null
+    // A multi-season franchise's cours can air years apart (JoJo runs 2012-2022) —
+    // prefer the selected season's own year over the series-level one once it's known.
+    const displayYear = (multiSeason ? activeSeason?.year : null) ?? data.year
+
+    const subParts: string[] = []
+    if (data.genres.length) subParts.push(data.genres.slice(0, 3).join(' · '))
+    if (displayYear) subParts.push(String(displayYear))
+    const sub = subParts.join('  ·  ')
+
     const badges = (
       <>
-        <span className="badge"><span className="dot dot-info" />Series</span>
         {season != null ? (
           <span className="badge badge-mono badge-square">S{season}</span>
         ) : null}
+        {namedSeason ? <span className="badge">{namedSeason}</span> : null}
         <span className="badge badge-mono badge-square">{playableCount} eps</span>
         {data.nextEpisode ? (
           <span className="badge ep-chase">
@@ -213,7 +222,6 @@ export default function Title() {
         ) : null}
       </>
     )
-    const multiSeason = seasonList.length > 1
     return (
       <PortalLayout crumb={BackCrumb}>
         <DetailShell
@@ -304,6 +312,11 @@ export default function Title() {
       </PortalLayout>
     )
   }
+
+  const subParts: string[] = []
+  if (data.genres.length) subParts.push(data.genres.slice(0, 3).join(' · '))
+  if (data.year) subParts.push(String(data.year))
+  const sub = subParts.join('  ·  ')
 
   const mins = data.runtimeMin
   const badges = (

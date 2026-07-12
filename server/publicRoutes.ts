@@ -381,11 +381,16 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
           new Promise<JfSeason[]>((r) => setTimeout(() => r([]), 1500)),
         ])
       }
-      const seasonList = seasonCounts.map((c) => ({
-        season: c.season,
-        name: jfSeasons.find((s) => s.IndexNumber === c.season)?.Name || `Season ${c.season}`,
-        episodes: c.episodes,
-      }))
+      const seasonList = seasonCounts.map((c) => {
+        const jfSeason = jfSeasons.find((s) => s.IndexNumber === c.season)
+        return {
+          season: c.season,
+          name: jfSeason?.Name || `Season ${c.season}`,
+          episodes: c.episodes,
+          year: jfSeason?.ProductionYear
+            ?? (jfSeason?.PremiereDate ? new Date(jfSeason.PremiereDate).getFullYear() : null),
+        }
+      })
 
       const eps = getPortalEpisodes(id, season)
       const episodes: Array<{
