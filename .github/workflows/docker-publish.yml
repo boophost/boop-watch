@@ -148,6 +148,13 @@ jobs:
           node-version: 22
       - name: Provision preview environment
         id: preview
+        env:
+          # The script's own default is 5. With ten PRs open at once that cap turned
+          # into a silent QA outage: preview-up failed in 9s on every PR past the
+          # fifth, and its qa-agent job was skipped — so half the board looked
+          # "unverified" for a reason that had nothing to do with the code. Raise it
+          # via a repo variable so the ceiling can move without a code change.
+          MAX_PREVIEWS: ${{ vars.MAX_PREVIEWS || '10' }}
         run: |
           set -o pipefail
           export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
@@ -203,6 +210,12 @@ jobs:
       # skipping them (the portal and /manage are client-rendered SPAs — an API
       # call can't prove a menu opens or a dialog saves).
       QA_PLAYWRIGHT: '1'
+      # run.mjs defaults to 8 minutes, which only fits a curl-and-look test plan. An
+      # item that restarts the preview pod to prove a failure path (kill Jellyfin to
+      # force the player's stall overlay; raise WORK_MIN_GIB to trip the scratch
+      # guard) spends minutes just waiting on rollouts, and the agent was killed
+      # mid-run with nothing ticked. Give a plan room to actually be driven.
+      QA_TIMEOUT_MS: ${{ vars.QA_TIMEOUT_MS || '1500000' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
