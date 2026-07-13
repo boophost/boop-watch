@@ -30,16 +30,25 @@ function CrossfadeBackdrop({ src }: { src: string }) {
     return () => { cancelled = true }
   }, [src, shown])
 
+  // The sharp layer is a real <img>, not a background: a banner is usually much
+  // wider than the hero is tall, so at full width it paints only the top of the
+  // box and used to stop dead against the blurred fill. An <img> is sized by the
+  // art itself, so the fade in `.hero .backdrop img` lands on the image's own
+  // bottom edge at any width or aspect ratio.
   return (
     <>
-      <div className="backdrop" style={{ '--backdrop-img': `url('${shown}')` } as React.CSSProperties} />
+      <div className="backdrop" style={{ '--backdrop-img': `url('${shown}')` } as React.CSSProperties}>
+        <img src={shown} alt="" draggable={false} />
+      </div>
       {incoming != null && (
         <div
           key={incoming}
           className="backdrop backdrop-fade"
           style={{ '--backdrop-img': `url('${incoming}')` } as React.CSSProperties}
           onAnimationEnd={() => { setShown(incoming); setIncoming(null) }}
-        />
+        >
+          <img src={incoming} alt="" draggable={false} />
+        </div>
       )}
     </>
   )
