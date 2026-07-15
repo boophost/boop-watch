@@ -23,6 +23,7 @@ import {
   markWantSourced,
   fulfilEpisodeWant,
   fulfilBatchWant,
+  fulfilWantById,
   getTorrent,
   getSeriesStatus,
   saveSeriesStatus,
@@ -4153,6 +4154,31 @@ const qbittorrentSink: NodeImpl = {
     if (already.length > 0) {
       withMagnet = withMagnet.filter((it) => !already.includes(it))
       ctx.notes.push(`skipped ${already.length} already tracked in the torrent ledger`)
+      // Resolve the wants that led here, or the chase re-searches them
+      // forever: a tracked-as-imported torrent already provides the content
+      // (fulfil); one still in flight means the want is sourced by it; junk
+      // statuses record a miss so backoff moves the search elsewhere.
+      if (!ctx.dryRun) {
+        for (const it of already) {
+          const wantId = asNumber(it.want_id)
+          const h = String(it.torrent_hash ?? '').toLowerCase()
+          if (wantId == null) continue
+          const t = getTorrent(h)
+          if (!t) continue
+          if (t.status === 'imported') {
+            fulfilWantById(wantId, h, 'already imported by a tracked torrent')
+          } else if (t.status === 'queued' || t.status === 'downloading' || t.status === 'completed') {
+            markWantSourced(wantId, h)
+          } else {
+            // exhausted / superseded / cleaned — this release is a dead end.
+            recordWantAttempt(
+              wantId,
+              360,
+              `search re-picked ${t.status} torrent ${h.slice(0, 8)} — backing off`,
+            )
+          }
+        }
+      }
     }
     if (withMagnet.length === 0) return { sent: [] }
     if (ctx.dryRun) {

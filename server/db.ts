@@ -1130,6 +1130,17 @@ export function fulfilBatchWant(mal_id: number, torrentHash: string | null): boo
   )
 }
 
+/** Fulfil a specific want with the torrent that (already) provides it. */
+export function fulfilWantById(id: number, torrentHash: string | null, note?: string): void {
+  getDb()
+    .prepare(
+      `UPDATE wants SET status = 'fulfilled', torrent_hash = COALESCE(?, torrent_hash),
+         note = COALESCE(?, note), updated_at = datetime('now')
+       WHERE id = ? AND status <> 'fulfilled'`,
+    )
+    .run(torrentHash ? torrentHash.toLowerCase() : null, note ?? null, id)
+}
+
 export function getWant(id: number): WantRow | undefined {
   return getDb().prepare('SELECT * FROM wants WHERE id = ?').get(id) as WantRow | undefined
 }
