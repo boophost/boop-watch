@@ -262,21 +262,32 @@ app.get('/api/search/anime', requireAuth, async (req, res) => {
   // Jikan only for the MAL-specific data AniList lacks (per-episode titles,
   // detail) — its search endpoint needs a Typesense index we don't run, so it's
   // the fallback here, used only if AniList is down.
+  // Tag each hit with whether it's already in our catalog so the add-series UI
+  // can mark/skip owned shows.
+  const withInCatalog = <T extends { mal_id: number }>(hits: T[]) =>
+    hits.map((h) => ({ ...h, inCatalog: !!seriesDb.findByMalId(h.mal_id) }))
   try {
     const results = await searchAnimeAniList(q)
-    res.json({ results })
+    res.json({ results: withInCatalog(results) })
   } catch (anilistErr) {
     console.error('search: AniList failed, trying Jikan —', anilistErr)
     try {
       const data = await searchAnime(q)
       res.json({
-        results: data.map((a) => ({
-          mal_id: a.mal_id,
-          title: a.title,
-          synopsis: a.synopsis ?? '',
-          image_url: pickPosterUrl(a),
-          url: a.url,
-        })),
+        results: withInCatalog(
+          data.map((a) => ({
+            mal_id: a.mal_id,
+            title: a.title,
+            synopsis: a.synopsis ?? '',
+            image_url: pickPosterUrl(a),
+            url: a.url,
+            // Jikan brief carries none of these — the UI degrades gracefully.
+            year: null,
+            type: null,
+            status: null,
+            episodes: null,
+          })),
+        ),
       })
     } catch (jikanErr) {
       console.error('search: Jikan fallback also failed —', jikanErr)

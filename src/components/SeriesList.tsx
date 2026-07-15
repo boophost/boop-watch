@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { fetchAuth } from '@/lib/api'
 import { Button } from '@/components/ui/button'
-import { Trash2 } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 import { adminChaseChipLabel, type EpisodeChase } from '@/lib/chase'
 
 export interface SeriesEntry {
@@ -24,53 +23,43 @@ export interface SeriesEntry {
 }
 
 interface SeriesListProps {
-  refreshKey: number
+  /** The loaded catalog (owned by the parent so the search bar shares it). */
+  series: SeriesEntry[]
+  loading: boolean
+  /** Refresh the catalog after a change (e.g. remove). */
+  onChanged: () => void
+  /** Open the add-series modal (the first grid cell is an add card). */
+  onAddClick: () => void
 }
 
-export function SeriesList({ refreshKey }: SeriesListProps) {
+export function SeriesList({ series, loading, onChanged, onAddClick }: SeriesListProps) {
   const navigate = useNavigate()
-  const [series, setSeries] = useState<SeriesEntry[]>([])
-  const [loading, setLoading] = useState(true)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const r = await fetchAuth('/api/series')
-      if (!r.ok) throw new Error('load failed')
-      const d = (await r.json()) as { series: SeriesEntry[] }
-      setSeries(d.series)
-    } catch {
-      setSeries([])
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void load()
-  }, [load, refreshKey])
 
   const remove = async (id: number) => {
     await fetchAuth(`/api/series/${id}`, { method: 'DELETE' })
-    void load()
+    onChanged()
   }
 
   if (loading && series.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">Loading your list…</p>
-    )
+    return <p className="text-sm text-muted-foreground">Loading your list…</p>
   }
 
-  if (series.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        No series yet. Search above and click a result to add it.
-      </p>
-    )
-  }
+  const AddCard = (
+    <li key="add-card">
+      <button
+        type="button"
+        onClick={onAddClick}
+        className="flex h-full min-h-[7rem] w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-3 text-muted-foreground outline-none transition-colors hover:border-primary hover:bg-primary/5 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Plus className="size-7" />
+        <span className="text-sm font-medium">Add a series</span>
+      </button>
+    </li>
+  )
 
   return (
     <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {AddCard}
       {series.map((s) => (
         <li
           key={s.id}

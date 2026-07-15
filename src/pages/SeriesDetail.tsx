@@ -1058,7 +1058,7 @@ export default function SeriesDetail() {
           ) : null}
           {epSource === 'synthesized' || epSource === 'cache' ? (
             <p className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-500">
-              MyAnimeList is unreachable right now, so episode titles are{' '}
+              Episode metadata sources are unreachable right now, so episode titles are{' '}
               {epSource === 'cache' ? 'from our last cached copy' : 'placeholders'}. Library and
               download status below is still live.
             </p>
@@ -1239,8 +1239,7 @@ export default function SeriesDetail() {
 
           {!epLoading && episodes.length === 0 && !epError ? (
             <p className="text-sm text-muted-foreground">
-              No episode list from MyAnimeList for this entry (some formats omit
-              episodes).
+              No episode list for this entry yet (some formats omit episodes).
             </p>
           ) : null}
 
