@@ -1,0 +1,25 @@
+/* Flow Map: brief edge throughput pulse when items leave a node. */
+.flow-map-edge-pulse {
+  stroke-dasharray: 6 4;
+  animation: flow-map-dash 0.6s linear infinite;
+}
+
+@keyframes flow-map-dash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.flow-map-group-active {
+  animation: flow-map-group-glow 1.6s ease-in-out infinite;
+}
+
+@keyframes flow-map-group-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.55);
+  }
+}

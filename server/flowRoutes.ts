@@ -105,6 +105,8 @@ export async function runFlowAndRecord(
         nodeType: type,
         status: nodeReport.status,
         notes: nodeReport.notes,
+        counts: nodeReport.counts,
+        durationMs: nodeReport.durationMs,
         ...(nodeReport.error ? { error: nodeReport.error } : {}),
       })
       hooks?.onNodeDone?.(nodeId, nodeReport)
@@ -243,6 +245,12 @@ flowRouter.get('/api/flows/runs/stream', (req, res) => {
 
 flowRouter.get('/api/flows', (_req, res) => {
   res.json({ flows: flowsDb.listFlows() })
+})
+
+// Bulk graph payload for the read-only Flow Map. Declared before `/:id` so
+// "map" isn't captured as an id. One round-trip instead of N× GET /api/flows/:id.
+flowRouter.get('/api/flows/map', (_req, res) => {
+  res.json({ flows: flowsDb.listFlowsForMap() })
 })
 
 flowRouter.post('/api/flows', (req, res) => {
