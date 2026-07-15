@@ -28,6 +28,7 @@ import {
 } from './episodeChase.js'
 import { wantForEpisode } from './sourcing.js'
 import { fetchAnimeFull } from './jikan.js'
+import { fetchAniListMedia } from './anilist.js'
 
 export type { EpisodeChase }
 export { toPublicChase }
@@ -114,8 +115,14 @@ async function ensureBroadcast(
 
   const fetchAndPersist = async (): Promise<MalBroadcast | null> => {
     try {
-      const mal = await fetchAnimeFull(series.mal_id)
-      const bc = mal.broadcast ?? null
+      // AniList-primary (current, auth-free); its next-airing timestamp yields
+      // the weekly broadcast slot. Fall back to Jikan only if AniList can't answer.
+      const al = await fetchAniListMedia(series.mal_id)
+      const bc: MalBroadcast | null = al
+        ? al.broadcast
+        : ((await fetchAnimeFull(series.mal_id)).broadcast ?? null)
+      const episodes = al?.totalEpisodes ?? null
+      const status = al?.status ?? null
       const serialized = serializeBroadcast(bc)
       if (serialized && serialized !== series.broadcast) {
         try {
@@ -123,10 +130,8 @@ async function ensureBroadcast(
             { mal_id: series.mal_id, title: series.title },
             {
               broadcast: serialized,
-              ...(typeof mal.episodes === 'number' && mal.episodes > 0
-                ? { episodes: mal.episodes }
-                : {}),
-              ...(mal.status ? { status: mal.status } : {}),
+              ...(typeof episodes === 'number' && episodes > 0 ? { episodes } : {}),
+              ...(status ? { status } : {}),
             },
           )
         } catch (e) {

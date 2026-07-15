@@ -37,11 +37,12 @@ import {
   type WantKind,
   type WantStatus,
 } from './db.js'
-import { fetchAniListAiring } from './anilist.js'
+import { fetchAniListAiring, fetchAniListMedia, type AniListMedia } from './anilist.js'
+import { refreshEpisodeCache } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
-import { searchAnime, pickPosterUrl, fetchAnimeFull } from './jikan.js'
+import { searchAnime, pickPosterUrl, fetchAnimeFull, type JikanAnimeFull } from './jikan.js'
 import { blacklistedHashes } from './blacklist.js'
 import { qbitList, qbitToItem, qbitConfigured, parseTorrentTags } from './qbit.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
@@ -2968,6 +2969,56 @@ const episodesNode: NodeImpl = {
   },
 }
 
+// Fills per-episode *titles* in the cache (AniList has no reliable episode
+// titles) by merging several sources; existence/air-dates are AniList's job
+// (enrich.episodes). Series-level + cache-first, so it warms series_episodes for
+// the /manage episodes list without hitting anything when the cache is fresh.
+const episodeTitlesNode: NodeImpl = {
+  spec: {
+    type: 'enrich.episode-titles',
+    label: 'Episode titles',
+    category: 'enrich',
+    description:
+      'Fills per-episode titles in the episode cache by merging Jikan, Kitsu and AniList streaming titles (AniList’s airing schedule carries no titles). Cache-first: skips series whose cached episodes already have titles and were refreshed within the TTL. Passes items through unchanged.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [
+      { key: 'malField', label: 'MAL id field', kind: 'text', default: 'mal_id' },
+      { key: 'cacheTtlHours', label: 'Cache TTL (hours)', kind: 'number', default: 24, help: 'Skip series whose cache was refreshed within this and has every title. 0 = always refresh.' },
+      { key: 'maxFetch', label: 'Max series fetched', kind: 'number', default: 10, help: 'Cap of upstream title lookups per run. 0 = unlimited.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const malField = str(config, 'malField', 'mal_id')
+    const ttlMs = Math.max(0, num(config, 'cacheTtlHours', 24)) * 3600_000
+    const maxFetch = num(config, 'maxFetch', 10)
+    const out = allInputs(inputs)
+    const seen = new Set<number>()
+    let refreshed = 0
+    let filled = 0
+    for (const item of out) {
+      const mal = Number(item[malField])
+      if (!Number.isFinite(mal) || mal <= 0 || seen.has(mal)) continue
+      seen.add(mal)
+      // Cache-first: skip series already fully titled + fresh (refreshEpisodeCache
+      // no-ops), and cap upstream lookups per run.
+      const cachedRows = getCachedEpisodes(mal)
+      const missing = cachedRows.length === 0 || cachedRows.some((e) => !e.title)
+      if (!missing) continue
+      if (maxFetch > 0 && refreshed >= maxFetch) continue
+      const finished =
+        String(item.air_status ?? getSeriesStatus(mal)?.air_status ?? '') === 'finished' ||
+        String(item.status ?? '') === 'Finished Airing'
+      const total = asNumber(item.total_episodes) ?? getSeriesStatus(mal)?.total_episodes ?? null
+      refreshed++
+      const r = await refreshEpisodeCache({ mal_id: mal, finished, totalEpisodes: total }, { ttlMs })
+      filled += r.filled
+    }
+    ctx.notes.push(`refreshed episode titles for ${refreshed} series (${filled} episode row(s) written)`)
+    return { out }
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Wants: the persistent memory of what the sourcing flows are trying to
 // obtain. Domain source/sink nodes over the `wants` table (db.ts) — decision
@@ -3970,13 +4021,99 @@ const trimAudioTracks: NodeImpl = {
   },
 }
 
+// A normalized catalog record, produced from either AniList (primary) or Jikan
+// (fallback), so the enrich node's write/emit logic is source-agnostic.
+type CatalogRecord = {
+  base: { title: string; synopsis: string | null; image_url: string | null; url: string }
+  meta: {
+    title_english: string | null
+    title_japanese: string | null
+    type: string | null
+    episodes: number | null
+    status: string | null
+    score: number | null
+    year: number | null
+    season: string | null
+    aired: string | null
+    studios: string
+    genres: string
+    broadcast: string | null
+  }
+}
+
+function aniListToCatalog(a: AniListMedia, mal: number): CatalogRecord {
+  return {
+    base: {
+      title: a.title,
+      synopsis: a.synopsis,
+      image_url: a.coverImage,
+      url: `https://myanimelist.net/anime/${mal}`,
+    },
+    meta: {
+      title_english: a.titleEnglish,
+      title_japanese: a.titleNative,
+      type: a.type,
+      episodes: a.totalEpisodes,
+      status: a.status,
+      score: a.score,
+      year: a.year,
+      season: a.season,
+      aired: a.airedString,
+      studios: JSON.stringify(a.studios),
+      genres: JSON.stringify(a.genres),
+      broadcast: a.broadcast ? JSON.stringify(a.broadcast) : null,
+    },
+  }
+}
+
+function jikanToCatalog(a: JikanAnimeFull): CatalogRecord {
+  return {
+    base: {
+      title: a.title,
+      synopsis: a.synopsis ?? null,
+      image_url: pickPosterUrl(a as unknown as Parameters<typeof pickPosterUrl>[0]),
+      url: a.url,
+    },
+    meta: {
+      title_english: a.title_english ?? null,
+      title_japanese: a.title_japanese ?? null,
+      type: a.type ?? null,
+      episodes: a.episodes ?? null,
+      status: a.status ?? null,
+      score: a.score ?? null,
+      year: a.year ?? null,
+      season: a.season ?? null,
+      aired: a.aired?.string ?? null,
+      studios: JSON.stringify((a.studios ?? []).map((s) => s.name)),
+      genres: JSON.stringify((a.genres ?? []).map((g) => g.name)),
+      broadcast: a.broadcast
+        ? JSON.stringify({
+            day: a.broadcast.day ?? null,
+            time: a.broadcast.time ?? null,
+            timezone: a.broadcast.timezone ?? null,
+            string: a.broadcast.string ?? null,
+          })
+        : null,
+    },
+  }
+}
+
+/** Resolve a catalog record for a mal_id — AniList first (current, not
+ * rate-limit-prone), Jikan only if AniList can't answer. Returns the record and
+ * which source produced it (for observability). Throws only if both fail. */
+async function resolveCatalog(mal: number): Promise<{ record: CatalogRecord; source: 'anilist' | 'jikan' }> {
+  const al = await fetchAniListMedia(mal)
+  if (al) return { record: aniListToCatalog(al, mal), source: 'anilist' }
+  return { record: jikanToCatalog(await fetchAnimeFull(mal)), source: 'jikan' }
+}
+
 const metadataEnrich: NodeImpl = {
   spec: {
     type: 'enrich.metadata',
-    label: 'Fetch metadata (MAL)',
+    label: 'Fetch metadata (AniList)',
     category: 'enrich',
     description:
-      'Pulls full MyAnimeList metadata by mal_id (titles, year, episodes, status, score, studios, genres) into our own catalog DB, and sets those fields on the item (e.g. production_year for the import path). Rate-limited ~1 item/sec.',
+      'Pulls full catalog metadata by mal_id (titles, year, episodes, status, score, studios, genres) into our own catalog DB, and sets those fields on the item (e.g. production_year for the import path). AniList-primary (current + auth-free); falls back to MyAnimeList/Jikan only when AniList can’t answer.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
       { id: 'enriched', label: 'enriched' },
@@ -3997,10 +4134,11 @@ const metadataEnrich: NodeImpl = {
     const skipped: FlowItem[] = []
     // A library-import run feeds this node one item per FILE, so the same
     // mal_id arrives dozens of times — memoise per run (observed: ~100
-    // identical Jikan /full fetches for one show in one run).
-    const memo = new Map<number, Awaited<ReturnType<typeof fetchAnimeFull>>>()
+    // identical metadata fetches for one show in one run).
+    const memo = new Map<number, CatalogRecord>()
     const seasonNoted = new Set<number>()
     let looked = 0
+    let jikanFallbacks = 0
     for (const item of items) {
       const mal = Number(item[malField])
       if (!Number.isFinite(mal) || mal <= 0 || (!memo.has(mal) && maxItems > 0 && looked >= maxItems)) {
@@ -4009,36 +4147,18 @@ const metadataEnrich: NodeImpl = {
       }
       if (!memo.has(mal)) looked++
       try {
-        const a = memo.get(mal) ?? (await fetchAnimeFull(mal))
-        memo.set(mal, a)
-        const studios = JSON.stringify((a.studios ?? []).map((s) => s.name))
-        const genres = JSON.stringify((a.genres ?? []).map((g) => g.name))
-        const meta = {
-          title_english: a.title_english ?? null,
-          title_japanese: a.title_japanese ?? null,
-          type: a.type ?? null,
-          episodes: a.episodes ?? null,
-          status: a.status ?? null,
-          score: a.score ?? null,
-          year: a.year ?? null,
-          season: a.season ?? null,
-          aired: a.aired?.string ?? null,
-          studios,
-          genres,
-          broadcast: a.broadcast
-            ? JSON.stringify({
-                day: a.broadcast.day ?? null,
-                time: a.broadcast.time ?? null,
-                timezone: a.broadcast.timezone ?? null,
-                string: a.broadcast.string ?? null,
-              })
-            : null,
+        let record = memo.get(mal)
+        if (!record) {
+          const resolved = await resolveCatalog(mal)
+          record = resolved.record
+          memo.set(mal, record)
+          if (resolved.source === 'jikan') jikanFallbacks++
         }
+        const { base, meta } = record
+        const studios = meta.studios
+        const genres = meta.genres
         if (writeDb && !ctx.dryRun) {
-          upsertSeriesMetadata(
-            { mal_id: mal, title: a.title, synopsis: a.synopsis ?? null, image_url: pickPosterUrl(a as unknown as Parameters<typeof pickPosterUrl>[0]), url: a.url },
-            meta,
-          )
+          upsertSeriesMetadata({ mal_id: mal, ...base }, meta)
         }
         // Resolve the multi-season placement (TVDB season + episode offset) so a
         // cour lands under the right Jellyfin `Season NN` at the right episode
@@ -4089,9 +4209,10 @@ const metadataEnrich: NodeImpl = {
       // Jikan spacing handled by the shared 'jikan' queue.
     }
     ctx.notes.push(
-      ctx.dryRun
+      (ctx.dryRun
         ? `dry run — resolved ${enriched.length} metadata record(s)${writeDb ? ' (not written)' : ''}`
-        : `enriched ${enriched.length}${writeDb ? ' (written to catalog)' : ''}, skipped ${skipped.length}`,
+        : `enriched ${enriched.length}${writeDb ? ' (written to catalog)' : ''}, skipped ${skipped.length}`) +
+        (jikanFallbacks ? `; ${jikanFallbacks} via Jikan fallback` : ''),
     )
     return { enriched, skipped }
   },
@@ -5495,6 +5616,7 @@ const IMPLS: NodeImpl[] = [
   jsonValue,
   animeStatus,
   episodesNode,
+  episodeTitlesNode,
   wantsSource,
   wantUpsert,
   wantUpdate,
