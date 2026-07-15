@@ -320,6 +320,19 @@ async function json<T>(r: Response): Promise<T> {
 export const listFlows = () =>
   fetchAuth('/api/flows').then((r) => json<{ flows: FlowSummary[] }>(r))
 
+/** One flow with its full graph — payload for the read-only Flow Map. */
+export interface FlowMapEntry {
+  id: number
+  name: string
+  description: string | null
+  published: boolean
+  updated_at: string
+  graph: FlowGraph
+}
+
+export const getFlowMap = () =>
+  fetchAuth('/api/flows/map').then((r) => json<{ flows: FlowMapEntry[] }>(r))
+
 export const getNodeTypes = () =>
   fetchAuth('/api/flows/node-types').then((r) => json<{ nodeTypes: NodeSpec[] }>(r))
 
@@ -488,6 +501,9 @@ export type ActivityStreamEvent =
       status: 'ok' | 'error' | 'skipped'
       notes: string[]
       error?: string
+      /** Per-output-port item counts (Flow Map edge animation). */
+      counts?: Record<string, number>
+      durationMs?: number
     }
   | { type: 'done'; runToken: string; run: FlowRun }
   | { type: 'aborted'; runToken: string; error: string }

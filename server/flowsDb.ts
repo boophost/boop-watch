@@ -376,6 +376,34 @@ export function listFlowGraphs(): { id: number; name: string; graph: string }[] 
   }[]
 }
 
+/** Full graphs for the read-only Flow Map (sorted by name). */
+export function listFlowsForMap(): {
+  id: number
+  name: string
+  description: string | null
+  published: boolean
+  updated_at: string
+  graph: FlowGraph
+}[] {
+  const rows = db().prepare('SELECT * FROM flows ORDER BY name COLLATE NOCASE ASC').all() as FlowRow[]
+  return rows.map((r) => {
+    let graph: FlowGraph = { nodes: [], edges: [] }
+    try {
+      graph = JSON.parse(r.graph) as FlowGraph
+    } catch {
+      /* corrupt — empty */
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      published: !!parseComponent(r.component)?.published,
+      updated_at: r.updated_at,
+      graph,
+    }
+  })
+}
+
 // Only flows whose automation is on — what schedules and event triggers fan
 // out over. Structural consumers (component references, the editor) keep using
 // listFlowGraphs: a disabled flow still exists, it just doesn't fire.

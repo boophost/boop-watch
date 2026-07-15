@@ -1,20 +1,45 @@
-import { Link, NavLink, Outlet } from 'react-router-dom'
-import { Activity, CalendarClock, ExternalLink, Library, Lightbulb, LogOut, Users, Workflow } from 'lucide-react'
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
+import {
+  Activity,
+  CalendarClock,
+  ExternalLink,
+  Library,
+  Lightbulb,
+  LogOut,
+  Map as MapIcon,
+  Users,
+  Workflow,
+} from 'lucide-react'
 import { useAuth } from '@/lib/AuthContext'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
-const NAV_ITEMS = [
+const NAV_ITEMS: {
+  to: string
+  label: string
+  icon: typeof Library
+  end?: boolean
+  /** Custom active check — Flows includes the editor but excludes Map. */
+  isActive?: (pathname: string) => boolean
+}[] = [
   { to: '/manage', label: 'Catalog', icon: Library, end: true },
-  { to: '/manage/flows', label: 'Flows', icon: Workflow, end: false },
-  { to: '/manage/schedules', label: 'Schedules', icon: CalendarClock, end: false },
-  { to: '/manage/activity', label: 'Activity', icon: Activity, end: false },
-  { to: '/manage/users', label: 'Users', icon: Users, end: false },
-  { to: '/manage/suggestions', label: 'Suggestions', icon: Lightbulb, end: false },
+  {
+    to: '/manage/flows',
+    label: 'Flows',
+    icon: Workflow,
+    isActive: (pathname) =>
+      pathname === '/manage/flows' || /^\/manage\/flows\/\d+(\/|$)/.test(pathname),
+  },
+  { to: '/manage/flows/map', label: 'Map', icon: MapIcon, end: true },
+  { to: '/manage/schedules', label: 'Schedules', icon: CalendarClock },
+  { to: '/manage/activity', label: 'Activity', icon: Activity },
+  { to: '/manage/users', label: 'Users', icon: Users },
+  { to: '/manage/suggestions', label: 'Suggestions', icon: Lightbulb },
 ]
 
 export default function ManageLayout() {
   const { user, logout } = useAuth()
+  const { pathname } = useLocation()
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -29,7 +54,7 @@ export default function ManageLayout() {
           </Link>
         </div>
         <nav className="flex flex-1 flex-col gap-1 p-2">
-          {NAV_ITEMS.map(({ to, label, icon: NavIcon, end }) => (
+          {NAV_ITEMS.map(({ to, label, icon: NavIcon, end, isActive: matchActive }) => (
             <NavLink
               key={to}
               to={to}
@@ -37,7 +62,7 @@ export default function ManageLayout() {
               className={({ isActive }) =>
                 cn(
                   'flex items-center justify-center gap-2 rounded-md px-2 py-2 text-sm font-medium transition-colors md:justify-start md:px-3',
-                  isActive
+                  (matchActive ? matchActive(pathname) : isActive)
                     ? 'bg-muted text-foreground'
                     : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground',
                 )

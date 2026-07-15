@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Plus, Trash2, Workflow } from 'lucide-react'
+import { Map as MapIcon, Plus, Trash2, Workflow } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { listFlows, createFlow, deleteFlow, saveFlow, type FlowSummary } from '@/lib/flows'
@@ -66,6 +66,12 @@ export default function Flows() {
     <div className="min-h-screen">
       <header className="flex items-center gap-4 border-b px-4 py-3 md:px-6">
         <h1 className="min-w-0 flex-1 truncate text-lg font-semibold md:text-xl">Flows</h1>
+        <Button size="sm" variant="outline" className="gap-1" asChild>
+          <Link to="/manage/flows/map">
+            <MapIcon className="size-4" />
+            Map
+          </Link>
+        </Button>
         {creating ? (
           <form
             className="flex items-center gap-2"
