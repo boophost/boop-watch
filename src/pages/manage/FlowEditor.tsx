@@ -74,7 +74,6 @@ import {
   editorRotationFromConfig,
   normalizeArrowConfig,
   normalizeRotation,
-  rotateArrowPoints,
   type ArrowDash,
   type ArrowHead,
 } from '@/lib/flowEditorMeta'
@@ -731,6 +730,7 @@ const EDITOR_DEFAULTS: Record<string, Record<string, unknown>> = {
     height: 120,
     color: '#a1a1aa',
     strokeWidth: 2,
+    headSize: 10,
     dash: 'solid',
     startHead: 'none',
     endHead: 'arrow',
@@ -2236,44 +2236,6 @@ function FlowEditorInner() {
                       return (
                         <>
                           <div className="space-y-1">
-                            <span className="text-xs font-medium">Rotate curve</span>
-                            <div className="flex flex-wrap gap-1">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-8 px-2 text-xs"
-                                onClick={() =>
-                                  patchArrow({ points: rotateArrowPoints(points, -15) })
-                                }
-                              >
-                                −15°
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-8 px-2 text-xs"
-                                onClick={() =>
-                                  patchArrow({ points: rotateArrowPoints(points, 15) })
-                                }
-                              >
-                                +15°
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-8 px-2 text-xs"
-                                onClick={() =>
-                                  patchArrow({ points: rotateArrowPoints(points, 90) })
-                                }
-                              >
-                                +90°
-                              </Button>
-                            </div>
-                          </div>
-                          <div className="space-y-1">
                             <label className="text-xs font-medium" htmlFor="ed-arrow-color">
                               Color
                             </label>
@@ -2296,23 +2258,43 @@ function FlowEditorInner() {
                               />
                             </div>
                           </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium" htmlFor="ed-arrow-stroke">
-                              Thickness
-                            </label>
-                            <Input
-                              id="ed-arrow-stroke"
-                              className="h-8"
-                              type="number"
-                              min={1}
-                              max={16}
-                              value={arrow.strokeWidth ?? 2}
-                              onChange={(e) =>
-                                patchArrow({
-                                  strokeWidth: Math.min(16, Math.max(1, Number(e.target.value) || 2)),
-                                })
-                              }
-                            />
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-stroke">
+                                Thickness
+                              </label>
+                              <Input
+                                id="ed-arrow-stroke"
+                                className="h-8"
+                                type="number"
+                                min={1}
+                                max={16}
+                                value={arrow.strokeWidth ?? 2}
+                                onChange={(e) =>
+                                  patchArrow({
+                                    strokeWidth: Math.min(16, Math.max(1, Number(e.target.value) || 2)),
+                                  })
+                                }
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-head-size">
+                                Head size
+                              </label>
+                              <Input
+                                id="ed-arrow-head-size"
+                                className="h-8"
+                                type="number"
+                                min={4}
+                                max={48}
+                                value={arrow.headSize ?? 10}
+                                onChange={(e) =>
+                                  patchArrow({
+                                    headSize: Math.min(48, Math.max(4, Number(e.target.value) || 10)),
+                                  })
+                                }
+                              />
+                            </div>
                           </div>
                           <div className="space-y-1">
                             <span className="text-xs font-medium">Line style</span>
@@ -2331,39 +2313,41 @@ function FlowEditorInner() {
                               ))}
                             </div>
                           </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium" htmlFor="ed-arrow-start-head">
-                              Start head
-                            </label>
-                            <select
-                              id="ed-arrow-start-head"
-                              className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                              value={arrow.startHead ?? 'none'}
-                              onChange={(e) => patchArrow({ startHead: e.target.value as ArrowHead })}
-                            >
-                              {ARROW_HEAD_OPTIONS.map((opt) => (
-                                <option key={opt.value} value={opt.value}>
-                                  {opt.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-medium" htmlFor="ed-arrow-end-head">
-                              End head
-                            </label>
-                            <select
-                              id="ed-arrow-end-head"
-                              className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
-                              value={arrow.endHead ?? 'arrow'}
-                              onChange={(e) => patchArrow({ endHead: e.target.value as ArrowHead })}
-                            >
-                              {ARROW_HEAD_OPTIONS.map((opt) => (
-                                <option key={opt.value} value={opt.value}>
-                                  {opt.label}
-                                </option>
-                              ))}
-                            </select>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-start-head">
+                                Start head
+                              </label>
+                              <select
+                                id="ed-arrow-start-head"
+                                className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                                value={arrow.startHead ?? 'none'}
+                                onChange={(e) => patchArrow({ startHead: e.target.value as ArrowHead })}
+                              >
+                                {ARROW_HEAD_OPTIONS.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-end-head">
+                                End head
+                              </label>
+                              <select
+                                id="ed-arrow-end-head"
+                                className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                                value={arrow.endHead ?? 'arrow'}
+                                onChange={(e) => patchArrow({ endHead: e.target.value as ArrowHead })}
+                              >
+                                {ARROW_HEAD_OPTIONS.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
                           </div>
                           <div className="space-y-1">
                             <span className="text-xs font-medium">Curve points</span>
