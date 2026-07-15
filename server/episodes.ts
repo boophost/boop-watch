@@ -6,7 +6,14 @@
 import { limitedFetch } from './httpQueue.js'
 import { fetchAnimeEpisodesPage, episodeNumberFromUrl } from './jikan.js'
 import { fetchAniListMedia, type AniListMedia } from './anilist.js'
-import { getCachedEpisodes, upsertEpisodeAirDates, upsertEpisodeTitles, episodesCacheInfo } from './db.js'
+import {
+  getCachedEpisodes,
+  upsertEpisodeAirDates,
+  upsertEpisodeTitles,
+  episodesCacheInfo,
+  lastFetchAttempt,
+  recordFetchAttempt,
+} from './db.js'
 
 /** One merged episode ready for display. */
 export interface DisplayEpisode {
@@ -173,33 +180,59 @@ export async function refreshEpisodeCache(
 
   const cachedBefore = getCachedEpisodes(mal_id)
   const complete = finished && totalEpisodes != null && cachedBefore.length >= totalEpisodes
-  // Cache-first: a complete finished show never refreshes; otherwise skip the
-  // upstream fetch while the cache is recent (episodes air weekly, not by the
-  // minute) and has no missing titles — no excess AniList/Jikan/Kitsu polling.
-  const ci = episodesCacheInfo(mal_id)
-  const ageMs = ci.updated_at ? Date.now() - new Date(ci.updated_at + 'Z').getTime() : Infinity
-  const missingTitles = cachedBefore.length === 0 || cachedBefore.some((e) => !e.title)
-  const fresh = ttlMs > 0 && ageMs < ttlMs && !missingTitles
-  if (!opts.force && (complete || fresh)) return { source, filled }
 
-  const media = await fetchAniListMedia(mal_id)
-  if (media) {
-    source = 'anilist'
-    if (media.episodes.length > 0) {
+  // Two independent refresh concerns, each with its own cache-first gate, so a
+  // persistently-untitled recent episode can't force an upstream fetch on every
+  // view (that was excess AniList/Jikan/Kitsu polling — see data-sourcing policy):
+  //
+  //  1. Existence/air-dates (AniList): the freshness-critical fact. Gated on the
+  //     episode cache's own age — a complete finished show never refreshes;
+  //     otherwise refresh once per TTL (episodes air weekly, not by the minute).
+  //  2. Title fill (Jikan/Kitsu/AniList merge): cosmetic. Gated by its own
+  //     negative-cache attempt ledger, so we retry missing titles periodically
+  //     but never per view — a just-aired "Episode N" stays that way until the
+  //     next attempt window, instead of re-polling three APIs every page load.
+  const ci = episodesCacheInfo(mal_id)
+  const airAgeMs = ci.updated_at ? Date.now() - new Date(ci.updated_at + 'Z').getTime() : Infinity
+  const airFresh = ttlMs > 0 && airAgeMs < ttlMs && cachedBefore.length > 0
+  const refreshAir = !opts.force && !complete && !airFresh
+
+  if (refreshAir) {
+    const media = await fetchAniListMedia(mal_id)
+    if (media && media.episodes.length > 0) {
+      source = 'anilist'
       upsertEpisodeAirDates(mal_id, media.episodes.map((e) => ({ number: e.number, aired: e.airedAt })))
     }
-    // Fill titles (cache-first: only when something is missing).
-    const total = totalEpisodes ?? media.totalEpisodes
-    const needTitles = getCachedEpisodes(mal_id).some((e) => !e.title)
-    const needMore = finished && total != null && getCachedEpisodes(mal_id).length < total
-    if (needTitles || needMore) {
-      filled = await fillEpisodeTitles(mal_id, { finished, streamingTitles: media.streamingTitles })
-    }
-  } else if (cachedBefore.some((e) => !e.title) || cachedBefore.length === 0) {
-    // AniList down — still try Jikan/Kitsu so the list isn't empty/untitled.
-    filled = await fillEpisodeTitles(mal_id, { finished })
+    // AniList's streaming titles come free with the same fetch — hand them to
+    // the title fill below so it doesn't re-request AniList.
+    filled += await maybeFillTitles(mal_id, finished, totalEpisodes ?? media?.totalEpisodes ?? null, {
+      ttlMs,
+      force: opts.force,
+      streamingTitles: media?.streamingTitles,
+    })
+  } else {
+    // Air-dates are fresh; still top up titles if the title ledger says it's time.
+    filled += await maybeFillTitles(mal_id, finished, totalEpisodes, { ttlMs, force: opts.force })
   }
   return { source, filled }
+}
+
+/** Fill missing episode titles, gated by the `episode-titles` attempt ledger so
+ * the same series isn't re-polled every view. Returns rows written. */
+async function maybeFillTitles(
+  mal_id: number,
+  finished: boolean,
+  total: number | null,
+  opts: { ttlMs: number; force?: boolean; streamingTitles?: AniListMedia['streamingTitles'] },
+): Promise<number> {
+  const cached = getCachedEpisodes(mal_id)
+  const missingTitles = cached.length === 0 || cached.some((e) => !e.title)
+  const wantMore = finished && total != null && cached.length < total
+  if (!missingTitles && !wantMore) return 0
+  const attemptAgeMs = Date.now() - lastFetchAttempt('episode-titles', String(mal_id))
+  if (!opts.force && opts.ttlMs > 0 && attemptAgeMs < opts.ttlMs) return 0
+  recordFetchAttempt('episode-titles', String(mal_id))
+  return fillEpisodeTitles(mal_id, { finished, streamingTitles: opts.streamingTitles })
 }
 
 /**
