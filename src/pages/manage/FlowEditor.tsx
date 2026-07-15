@@ -68,7 +68,16 @@ import {
   type NodeReport,
   type ComponentInterface,
 } from '@/lib/flows'
-import { isEditorNode, editorRotationFromConfig, normalizeRotation } from '@/lib/flowEditorMeta'
+import {
+  DEFAULT_ARROW_POINTS,
+  isEditorNode,
+  editorRotationFromConfig,
+  normalizeArrowConfig,
+  normalizeRotation,
+  rotateArrowPoints,
+  type ArrowDash,
+  type ArrowHead,
+} from '@/lib/flowEditorMeta'
 import {
   editorNodeTypes,
   editorRfType,
@@ -620,16 +629,32 @@ function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
       const rfType = n.type === 'transform.reroute' ? 'reroute' : editorRfType(n.type)
       const groupId = typeof n.config.groupId === 'string' ? n.config.groupId : undefined
       const parentLocked = groupId ? lockedGroups.get(groupId) : false
-      const width = typeof n.config.width === 'number' ? n.config.width : undefined
-      const height = typeof n.config.height === 'number' ? n.config.height : undefined
       const config = { ...n.config }
       delete config.groupId
+      if (n.type === 'editor.arrow') {
+        const hadPoints = Array.isArray(n.config.points) && (n.config.points as unknown[]).length >= 2
+        const normalized = normalizeArrowConfig(config)
+        Object.assign(config, normalized)
+        delete config.rotation
+        delete config.direction
+        // Legacy short boxes were for straight shafts — give curves room when migrating.
+        if (!hadPoints && (typeof config.height !== 'number' || config.height < 80)) {
+          config.height = 120
+        }
+        if (!hadPoints && (typeof config.width !== 'number' || config.width < 120)) {
+          config.width = 200
+        }
+      }
+      const width = typeof config.width === 'number' ? config.width : undefined
+      const height = typeof config.height === 'number' ? config.height : undefined
       const style =
         width && height
           ? { width, height }
           : rfType === 'group'
             ? { width: width ?? 280, height: height ?? 180 }
-            : undefined
+            : rfType === 'arrow'
+              ? { width: width ?? 200, height: height ?? 120 }
+              : undefined
       return {
         id: n.id,
         type: rfType,
@@ -701,9 +726,33 @@ const EDITOR_DEFAULTS: Record<string, Record<string, unknown>> = {
     verticalAlign: 'top',
     rotation: 0,
   },
-  'editor.arrow': { width: 160, height: 48, rotation: 0 },
+  'editor.arrow': {
+    width: 200,
+    height: 120,
+    color: '#a1a1aa',
+    strokeWidth: 2,
+    dash: 'solid',
+    startHead: 'none',
+    endHead: 'arrow',
+    points: DEFAULT_ARROW_POINTS.map((p) => ({ ...p })),
+  },
   'editor.group': { title: 'Group', color: 'rgba(124, 92, 255, 0.12)', width: 280, height: 180, locked: false },
 }
+
+const ARROW_DASH_OPTIONS: { value: ArrowDash; label: string }[] = [
+  { value: 'solid', label: 'Solid' },
+  { value: 'dashed', label: 'Dashed' },
+  { value: 'dotted', label: 'Dotted' },
+]
+
+const ARROW_HEAD_OPTIONS: { value: ArrowHead; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'arrow', label: 'Arrow' },
+  { value: 'triangle', label: 'Triangle' },
+  { value: 'open', label: 'Open' },
+  { value: 'diamond', label: 'Diamond' },
+  { value: 'dot', label: 'Dot' },
+]
 
 function EditorRotationField({
   value,
@@ -2173,24 +2222,196 @@ function FlowEditorInner() {
                       </div>
                     </>
                   ) : selected.data.specType === 'editor.arrow' ? (
-                    <>
-                      <EditorRotationField
-                        value={editorRotationFromConfig('editor.arrow', selected.data.config)}
-                        onChange={(rotation) => setConfigValue('rotation', rotation)}
-                      />
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium" htmlFor="ed-arrow-color">
-                          Color
-                        </label>
-                        <Input
-                          id="ed-arrow-color"
-                          className="h-8 font-mono"
-                          value={String(selected.data.config.color ?? '')}
-                          placeholder="CSS color"
-                          onChange={(e) => setConfigValue('color', e.target.value)}
-                        />
-                      </div>
-                    </>
+                    (() => {
+                      const arrow = normalizeArrowConfig(selected.data.config)
+                      const points = arrow.points ?? DEFAULT_ARROW_POINTS
+                      const patchArrow = (patch: Record<string, unknown>) => {
+                        const next = normalizeArrowConfig({ ...selected.data.config, ...patch })
+                        patchEditorConfig(selected.id, {
+                          ...next,
+                          rotation: undefined,
+                          direction: undefined,
+                        })
+                      }
+                      return (
+                        <>
+                          <div className="space-y-1">
+                            <span className="text-xs font-medium">Rotate curve</span>
+                            <div className="flex flex-wrap gap-1">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                onClick={() =>
+                                  patchArrow({ points: rotateArrowPoints(points, -15) })
+                                }
+                              >
+                                −15°
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                onClick={() =>
+                                  patchArrow({ points: rotateArrowPoints(points, 15) })
+                                }
+                              >
+                                +15°
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                onClick={() =>
+                                  patchArrow({ points: rotateArrowPoints(points, 90) })
+                                }
+                              >
+                                +90°
+                              </Button>
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium" htmlFor="ed-arrow-color">
+                              Color
+                            </label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                id="ed-arrow-color"
+                                type="color"
+                                className="h-8 w-10 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
+                                value={
+                                  /^#[0-9a-f]{6}$/i.test(String(arrow.color ?? ''))
+                                    ? String(arrow.color)
+                                    : '#a1a1aa'
+                                }
+                                onChange={(e) => patchArrow({ color: e.target.value })}
+                              />
+                              <Input
+                                className="h-8 font-mono"
+                                value={String(arrow.color ?? '#a1a1aa')}
+                                onChange={(e) => patchArrow({ color: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium" htmlFor="ed-arrow-stroke">
+                              Thickness
+                            </label>
+                            <Input
+                              id="ed-arrow-stroke"
+                              className="h-8"
+                              type="number"
+                              min={1}
+                              max={16}
+                              value={arrow.strokeWidth ?? 2}
+                              onChange={(e) =>
+                                patchArrow({
+                                  strokeWidth: Math.min(16, Math.max(1, Number(e.target.value) || 2)),
+                                })
+                              }
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-xs font-medium">Line style</span>
+                            <div className="flex gap-1">
+                              {ARROW_DASH_OPTIONS.map((opt) => (
+                                <Button
+                                  key={opt.value}
+                                  type="button"
+                                  variant={(arrow.dash ?? 'solid') === opt.value ? 'secondary' : 'outline'}
+                                  size="sm"
+                                  className="h-8 flex-1 px-2 text-xs"
+                                  onClick={() => patchArrow({ dash: opt.value })}
+                                >
+                                  {opt.label}
+                                </Button>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium" htmlFor="ed-arrow-start-head">
+                              Start head
+                            </label>
+                            <select
+                              id="ed-arrow-start-head"
+                              className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                              value={arrow.startHead ?? 'none'}
+                              onChange={(e) => patchArrow({ startHead: e.target.value as ArrowHead })}
+                            >
+                              {ARROW_HEAD_OPTIONS.map((opt) => (
+                                <option key={opt.value} value={opt.value}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium" htmlFor="ed-arrow-end-head">
+                              End head
+                            </label>
+                            <select
+                              id="ed-arrow-end-head"
+                              className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                              value={arrow.endHead ?? 'arrow'}
+                              onChange={(e) => patchArrow({ endHead: e.target.value as ArrowHead })}
+                            >
+                              {ARROW_HEAD_OPTIONS.map((opt) => (
+                                <option key={opt.value} value={opt.value}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-xs font-medium">Curve points</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">{points.length} points</span>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                disabled={points.length >= 8}
+                                onClick={() => {
+                                  const mid = Math.floor(points.length / 2)
+                                  const a = points[mid - 1] ?? points[0]
+                                  const b = points[mid] ?? points[points.length - 1]
+                                  const inserted = {
+                                    x: (a.x + b.x) / 2,
+                                    y: Math.min(1, Math.max(0, (a.y + b.y) / 2 - 0.12)),
+                                  }
+                                  const next = [...points.slice(0, mid), inserted, ...points.slice(mid)]
+                                  patchArrow({ points: next })
+                                }}
+                              >
+                                Add bend
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                disabled={points.length <= 2}
+                                onClick={() => {
+                                  if (points.length <= 2) return
+                                  const mid = Math.floor(points.length / 2)
+                                  const next = points.filter((_, i) => i !== mid)
+                                  patchArrow({ points: next.length >= 2 ? next : points })
+                                }}
+                              >
+                                Remove bend
+                              </Button>
+                            </div>
+                            <p className="text-[10px] text-muted-foreground">
+                              Select the arrow and drag the handles to reshape the curve.
+                            </p>
+                          </div>
+                        </>
+                      )
+                    })()
                   ) : (
                     <>
                       <div className="space-y-1">

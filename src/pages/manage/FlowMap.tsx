@@ -43,6 +43,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { isEditorNode } from '@/lib/flowEditorMeta'
+import { ArrowCurveGraphic } from './flowEditorAnnotations'
 import {
   getFlowMap,
   getNodeTypes,
@@ -170,8 +171,8 @@ function nodeSize(type: string, config: Record<string, unknown>): { w: number; h
   const w = typeof config.width === 'number' ? config.width : undefined
   const h = typeof config.height === 'number' ? config.height : undefined
   if (type === 'transform.reroute') return { w: w ?? EST_REROUTE.w, h: h ?? EST_REROUTE.h }
-  if (type === 'editor.sticky' || type === 'editor.arrow')
-    return { w: w ?? EST_STICKY.w, h: h ?? EST_STICKY.h }
+  if (type === 'editor.sticky') return { w: w ?? EST_STICKY.w, h: h ?? EST_STICKY.h }
+  if (type === 'editor.arrow') return { w: w ?? 200, h: h ?? 120 }
   if (type === 'editor.group') return { w: w ?? 280, h: h ?? 180 }
   return { w: w ?? EST_NODE.w, h: h ?? EST_NODE.h }
 }
@@ -229,8 +230,8 @@ function buildFlowCanvas(
   const g = entry.graph
   const groupId = mapGroupId(entry.id)
 
-  // Skip arrows on the map (planned redo); keep other annotations.
-  const graphNodes = g.nodes.filter((n) => n.type !== 'editor.arrow')
+  // Include editor annotations (stickies, arrows, groups) inside each flow group.
+  const graphNodes = g.nodes
   const idSet = new Set(graphNodes.map((n) => n.id))
 
   const topLevel = graphNodes.filter((n) => {
@@ -612,8 +613,17 @@ const MapRerouteNode = memo(function MapRerouteNode({ data }: NodeProps<MapRFNod
 })
 
 /** Embedded editor annotation inside a flow group (read-only on the map). */
-const MapNoteNode = memo(function MapNoteNode({ data }: NodeProps<MapRFNode>) {
+const MapNoteNode = memo(function MapNoteNode({ data, width, height }: NodeProps<MapRFNode>) {
   const cfg = data.config ?? {}
+  if (data.specType === 'editor.arrow') {
+    const w = width ?? (typeof cfg.width === 'number' ? cfg.width : 200)
+    const h = height ?? (typeof cfg.height === 'number' ? cfg.height : 120)
+    return (
+      <div className={cn('h-full w-full', data.dimmed ? 'opacity-30' : 'opacity-90')}>
+        <ArrowCurveGraphic config={cfg} width={w} height={h} />
+      </div>
+    )
+  }
   const text = typeof cfg.text === 'string' ? cfg.text : data.label
   const color = typeof cfg.color === 'string' ? cfg.color : 'rgba(124, 92, 255, 0.12)'
   const title = typeof cfg.title === 'string' ? cfg.title : null
