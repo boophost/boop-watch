@@ -1131,6 +1131,64 @@ const urlValue = valueLiteral(
   },
 )
 
+/** One random number in [lo, hi]. Integers are inclusive on both ends; floats
+ * use half-open [lo, hi) so adjacent ranges tile cleanly. */
+function sampleRandom(lo: number, hi: number, integer: boolean): number {
+  if (integer) {
+    const a = Math.ceil(Math.min(lo, hi))
+    const b = Math.floor(Math.max(lo, hi))
+    if (b < a) throw new Error(`No integers in range [${lo}, ${hi}]`)
+    return a + Math.floor(Math.random() * (b - a + 1))
+  }
+  const min = Math.min(lo, hi)
+  const max = Math.max(lo, hi)
+  return min + Math.random() * (max - min)
+}
+
+const randomNumber: NodeImpl = {
+  spec: {
+    type: 'value.random',
+    label: 'Random number',
+    category: 'value',
+    description:
+      'Emits one or more random numbers on a typed number port. Wire into "Set field from value" — one value broadcasts to every item; set Count to N to zip a distinct roll onto each item.',
+    inputs: [],
+    outputs: [{ id: 'value', label: 'number', dataType: 'number' }],
+    config: [
+      { key: 'min', label: 'Minimum', kind: 'number', default: 0 },
+      { key: 'max', label: 'Maximum', kind: 'number', default: 1 },
+      {
+        key: 'integer',
+        label: 'Whole numbers only',
+        kind: 'boolean',
+        default: false,
+        help: 'When on, rolls integers inclusive of min and max. When off, floats in [min, max).',
+      },
+      {
+        key: 'count',
+        label: 'Count',
+        kind: 'number',
+        default: 1,
+        help: 'How many independent rolls to emit. Pair with Set field from value to zip one roll per item.',
+      },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const lo = num(config, 'min', 0)
+    const hi = num(config, 'max', 1)
+    const integer = bool(config, 'integer', false)
+    const count = Math.max(0, Math.floor(num(config, 'count', 1)))
+    const vals: number[] = []
+    for (let i = 0; i < count; i++) vals.push(sampleRandom(lo, hi, integer))
+    ctx.notes.push(
+      count === 0
+        ? 'emitted nothing (count = 0)'
+        : `rolled ${count} ${integer ? 'integer' : 'float'}${count === 1 ? '' : 's'} in [${Math.min(lo, hi)}, ${Math.max(lo, hi)}${integer ? ']' : ')'}`,
+    )
+    return { value: asValueItems(vals) }
+  },
+}
+
 // ---------------------------------------------------------------------------
 // JSON-builder nodes: transform.json shapes a typed JSON value onto each item,
 // combine.collect folds a field from many items into one array field, and
@@ -5611,6 +5669,7 @@ const IMPLS: NodeImpl[] = [
   collect,
   textValue,
   numberValue,
+  randomNumber,
   colorValue,
   urlValue,
   jsonValue,
