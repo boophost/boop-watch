@@ -1367,6 +1367,7 @@ const convert: NodeImpl = {
           { value: 'to-iso-date', label: 'Date \u2192 ISO timestamp' },
           { value: 'now', label: 'Set to now (ISO timestamp)' },
           { value: 'to-number', label: 'Text \u2192 number' },
+          { value: 'extract-number', label: 'First number in text' },
         ],
       },
       {
@@ -1424,6 +1425,16 @@ const convert: NodeImpl = {
             return item
           }
           return { ...item, [outField]: n }
+        }
+        // "Ep 5" / "Episode 12v2" → 5 / 12 — for payloads that carry an episode
+        // as display text (the release trigger's `ep` field).
+        case 'extract-number': {
+          const m = /\d+/.exec(String(raw))
+          if (!m) {
+            failed++
+            return item
+          }
+          return { ...item, [outField]: Number(m[0]) }
         }
         default:
           throw new Error(`Unknown conversion: ${op}`)
