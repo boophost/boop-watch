@@ -330,8 +330,31 @@ export interface FlowMapEntry {
   graph: FlowGraph
 }
 
+export interface FlowMapNote {
+  id: string
+  x: number
+  y: number
+  width: number
+  height: number
+  text: string
+  color?: string
+}
+
+export interface FlowMapLayout {
+  [flowId: string]: { x: number; y: number }
+}
+
 export const getFlowMap = () =>
-  fetchAuth('/api/flows/map').then((r) => json<{ flows: FlowMapEntry[] }>(r))
+  fetchAuth('/api/flows/map').then((r) =>
+    json<{ flows: FlowMapEntry[]; layout: FlowMapLayout; notes: FlowMapNote[] }>(r),
+  )
+
+export const saveFlowMapState = (state: { layout: FlowMapLayout; notes: FlowMapNote[] }) =>
+  fetchAuth('/api/flows/map/state', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(state),
+  }).then((r) => json<{ layout: FlowMapLayout; notes: FlowMapNote[] }>(r))
 
 export const getNodeTypes = () =>
   fetchAuth('/api/flows/node-types').then((r) => json<{ nodeTypes: NodeSpec[] }>(r))

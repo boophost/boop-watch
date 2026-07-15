@@ -250,7 +250,20 @@ flowRouter.get('/api/flows', (_req, res) => {
 // Bulk graph payload for the read-only Flow Map. Declared before `/:id` so
 // "map" isn't captured as an id. One round-trip instead of N× GET /api/flows/:id.
 flowRouter.get('/api/flows/map', (_req, res) => {
-  res.json({ flows: flowsDb.listFlowsForMap() })
+  const state = flowsDb.getFlowMapState()
+  res.json({ flows: flowsDb.listFlowsForMap(), layout: state.layout, notes: state.notes })
+})
+
+// Persist Flow Map group positions + sticky notes (shared for all admins).
+flowRouter.put('/api/flows/map/state', (req, res) => {
+  const body = req.body as { layout?: unknown; notes?: unknown }
+  const layout =
+    body.layout && typeof body.layout === 'object' && !Array.isArray(body.layout)
+      ? (body.layout as flowsDb.FlowMapState['layout'])
+      : {}
+  const notes = Array.isArray(body.notes) ? (body.notes as flowsDb.FlowMapNote[]) : []
+  const state = flowsDb.saveFlowMapState({ layout, notes })
+  res.json({ layout: state.layout, notes: state.notes })
 })
 
 flowRouter.post('/api/flows', (req, res) => {

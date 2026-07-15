@@ -1,5 +1,6 @@
-// Read-only live Flow Map: every flow as a movable parent group on one canvas.
-// Nodes/edges are not editable; live activity paints running nodes + edge counts.
+// Live Flow Map: every flow as a movable parent group on one canvas.
+// Group positions + sticky notes are saved server-side; Ctrl+Z/Y undoes map edits.
+// Inner flow nodes stay fixed (read-only); live activity paints running nodes.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -12,6 +13,8 @@ import {
   ReactFlowProvider,
   useEdgesState,
   useNodesState,
+  useReactFlow,
+  useStore,
   type Edge,
   type EdgeProps,
   type Node,
@@ -19,6 +22,7 @@ import {
   BaseEdge,
   getBezierPath,
   EdgeLabelRenderer,
+  NodeResizer,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import './flowMap.css'
@@ -30,7 +34,11 @@ import {
   Loader2,
   Map as MapIcon,
   Network,
+  Redo2,
   RefreshCw,
+  StickyNote,
+  Trash2,
+  Undo2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -39,10 +47,13 @@ import {
   getFlowMap,
   getNodeTypes,
   getQueueStats,
+  saveFlowMapState,
   streamActivity,
   resolveNodePorts,
   type ActivityStreamEvent,
   type FlowMapEntry,
+  type FlowMapLayout,
+  type FlowMapNote,
   type NodeCategory,
   type NodePort,
   type NodeReport,
@@ -51,16 +62,17 @@ import {
   type QueueStat,
   type RunActivity,
 } from '@/lib/flows'
+import { useFlowHistory } from './useFlowHistory'
 
 // ---- constants -------------------------------------------------------------
 
-const LAYOUT_KEY = 'boop-watch.flow-map.layout'
-const GROUP_PAD = { top: 40, left: 20, right: 20, bottom: 20 }
-const GROUP_GAP = 64
+const LEGACY_LAYOUT_KEY = 'boop-watch.flow-map.layout'
+const GROUP_PAD = { top: 24, left: 20, right: 20, bottom: 20 }
+const GROUP_GAP = 80
 const EST_NODE = { w: 180, h: 96 }
 const EST_REROUTE = { w: 16, h: 16 }
 const EST_STICKY = { w: 160, h: 100 }
-const TITLE_BAR = 28
+const DEFAULT_NOTE = { w: 200, h: 140, color: '#fef08a' }
 
 const CATEGORY_DOT: Record<NodeCategory, string> = {
   trigger: 'bg-lime-400',
@@ -120,14 +132,15 @@ interface MapNodeData extends Record<string, unknown> {
   isTrigger?: boolean
   running?: boolean
   report?: NodeReport
+  noteId?: string
+  text?: string
+  color?: string
+  onNoteChange?: (patch: { text?: string; width?: number; height?: number }) => void
 }
 
-type MapRFNode = Node<MapNodeData, 'mapGroup' | 'mapFlow' | 'mapReroute' | 'mapNote'>
+type MapRFNode = Node<MapNodeData, 'mapGroup' | 'mapFlow' | 'mapReroute' | 'mapNote' | 'mapSticky'>
 type MapRFEdge = Edge<{ pulse?: number; pulseAt?: number }>
-
-interface SavedLayout {
-  [flowId: string]: { x: number; y: number }
-}
+type SavedLayout = FlowMapLayout
 
 interface LiveRun {
   runToken: string
@@ -163,9 +176,9 @@ function nodeSize(type: string, config: Record<string, unknown>): { w: number; h
   return { w: w ?? EST_NODE.w, h: h ?? EST_NODE.h }
 }
 
-function loadLayout(): SavedLayout {
+function loadLegacyLayout(): SavedLayout {
   try {
-    const raw = localStorage.getItem(LAYOUT_KEY)
+    const raw = localStorage.getItem(LEGACY_LAYOUT_KEY)
     if (!raw) return {}
     return JSON.parse(raw) as SavedLayout
   } catch {
@@ -173,15 +186,14 @@ function loadLayout(): SavedLayout {
   }
 }
 
-function saveLayout(layout: SavedLayout) {
+function clearLegacyLayout() {
   try {
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout))
+    localStorage.removeItem(LEGACY_LAYOUT_KEY)
   } catch {
-    /* quota / private mode */
+    /* ignore */
   }
 }
 
-/** Auto-pack groups into a wrapping row based on their sizes. */
 function packGroups(
   sizes: { flowId: number; w: number; h: number }[],
   saved: SavedLayout,
@@ -217,9 +229,11 @@ function buildFlowCanvas(
   const g = entry.graph
   const groupId = mapGroupId(entry.id)
 
-  // Top-level nodes only (no groupId, or orphaned groupId) drive the flow bbox.
-  const idSet = new Set(g.nodes.map((n) => n.id))
-  const topLevel = g.nodes.filter((n) => {
+  // Skip arrows on the map (planned redo); keep other annotations.
+  const graphNodes = g.nodes.filter((n) => n.type !== 'editor.arrow')
+  const idSet = new Set(graphNodes.map((n) => n.id))
+
+  const topLevel = graphNodes.filter((n) => {
     const gid = typeof n.config.groupId === 'string' ? n.config.groupId : undefined
     return !gid || !idSet.has(gid)
   })
@@ -264,9 +278,9 @@ function buildFlowCanvas(
     },
   }
 
-  const childNodes: MapRFNode[] = g.nodes.map((n) => {
+  const childNodes: MapRFNode[] = graphNodes.map((n) => {
     const nestedGid = typeof n.config.groupId === 'string' ? n.config.groupId : undefined
-    const hasParent = nestedGid && idSet.has(nestedGid)
+    const hasParent = !!(nestedGid && idSet.has(nestedGid))
     const { w, h } = nodeSize(n.type, n.config)
     const config = { ...n.config }
     delete config.groupId
@@ -313,16 +327,18 @@ function buildFlowCanvas(
     }
   })
 
-  const edges: MapRFEdge[] = g.edges.map((e) => ({
-    id: `f${entry.id}:${e.id}`,
-    source: mapNodeId(entry.id, e.source),
-    sourceHandle: e.sourceHandle,
-    target: mapNodeId(entry.id, e.target),
-    targetHandle: e.targetHandle,
-    focusable: false,
-    interactable: false,
-    data: {},
-  }))
+  const edges: MapRFEdge[] = g.edges
+    .filter((e) => idSet.has(e.source) && idSet.has(e.target))
+    .map((e) => ({
+      id: `f${entry.id}:${e.id}`,
+      source: mapNodeId(entry.id, e.source),
+      sourceHandle: e.sourceHandle,
+      target: mapNodeId(entry.id, e.target),
+      targetHandle: e.targetHandle,
+      focusable: false,
+      interactable: false,
+      data: {},
+    }))
 
   return { nodes: [groupNode, ...childNodes], edges, width, height }
 }
@@ -334,7 +350,6 @@ function buildMapGraph(
   saved: SavedLayout,
 ): { nodes: MapRFNode[]; edges: MapRFEdge[] } {
   const visible = hideComponents ? flows.filter((f) => !f.published) : flows
-  // First pass: measure each flow
   const measured = visible.map((f) => {
     const built = buildFlowCanvas(f, specs, { x: 0, y: 0 })
     return { flow: f, built }
@@ -355,44 +370,130 @@ function buildMapGraph(
   return { nodes, edges }
 }
 
+function stickyNodesFromNotes(
+  notes: FlowMapNote[],
+  onNoteChange: (noteId: string, patch: { text?: string; width?: number; height?: number }) => void,
+): MapRFNode[] {
+  return notes.map((n) => ({
+    id: `note:${n.id}`,
+    type: 'mapSticky' as const,
+    position: { x: n.x, y: n.y },
+    style: { width: n.width, height: n.height },
+    draggable: true,
+    selectable: true,
+    connectable: false,
+    zIndex: 5,
+    data: {
+      flowId: 0,
+      flowName: '',
+      published: false,
+      noteId: n.id,
+      text: n.text,
+      color: n.color ?? DEFAULT_NOTE.color,
+      onNoteChange: (patch) => onNoteChange(n.id, patch),
+    },
+  }))
+}
+
+function layoutFromNodes(nodes: MapRFNode[]): SavedLayout {
+  const layout: SavedLayout = {}
+  for (const n of nodes) {
+    if (n.type !== 'mapGroup') continue
+    layout[String(n.data.flowId)] = {
+      x: Math.round(n.position.x),
+      y: Math.round(n.position.y),
+    }
+  }
+  return layout
+}
+
+function notesFromNodes(nodes: MapRFNode[]): FlowMapNote[] {
+  return nodes
+    .filter((n) => n.type === 'mapSticky' && n.data.noteId)
+    .map((n) => {
+      const w = typeof n.style?.width === 'number' ? n.style.width : DEFAULT_NOTE.w
+      const h = typeof n.style?.height === 'number' ? n.style.height : DEFAULT_NOTE.h
+      return {
+        id: n.data.noteId!,
+        x: Math.round(n.position.x),
+        y: Math.round(n.position.y),
+        width: Math.round(w),
+        height: Math.round(h),
+        text: String(n.data.text ?? ''),
+        ...(n.data.color ? { color: String(n.data.color) } : {}),
+      }
+    })
+}
+
+/** Title grows as you zoom out so group names stay readable; never shrinks below 1×. */
+function zoomTitleScale(zoom: number): number {
+  if (!Number.isFinite(zoom) || zoom <= 0) return 1
+  return Math.min(Math.max(1 / zoom, 1), 8)
+}
+
+function zoomBorderPx(zoom: number): number {
+  if (!Number.isFinite(zoom) || zoom <= 0) return 2
+  return Math.min(Math.max(2 / zoom, 2), 10)
+}
+
 // ---- node components -------------------------------------------------------
 
 const MapGroupNode = memo(function MapGroupNode({ data, selected }: NodeProps<MapRFNode>) {
+  const zoom = useStore((s) => s.transform[2])
+  const titleScale = zoomTitleScale(zoom)
+  const borderPx = zoomBorderPx(zoom)
+
   return (
-    <div
-      className={cn(
-        'h-full w-full rounded-xl border-2 bg-card/40 backdrop-blur-[1px]',
-        data.active
-          ? 'flow-map-group-active border-violet-400'
-          : selected
-            ? 'border-ring'
-            : 'border-border/80',
-        data.dimmed && !data.active ? 'opacity-45' : null,
-      )}
-    >
+    <div className="relative h-full w-full">
+      {/* Floating counter-scaled label — readable at any zoom. */}
       <div
-        className="flex items-center gap-2 border-b border-border/60 px-3"
-        style={{ height: TITLE_BAR }}
+        className="flow-map-label absolute left-0 z-10"
+        style={{
+          bottom: '100%',
+          marginBottom: 6,
+          transform: `scale(${titleScale})`,
+          transformOrigin: 'bottom left',
+        }}
       >
-        <span className="truncate text-xs font-semibold text-foreground">{data.flowName}</span>
-        {data.published ? (
-          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-            Component
-          </span>
-        ) : null}
-        {data.active ? (
-          <Loader2 className="ml-auto size-3.5 shrink-0 animate-spin text-violet-400" />
-        ) : (
-          <Link
-            to={`/manage/flows/${data.flowId}`}
-            className="nodrag nopan ml-auto rounded p-0.5 text-muted-foreground hover:text-foreground"
-            title="Open in editor"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <ExternalLink className="size-3.5" />
-          </Link>
-        )}
+        <div
+          className={cn(
+            'flex max-w-[min(70vw,520px)] items-center gap-2 rounded-md border bg-background/95 px-2.5 py-1 shadow-md backdrop-blur-sm',
+            data.active ? 'border-violet-400' : selected ? 'border-ring' : 'border-border',
+          )}
+        >
+          <span className="truncate text-sm font-semibold text-foreground">{data.flowName}</span>
+          {data.published ? (
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              Component
+            </span>
+          ) : null}
+          {data.active ? (
+            <Loader2 className="size-3.5 shrink-0 animate-spin text-violet-400" />
+          ) : (
+            <Link
+              to={`/manage/flows/${data.flowId}`}
+              className="nodrag nopan pointer-events-auto rounded p-0.5 text-muted-foreground hover:text-foreground"
+              title="Open in editor"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <ExternalLink className="size-3.5" />
+            </Link>
+          )}
+        </div>
       </div>
+
+      <div
+        className={cn(
+          'h-full w-full rounded-xl bg-card/50 backdrop-blur-[1px]',
+          data.active
+            ? 'flow-map-group-active border-violet-400'
+            : selected
+              ? 'border-ring'
+              : 'border-violet-400/55',
+          data.dimmed && !data.active ? 'opacity-45' : null,
+        )}
+        style={{ borderStyle: 'solid', borderWidth: borderPx }}
+      />
     </div>
   )
 })
@@ -510,6 +611,7 @@ const MapRerouteNode = memo(function MapRerouteNode({ data }: NodeProps<MapRFNod
   )
 })
 
+/** Embedded editor annotation inside a flow group (read-only on the map). */
 const MapNoteNode = memo(function MapNoteNode({ data }: NodeProps<MapRFNode>) {
   const cfg = data.config ?? {}
   const text = typeof cfg.text === 'string' ? cfg.text : data.label
@@ -525,6 +627,48 @@ const MapNoteNode = memo(function MapNoteNode({ data }: NodeProps<MapRFNode>) {
     >
       {title ? <div className="mb-0.5 font-medium text-foreground/70">{title}</div> : null}
       {text ? <div className="line-clamp-4 whitespace-pre-wrap">{text}</div> : null}
+    </div>
+  )
+})
+
+/** Map-level sticky note (editable, draggable, persisted with the map). */
+const MapStickyNode = memo(function MapStickyNode({ data, selected }: NodeProps<MapRFNode>) {
+  const [editing, setEditing] = useState(false)
+  const color = data.color ?? DEFAULT_NOTE.color
+  const text = data.text ?? ''
+
+  return (
+    <div
+      className={cn(
+        'relative h-full w-full rounded-sm shadow-md',
+        selected ? 'ring-2 ring-ring/50' : null,
+      )}
+      style={{ backgroundColor: color, color: '#422006' }}
+      onDoubleClick={() => setEditing(true)}
+    >
+      <NodeResizer
+        minWidth={120}
+        minHeight={80}
+        isVisible={Boolean(selected) && !editing}
+        onResizeEnd={(_, p) => data.onNoteChange?.({ width: Math.round(p.width), height: Math.round(p.height) })}
+      />
+      {editing ? (
+        <textarea
+          className="nodrag nopan h-full w-full resize-none rounded-sm bg-transparent p-2 text-xs outline-none"
+          autoFocus
+          value={text}
+          onChange={(e) => data.onNoteChange?.({ text: e.target.value })}
+          onBlur={() => setEditing(false)}
+          onKeyDown={(e) => {
+            e.stopPropagation()
+            if (e.key === 'Escape') setEditing(false)
+          }}
+        />
+      ) : (
+        <div className="h-full w-full whitespace-pre-wrap p-2 text-xs">
+          {text || <span className="opacity-50">Double-click to edit…</span>}
+        </div>
+      )}
     </div>
   )
 })
@@ -576,11 +720,19 @@ function MapThroughputEdge({
   )
 }
 
+function MapBackground() {
+  const zoom = useStore((s) => s.transform[2])
+  const gap = Math.max(18, Math.round(28 / Math.max(zoom, 0.2)))
+  const size = Math.max(1.25, Math.min(3.5, 1.8 / Math.max(zoom, 0.25)))
+  return <Background gap={gap} size={size} color="rgba(167, 139, 250, 0.28)" />
+}
+
 const nodeTypes = {
   mapGroup: MapGroupNode,
   mapFlow: MapFlowNode,
   mapReroute: MapRerouteNode,
   mapNote: MapNoteNode,
+  mapSticky: MapStickyNode,
 }
 
 const edgeTypes = {
@@ -601,69 +753,269 @@ function FlowMapInner() {
   const [fadeUntil, setFadeUntil] = useState(0)
   const [queues, setQueues] = useState<Record<string, QueueStat>>({})
   const [gen, setGen] = useState(0)
-  const savedLayout = useRef(loadLayout())
-  const layoutWriteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const layoutRef = useRef<SavedLayout>({})
+  const notesRef = useRef<FlowMapNote[]>([])
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const noteSeq = useRef(0)
 
   const [nodes, setNodes, onNodesChange] = useNodesState<MapRFNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MapRFEdge>([])
+  const nodesRef = useRef(nodes)
+  const edgesRef = useRef(edges)
+  nodesRef.current = nodes
+  edgesRef.current = edges
+
+  const { screenToFlowPosition } = useReactFlow()
+  const {
+    takeSnapshot: pushHistory,
+    undo: undoHistory,
+    redo: redoHistory,
+    clear: clearHistory,
+    canUndo,
+    canRedo,
+  } = useFlowHistory<MapRFNode, MapRFEdge>()
+
+  const snapshot = useCallback(() => {
+    pushHistory(nodesRef.current, edgesRef.current)
+  }, [pushHistory])
+
+  const persistSoon = useCallback((nextNodes: MapRFNode[]) => {
+    layoutRef.current = layoutFromNodes(nextNodes)
+    notesRef.current = notesFromNodes(nextNodes)
+    if (persistTimer.current) clearTimeout(persistTimer.current)
+    persistTimer.current = setTimeout(() => {
+      setSaveState('saving')
+      void saveFlowMapState({ layout: layoutRef.current, notes: notesRef.current })
+        .then(() => setSaveState('saved'))
+        .catch(() => setSaveState('error'))
+    }, 350)
+  }, [])
+
+  const restoreSnapshot = useCallback(
+    (snap: { nodes: MapRFNode[]; edges: MapRFEdge[] }) => {
+      // Re-bind sticky callbacks after JSON round-trip from history.
+      const restored = snap.nodes.map((n) => {
+        if (n.type !== 'mapSticky' || !n.data.noteId) return n
+        const noteId = n.data.noteId
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            onNoteChange: (patch: { text?: string; width?: number; height?: number }) => {
+              setNodes((ns) =>
+                ns.map((x) => {
+                  if (x.data.noteId !== noteId) return x
+                  return {
+                    ...x,
+                    style: {
+                      ...x.style,
+                      ...(patch.width != null ? { width: patch.width } : null),
+                      ...(patch.height != null ? { height: patch.height } : null),
+                    },
+                    data: {
+                      ...x.data,
+                      ...(patch.text != null ? { text: patch.text } : null),
+                    },
+                  }
+                }),
+              )
+            },
+          },
+        }
+      })
+      setNodes(restored)
+      setEdges(snap.edges)
+      persistSoon(restored)
+    },
+    [setNodes, setEdges, persistSoon],
+  )
+
+  const undo = useCallback(() => {
+    undoHistory(nodesRef.current, edgesRef.current, restoreSnapshot)
+  }, [undoHistory, restoreSnapshot])
+
+  const redo = useCallback(() => {
+    redoHistory(nodesRef.current, edgesRef.current, restoreSnapshot)
+  }, [redoHistory, restoreSnapshot])
+
+  const onNoteChange = useCallback(
+    (noteId: string, patch: { text?: string; width?: number; height?: number }) => {
+      setNodes((ns) => {
+        const next = ns.map((x) => {
+          if (x.data.noteId !== noteId) return x
+          return {
+            ...x,
+            style: {
+              ...x.style,
+              ...(patch.width != null ? { width: patch.width } : null),
+              ...(patch.height != null ? { height: patch.height } : null),
+            },
+            data: {
+              ...x.data,
+              ...(patch.text != null ? { text: patch.text } : null),
+            },
+          }
+        })
+        persistSoon(next)
+        return next
+      })
+    },
+    [setNodes, persistSoon],
+  )
+
+  const attachStickies = useCallback(
+    (base: MapRFNode[], notes: FlowMapNote[]) => [
+      ...base,
+      ...stickyNodesFromNotes(notes, onNoteChange),
+    ],
+    [onNoteChange],
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const [{ flows: mapFlows }, { nodeTypes: types }] = await Promise.all([
+      const [{ flows: mapFlows, layout, notes }, { nodeTypes: types }] = await Promise.all([
         getFlowMap(),
         getNodeTypes(),
       ])
       const specMap = new Map(types.map((s) => [s.type, s]))
       setSpecs(specMap)
       setFlows(mapFlows)
-      const built = buildMapGraph(mapFlows, specMap, hideComponents, savedLayout.current)
-      setNodes(built.nodes)
+
+      // One-time migrate browser-local positions if the server has none yet.
+      let effectiveLayout = layout ?? {}
+      if (Object.keys(effectiveLayout).length === 0) {
+        const legacy = loadLegacyLayout()
+        if (Object.keys(legacy).length > 0) {
+          effectiveLayout = legacy
+          clearLegacyLayout()
+          void saveFlowMapState({ layout: effectiveLayout, notes: notes ?? [] })
+        }
+      }
+      layoutRef.current = effectiveLayout
+      notesRef.current = notes ?? []
+
+      const built = buildMapGraph(mapFlows, specMap, hideComponents, effectiveLayout)
+      setNodes(attachStickies(built.nodes, notesRef.current))
       setEdges(
         built.edges.map((e) => ({
           ...e,
           type: 'throughput',
-          style: { stroke: 'var(--muted-foreground)', strokeWidth: 1.25 },
+          style: { stroke: 'rgba(167,139,250,0.45)', strokeWidth: 1.5 },
         })),
       )
+      clearHistory()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load flow map')
     } finally {
       setLoading(false)
     }
-  }, [hideComponents, setNodes, setEdges])
+  }, [hideComponents, setNodes, setEdges, attachStickies, clearHistory])
 
   useEffect(() => {
     void load()
   }, [load, gen])
 
-  // Rebuild when filter toggles without refetching.
+  // Rebuild flows when filter toggles; keep sticky notes.
   useEffect(() => {
     if (flows.length === 0 || specs.size === 0) return
-    const built = buildMapGraph(flows, specs, hideComponents, savedLayout.current)
-    setNodes(built.nodes)
+    const stickies = notesFromNodes(nodesRef.current)
+    notesRef.current = stickies.length ? stickies : notesRef.current
+    layoutRef.current = {
+      ...layoutRef.current,
+      ...layoutFromNodes(nodesRef.current),
+    }
+    const built = buildMapGraph(flows, specs, hideComponents, layoutRef.current)
+    setNodes(attachStickies(built.nodes, notesRef.current))
     setEdges(
       built.edges.map((e) => ({
         ...e,
         type: 'throughput',
-        style: { stroke: 'var(--muted-foreground)', strokeWidth: 1.25 },
+        style: { stroke: 'rgba(167,139,250,0.45)', strokeWidth: 1.5 },
       })),
     )
     setNodeLive({})
-  }, [hideComponents, flows, specs, setNodes, setEdges])
+  }, [hideComponents, flows, specs, setNodes, setEdges, attachStickies])
 
-  // Persist group positions after drag.
-  const onNodeDragStop = useCallback((_: unknown, node: Node) => {
-    if (node.type !== 'mapGroup') return
-    const flowId = (node.data as MapNodeData).flowId
-    savedLayout.current = {
-      ...savedLayout.current,
-      [String(flowId)]: { x: Math.round(node.position.x), y: Math.round(node.position.y) },
+  const onNodeDragStart = useCallback(
+    (_: unknown, node: Node) => {
+      if (node.type === 'mapGroup' || node.type === 'mapSticky') snapshot()
+    },
+    [snapshot],
+  )
+
+  const onNodeDragStop = useCallback(
+    (_: unknown, node: Node) => {
+      if (node.type !== 'mapGroup' && node.type !== 'mapSticky') return
+      persistSoon(nodesRef.current)
+    },
+    [persistSoon],
+  )
+
+  const addNote = useCallback(() => {
+    snapshot()
+    const id = `n${Date.now().toString(36)}${noteSeq.current++}`
+    const pos = screenToFlowPosition({
+      x: window.innerWidth / 2,
+      y: window.innerHeight / 2,
+    })
+    const note: FlowMapNote = {
+      id,
+      x: Math.round(pos.x - DEFAULT_NOTE.w / 2),
+      y: Math.round(pos.y - DEFAULT_NOTE.h / 2),
+      width: DEFAULT_NOTE.w,
+      height: DEFAULT_NOTE.h,
+      text: '',
+      color: DEFAULT_NOTE.color,
     }
-    if (layoutWriteTimer.current) clearTimeout(layoutWriteTimer.current)
-    layoutWriteTimer.current = setTimeout(() => saveLayout(savedLayout.current), 200)
-  }, [])
+    setNodes((ns) => {
+      const next = [...ns, ...stickyNodesFromNotes([note], onNoteChange)]
+      persistSoon(next)
+      return next
+    })
+  }, [snapshot, screenToFlowPosition, setNodes, onNoteChange, persistSoon])
+
+  const deleteSelectedStickies = useCallback(() => {
+    const selected = nodesRef.current.filter((n) => n.selected && n.type === 'mapSticky')
+    if (selected.length === 0) return
+    snapshot()
+    setNodes((ns) => {
+      const next = ns.filter((n) => !(n.selected && n.type === 'mapSticky'))
+      persistSoon(next)
+      return next
+    })
+  }, [snapshot, setNodes, persistSoon])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target instanceof HTMLElement && e.target.isContentEditable)
+      ) {
+        return
+      }
+      const mod = e.metaKey || e.ctrlKey
+      const key = e.key.toLowerCase()
+      if (mod && key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undo()
+      } else if ((mod && key === 'y') || (mod && key === 'z' && e.shiftKey)) {
+        e.preventDefault()
+        redo()
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        // Only delete map stickies — flow groups/nodes stay.
+        if (nodesRef.current.some((n) => n.selected && n.type === 'mapSticky')) {
+          e.preventDefault()
+          deleteSelectedStickies()
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undo, redo, deleteSelectedStickies])
 
   // Queue poll for side panel.
   useEffect(() => {
@@ -730,7 +1082,6 @@ function FlowMapInner() {
               ...nl,
               [mid]: { running: false, report },
             }))
-            // Pulse outbound edges with matching sourceHandle counts.
             if (ev.counts) {
               const now = Date.now()
               setEdges((eds) =>
@@ -745,8 +1096,8 @@ function FlowMapInner() {
                     data: { ...e.data, pulse: count, pulseAt: now },
                     style: {
                       ...e.style,
-                      stroke: count > 0 ? '#a78bfa' : 'var(--muted-foreground)',
-                      strokeWidth: count > 0 ? 2 : 1.25,
+                      stroke: count > 0 ? '#a78bfa' : 'rgba(167,139,250,0.45)',
+                      strokeWidth: count > 0 ? 2.5 : 1.5,
                     },
                   }
                 }),
@@ -775,7 +1126,6 @@ function FlowMapInner() {
             setFadeUntil(Date.now() + 4000)
             return { ...p }
           })
-          // Clear live badge after a short hold so the final paint is visible.
           setTimeout(() => {
             if (cancelled) return
             setLive((p) => (p && p.runToken === token ? null : p))
@@ -784,7 +1134,7 @@ function FlowMapInner() {
                 ...e,
                 animated: false,
                 data: { ...e.data, pulse: undefined, pulseAt: undefined },
-                style: { ...e.style, stroke: 'var(--muted-foreground)', strokeWidth: 1.25 },
+                style: { ...e.style, stroke: 'rgba(167,139,250,0.45)', strokeWidth: 1.5 },
               })),
             )
           }, 4000)
@@ -833,6 +1183,9 @@ function FlowMapInner() {
             },
           }
         }
+        if (n.type === 'mapSticky') {
+          return { ...n, draggable: true }
+        }
         const overlay = nodeLive[n.id]
         const active = activeFlowId != null && n.data.flowId === activeFlowId
         return {
@@ -858,6 +1211,30 @@ function FlowMapInner() {
       <header className="flex shrink-0 items-center gap-3 border-b px-4 py-3 md:px-6">
         <MapIcon className="size-5 shrink-0 text-muted-foreground" />
         <h1 className="min-w-0 flex-1 truncate text-lg font-semibold md:text-xl">Flow Map</h1>
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1 px-2"
+          title="Undo (Ctrl+Z)"
+          disabled={!canUndo}
+          onClick={() => undo()}
+        >
+          <Undo2 className="size-4" />
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1 px-2"
+          title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+          disabled={!canRedo}
+          onClick={() => redo()}
+        >
+          <Redo2 className="size-4" />
+        </Button>
+        <Button size="sm" variant="outline" className="gap-1" onClick={() => addNote()}>
+          <StickyNote className="size-4" />
+          <span className="hidden sm:inline">Note</span>
+        </Button>
         <label className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:inline-flex">
           <input
             type="checkbox"
@@ -875,6 +1252,15 @@ function FlowMapInner() {
             )}
           />
           {connected ? 'live' : 'reconnecting…'}
+        </span>
+        <span className="hidden text-[11px] text-muted-foreground sm:inline">
+          {saveState === 'saving'
+            ? 'Saving…'
+            : saveState === 'saved'
+              ? 'Saved'
+              : saveState === 'error'
+                ? 'Save failed'
+                : null}
         </span>
         <Button size="sm" variant="ghost" className="gap-1" onClick={() => setGen((g) => g + 1)}>
           <RefreshCw className="size-4" />
@@ -898,26 +1284,28 @@ function FlowMapInner() {
             </div>
           ) : (
             <ReactFlow
+              className="flow-map-canvas bg-[#0b0a10]"
               nodes={displayNodes}
               edges={edges}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
+              onNodeDragStart={onNodeDragStart}
               onNodeDragStop={onNodeDragStop}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               nodesConnectable={false}
               edgesFocusable={false}
               elementsSelectable
+              deleteKeyCode={null}
               panOnScroll
               fitView
               fitViewOptions={{ padding: 0.12 }}
-              minZoom={0.15}
+              minZoom={0.08}
               maxZoom={1.5}
               colorMode="dark"
               proOptions={{ hideAttribution: true }}
-              className="bg-background"
             >
-              <Background gap={20} size={1} />
+              <MapBackground />
               <Controls showInteractive={false} />
             </ReactFlow>
           )}
@@ -1026,8 +1414,12 @@ function FlowMapInner() {
           </div>
 
           <p className="mt-auto text-[10px] leading-relaxed text-muted-foreground">
-            Groups are draggable (layout saved locally). Nodes are fixed. Item motion uses per-port
-            counts as each node finishes — there is no durable inter-node queue.
+            Drag flow groups and notes — layout is saved for everyone. Notes: Add → double-click to
+            edit → Delete/Backspace to remove. Ctrl+Z / Ctrl+Y undo map edits. Group titles stay
+            readable when zoomed out.
+          </p>
+          <p className="flex items-center gap-1 text-[10px] text-muted-foreground">
+            <Trash2 className="size-3" /> selected notes only (groups stay)
           </p>
         </aside>
       </div>
