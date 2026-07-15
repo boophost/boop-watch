@@ -342,6 +342,7 @@ export interface FlowMapNote {
   color?: string
   /** Arrow-only styling (ignored for stickies). */
   strokeWidth?: number
+  headSize?: number
   dash?: 'solid' | 'dashed' | 'dotted'
   startHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
   endHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'

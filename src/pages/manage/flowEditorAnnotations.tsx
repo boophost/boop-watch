@@ -137,6 +137,7 @@ function ArrowHeadMark({
   kind,
   color,
   strokeWidth,
+  headSize,
 }: {
   x: number
   y: number
@@ -144,14 +145,15 @@ function ArrowHeadMark({
   kind: ArrowHead
   color: string
   strokeWidth: number
+  headSize: number
 }) {
   if (kind === 'none') return null
-  const s = Math.max(7, strokeWidth * 3.2)
+  const s = Math.max(4, headSize)
   const common = {
     transform: `translate(${x} ${y}) rotate(${angle})`,
   }
   if (kind === 'dot') {
-    return <circle cx={x} cy={y} r={Math.max(3, strokeWidth * 1.5)} fill={color} />
+    return <circle cx={x} cy={y} r={Math.max(2, s * 0.45)} fill={color} />
   }
   if (kind === 'open') {
     return (
@@ -208,6 +210,7 @@ export function ArrowCurveGraphic({
   const cfg = normalizeArrowConfig(config)
   const points = cfg.points ?? []
   const strokeWidth = cfg.strokeWidth ?? 2
+  const headSize = cfg.headSize ?? 10
   const color = cfg.color ?? '#a1a1aa'
   const dash = arrowDashArray(cfg.dash, strokeWidth)
   const w = Math.max(1, width)
@@ -222,7 +225,7 @@ export function ArrowCurveGraphic({
     points.length >= 2
       ? points.map((p, i) => {
           if (i === 0) {
-            const inset = arrowHeadInset(cfg.startHead, strokeWidth)
+            const inset = arrowHeadInset(cfg.startHead, headSize)
             if (inset <= 0) return p
             return {
               x: p.x - (startT.x * inset) / w,
@@ -230,7 +233,7 @@ export function ArrowCurveGraphic({
             }
           }
           if (i === points.length - 1) {
-            const inset = arrowHeadInset(cfg.endHead, strokeWidth)
+            const inset = arrowHeadInset(cfg.endHead, headSize)
             if (inset <= 0) return p
             return {
               x: p.x - (endT.x * inset) / w,
@@ -313,6 +316,7 @@ export function ArrowCurveGraphic({
           kind={cfg.startHead ?? 'none'}
           color={color}
           strokeWidth={strokeWidth}
+          headSize={headSize}
         />
       ) : null}
       {end ? (
@@ -323,6 +327,7 @@ export function ArrowCurveGraphic({
           kind={cfg.endHead ?? 'arrow'}
           color={color}
           strokeWidth={strokeWidth}
+          headSize={headSize}
         />
       ) : null}
       {interactive
@@ -358,6 +363,7 @@ export const ArrowNoteNode = memo(function ArrowNoteNode({ data, selected, width
       data.onEditorChange?.({
         points,
         strokeWidth: cfg.strokeWidth,
+        headSize: cfg.headSize,
         dash: cfg.dash,
         startHead: cfg.startHead,
         endHead: cfg.endHead,
@@ -367,7 +373,7 @@ export const ArrowNoteNode = memo(function ArrowNoteNode({ data, selected, width
         direction: undefined,
       })
     },
-    [data, cfg.strokeWidth, cfg.dash, cfg.startHead, cfg.endHead, cfg.color],
+    [data, cfg.strokeWidth, cfg.headSize, cfg.dash, cfg.startHead, cfg.endHead, cfg.color],
   )
 
   return (

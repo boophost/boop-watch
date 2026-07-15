@@ -27,6 +27,8 @@ export type EditorArrowPoint = { x: number; y: number }
 export type EditorArrowConfig = {
   color?: string
   strokeWidth?: number
+  /** Arrowhead length in px (independent of stroke thickness). */
+  headSize?: number
   dash?: ArrowDash
   startHead?: ArrowHead
   endHead?: ArrowHead
@@ -122,10 +124,15 @@ export function normalizeArrowConfig(config: Record<string, unknown>): EditorArr
     typeof cfg.strokeWidth === 'number' && Number.isFinite(cfg.strokeWidth)
       ? Math.min(16, Math.max(1, cfg.strokeWidth))
       : 2
+  const headSize =
+    typeof cfg.headSize === 'number' && Number.isFinite(cfg.headSize)
+      ? Math.min(48, Math.max(4, cfg.headSize))
+      : 10
 
   return {
     color: typeof cfg.color === 'string' && cfg.color ? cfg.color : '#a1a1aa',
     strokeWidth,
+    headSize,
     dash: cfg.dash === 'dashed' || cfg.dash === 'dotted' ? cfg.dash : 'solid',
     startHead: isArrowHead(cfg.startHead) ? cfg.startHead : 'none',
     endHead: isArrowHead(cfg.endHead) ? cfg.endHead : 'arrow',
@@ -203,8 +210,8 @@ export function arrowEndpointTangent(
 }
 
 /** How far to pull the stroke back from a filled tip so it meets the head cleanly. */
-export function arrowHeadInset(kind: ArrowHead | undefined, strokeWidth: number): number {
+export function arrowHeadInset(kind: ArrowHead | undefined, headSize: number): number {
   if (!kind || kind === 'none' || kind === 'open') return 0
-  if (kind === 'dot') return Math.max(2, strokeWidth * 1.2)
-  return Math.max(5, strokeWidth * 2.6)
+  if (kind === 'dot') return Math.max(2, headSize * 0.45)
+  return Math.max(4, headSize * 0.85)
 }

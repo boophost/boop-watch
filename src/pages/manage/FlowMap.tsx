@@ -48,7 +48,6 @@ import {
   DEFAULT_ARROW_POINTS,
   isEditorNode,
   normalizeArrowConfig,
-  rotateArrowPoints,
   type ArrowDash,
   type ArrowHead,
 } from '@/lib/flowEditorMeta'
@@ -88,6 +87,7 @@ const DEFAULT_MAP_ARROW = {
   h: 120,
   color: '#a1a1aa',
   strokeWidth: 2,
+  headSize: 10,
   dash: 'solid' as ArrowDash,
   startHead: 'none' as ArrowHead,
   endHead: 'arrow' as ArrowHead,
@@ -100,6 +100,7 @@ type NotePatch = {
   height?: number
   color?: string
   strokeWidth?: number
+  headSize?: number
   dash?: ArrowDash
   startHead?: ArrowHead
   endHead?: ArrowHead
@@ -169,6 +170,7 @@ interface MapNodeData extends Record<string, unknown> {
   text?: string
   color?: string
   strokeWidth?: number
+  headSize?: number
   dash?: ArrowDash
   startHead?: ArrowHead
   endHead?: ArrowHead
@@ -421,6 +423,7 @@ function annotationNodesFromNotes(
       const cfg = normalizeArrowConfig({
         color: n.color,
         strokeWidth: n.strokeWidth,
+        headSize: n.headSize,
         dash: n.dash,
         startHead: n.startHead,
         endHead: n.endHead,
@@ -445,6 +448,7 @@ function annotationNodesFromNotes(
           noteKind: 'arrow' as const,
           color: cfg.color,
           strokeWidth: cfg.strokeWidth,
+          headSize: cfg.headSize,
           dash: cfg.dash,
           startHead: cfg.startHead,
           endHead: cfg.endHead,
@@ -510,6 +514,7 @@ function notesFromNodes(nodes: MapRFNode[]): FlowMapNote[] {
       const cfg = normalizeArrowConfig({
         color: n.data.color,
         strokeWidth: n.data.strokeWidth,
+        headSize: n.data.headSize,
         dash: n.data.dash,
         startHead: n.data.startHead,
         endHead: n.data.endHead,
@@ -526,6 +531,7 @@ function notesFromNodes(nodes: MapRFNode[]): FlowMapNote[] {
         height: Math.round(h),
         color: cfg.color,
         strokeWidth: cfg.strokeWidth,
+        headSize: cfg.headSize,
         dash: cfg.dash,
         startHead: cfg.startHead,
         endHead: cfg.endHead,
@@ -809,6 +815,7 @@ const MapArrowNode = memo(function MapArrowNode({ data, selected, width, height 
   const config = {
     color: data.color,
     strokeWidth: data.strokeWidth,
+    headSize: data.headSize,
     dash: data.dash,
     startHead: data.startHead,
     endHead: data.endHead,
@@ -914,6 +921,7 @@ function applyNotePatch(node: MapRFNode, patch: NotePatch): MapRFNode {
       ...(patch.text != null ? { text: patch.text } : null),
       ...(patch.color != null ? { color: patch.color } : null),
       ...(patch.strokeWidth != null ? { strokeWidth: patch.strokeWidth } : null),
+      ...(patch.headSize != null ? { headSize: patch.headSize } : null),
       ...(patch.dash != null ? { dash: patch.dash } : null),
       ...(patch.startHead != null ? { startHead: patch.startHead } : null),
       ...(patch.endHead != null ? { endHead: patch.endHead } : null),
@@ -1149,6 +1157,7 @@ function FlowMapInner() {
       height: DEFAULT_MAP_ARROW.h,
       color: DEFAULT_MAP_ARROW.color,
       strokeWidth: DEFAULT_MAP_ARROW.strokeWidth,
+      headSize: DEFAULT_MAP_ARROW.headSize,
       dash: DEFAULT_MAP_ARROW.dash,
       startHead: DEFAULT_MAP_ARROW.startHead,
       endHead: DEFAULT_MAP_ARROW.endHead,
@@ -1399,6 +1408,7 @@ function FlowMapInner() {
     ? normalizeArrowConfig({
         color: selectedArrow.data.color,
         strokeWidth: selectedArrow.data.strokeWidth,
+        headSize: selectedArrow.data.headSize,
         dash: selectedArrow.data.dash,
         startHead: selectedArrow.data.startHead,
         endHead: selectedArrow.data.endHead,
@@ -1511,6 +1521,21 @@ function FlowMapInner() {
               }
             />
           </label>
+          <label className="flex items-center gap-1 text-muted-foreground">
+            Head
+            <Input
+              className="h-7 w-14"
+              type="number"
+              min={4}
+              max={48}
+              value={selectedArrowCfg.headSize ?? 10}
+              onChange={(e) =>
+                patchSelectedArrow({
+                  headSize: Math.min(48, Math.max(4, Number(e.target.value) || 10)),
+                })
+              }
+            />
+          </label>
           <select
             className="h-7 rounded-md border border-input bg-transparent px-1.5"
             value={selectedArrowCfg.dash ?? 'solid'}
@@ -1520,62 +1545,38 @@ function FlowMapInner() {
             <option value="dashed">Dashed</option>
             <option value="dotted">Dotted</option>
           </select>
-          <label className="flex items-center gap-1 text-muted-foreground">
-            Start
-            <select
-              className="h-7 rounded-md border border-input bg-transparent px-1.5"
-              value={selectedArrowCfg.startHead ?? 'none'}
-              onChange={(e) => patchSelectedArrow({ startHead: e.target.value as ArrowHead })}
-            >
-              <option value="none">None</option>
-              <option value="arrow">Arrow</option>
-              <option value="triangle">Triangle</option>
-              <option value="open">Open</option>
-              <option value="diamond">Diamond</option>
-              <option value="dot">Dot</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-1 text-muted-foreground">
-            End
-            <select
-              className="h-7 rounded-md border border-input bg-transparent px-1.5"
-              value={selectedArrowCfg.endHead ?? 'arrow'}
-              onChange={(e) => patchSelectedArrow({ endHead: e.target.value as ArrowHead })}
-            >
-              <option value="none">None</option>
-              <option value="arrow">Arrow</option>
-              <option value="triangle">Triangle</option>
-              <option value="open">Open</option>
-              <option value="diamond">Diamond</option>
-              <option value="dot">Dot</option>
-            </select>
-          </label>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-7 px-2"
-            onClick={() =>
-              patchSelectedArrow({
-                points: rotateArrowPoints(selectedArrowCfg.points ?? DEFAULT_ARROW_POINTS, -15),
-              })
-            }
-          >
-            −15°
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-7 px-2"
-            onClick={() =>
-              patchSelectedArrow({
-                points: rotateArrowPoints(selectedArrowCfg.points ?? DEFAULT_ARROW_POINTS, 15),
-              })
-            }
-          >
-            +15°
-          </Button>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1 text-muted-foreground">
+              Start
+              <select
+                className="h-7 rounded-md border border-input bg-transparent px-1.5"
+                value={selectedArrowCfg.startHead ?? 'none'}
+                onChange={(e) => patchSelectedArrow({ startHead: e.target.value as ArrowHead })}
+              >
+                <option value="none">None</option>
+                <option value="arrow">Arrow</option>
+                <option value="triangle">Triangle</option>
+                <option value="open">Open</option>
+                <option value="diamond">Diamond</option>
+                <option value="dot">Dot</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-muted-foreground">
+              End
+              <select
+                className="h-7 rounded-md border border-input bg-transparent px-1.5"
+                value={selectedArrowCfg.endHead ?? 'arrow'}
+                onChange={(e) => patchSelectedArrow({ endHead: e.target.value as ArrowHead })}
+              >
+                <option value="none">None</option>
+                <option value="arrow">Arrow</option>
+                <option value="triangle">Triangle</option>
+                <option value="open">Open</option>
+                <option value="diamond">Diamond</option>
+                <option value="dot">Dot</option>
+              </select>
+            </label>
+          </div>
           <span className="text-[10px] text-muted-foreground">Drag handles to reshape</span>
         </div>
       ) : null}

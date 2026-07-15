@@ -423,6 +423,7 @@ export interface FlowMapNote {
   text?: string
   color?: string
   strokeWidth?: number
+  headSize?: number
   dash?: 'solid' | 'dashed' | 'dotted'
   startHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
   endHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
@@ -504,6 +505,9 @@ export function saveFlowMapState(state: FlowMapState): FlowMapState {
           ...(n.color ? { color: String(n.color) } : {}),
           ...(typeof n.strokeWidth === 'number'
             ? { strokeWidth: Math.min(16, Math.max(1, n.strokeWidth)) }
+            : {}),
+          ...(typeof n.headSize === 'number'
+            ? { headSize: Math.min(48, Math.max(4, n.headSize)) }
             : {}),
           ...(dash ? { dash } : {}),
           ...(headOk(n.startHead) ? { startHead: n.startHead } : {}),
