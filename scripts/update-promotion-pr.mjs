@@ -10,7 +10,9 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CHECKBOX_RE, extractSection, findCheckedInLines, splitIncludedByPr } from './lib/promotion-checklist.mjs'
+import { CHECKBOX_RE, extractSection, findCheckedInLines, splitIncludedByPr, findUncheckedInLines } from './lib/promotion-checklist.mjs'
+
+const POST_MERGE_RE = /^post-merge:/i
 
 const PROMOTION_TITLE_PREFIX = '[promotion] dev → main'
 const PROMOTION_LABEL = 'promotion'
@@ -157,7 +159,7 @@ function findOpenPromotionPr() {
     '--state',
     'open',
     '--json',
-    'number,title,labels,body',
+    'number,title,labels,body,isDraft',
   ])
   return prs.find((p) => p.title.startsWith(PROMOTION_TITLE_PREFIX) || p.labels?.some((l) => l.name === PROMOTION_LABEL)) ?? prs[0] ?? null
 }
@@ -229,6 +231,34 @@ function main() {
   const previous = parsePreviousState(openPr?.body)
   const body = buildBody({ version, ahead, commitLines, mergedPrs, previous })
   const title = `${PROMOTION_TITLE_PREFIX} (${version}, ${ahead} commit${ahead === 1 ? '' : 's'})`
+  
+  // Calculate unchecked items for the draft state logic
+  const prodLines = extractSection(body, '## Production promotion checklist')
+  const prodUnchecked = (prodLines ? findUncheckedInLines(prodLines) : []).filter(t => !POST_MERGE_RE.test(t))
+  
+  const incLines = extractSection(body, '## Included changes')
+  const uncheckedPrs = []
+  if (incLines) {
+    for (const [prNumber, { lines: prLines }] of splitIncludedByPr(incLines)) {
+      if (findUncheckedInLines(prLines).length > 0) {
+        uncheckedPrs.push(prNumber)
+      }
+    }
+  }
+  
+  const hasUnchecked = prodUnchecked.length > 0 || uncheckedPrs.length > 0
+  
+  const commentMarker = '<!-- promotion-qa-trigger -->'
+  let commentBody = commentMarker + '\n'
+  if (hasUnchecked) {
+    commentBody += '### ⚠️ QA pending\n\n'
+    if (uncheckedPrs.length > 0) {
+      commentBody += `Unfinished feature PR test plans: ${uncheckedPrs.map(n => `#${n}`).join(', ')} (${uncheckedPrs.length})\n\n`
+    }
+    commentBody += `This promotion PR is kept as a **draft** while items are unverified. Mark it **Ready for review** to run catch-up QA on staging for unchecked items.`
+  } else {
+    commentBody += '### ✅ All items verified\n\nAll included changes have QA ticks. Mark **Ready for review** when you intend to merge.'
+  }
 
   const bodyFile = join(tmpdir(), `boop-watch-promotion-pr-${process.pid}.md`)
   writeFileSync(bodyFile, body)
@@ -238,6 +268,21 @@ function main() {
   if (openPr) {
     sh('gh', ['pr', 'edit', String(openPr.number), '--title', title, '--body-file', bodyFile])
     console.log(`Updated promotion PR #${openPr.number}`)
+    if (hasUnchecked && !openPr.isDraft) {
+      sh('gh', ['pr', 'ready', String(openPr.number), '--undo'])
+      console.log(`Converted promotion PR #${openPr.number} back to draft (has unchecked items)`)
+    }
+    try {
+      const comments = shJson('gh', ['api', `/repos/{owner}/{repo}/issues/${openPr.number}/comments`])
+      const existing = comments.find(c => c.body && c.body.includes(commentMarker))
+      if (existing) {
+        sh('gh', ['api', '-X', 'PATCH', `/repos/{owner}/{repo}/issues/comments/${existing.id}`, '-f', `body=${commentBody}`])
+      } else {
+        sh('gh', ['pr', 'comment', String(openPr.number), '-b', commentBody])
+      }
+    } catch (e) {
+      console.error(`Failed to update comment: ${e.message}`)
+    }
     return
   }
 
@@ -255,8 +300,13 @@ function main() {
       '--title', title,
       '--body-file', bodyFile,
       '--label', PROMOTION_LABEL,
+      ...(hasUnchecked ? ['--draft'] : [])
     ])
     console.log(`Created promotion PR: ${url}`)
+    const prNumberMatch = url.match(/\/pull\/(\d+)/)
+    if (prNumberMatch) {
+      sh('gh', ['pr', 'comment', prNumberMatch[1], '-b', commentBody])
+    }
   } catch (err) {
     const msg = String(err?.stderr || err?.message || err)
     if (!/not permitted to create or approve pull requests|createPullRequest/i.test(msg)) throw err
