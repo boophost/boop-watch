@@ -28,7 +28,7 @@ import {
   type ScheduleSpec,
   type WeekDay,
 } from './flowsDb.js'
-import { listSeries } from './db.js'
+import { listSeries, markTorrentsCompleted } from './db.js'
 import { getAllPortalItems } from './portalDb.js'
 import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
 import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
@@ -304,6 +304,9 @@ async function watchNewPortalItems(): Promise<void> {
 async function watchQbitComplete(): Promise<void> {
   if (!qbitConfigured() || flowsWithTriggerType('trigger.qbit-complete').length === 0) return
   const done = (await qbitList()).filter((t) => t.progress >= 1)
+  // Torrent-ledger observation: completed downloads move off queued/downloading
+  // the moment we see them, independent of whether the fire below dispatches.
+  markTorrentsCompleted(done.map((t) => t.hash))
   if (!triggerStateSeeded('qbit-done')) {
     triggerStateAdd('qbit-done', done.map((t) => t.hash))
     markTriggerSeeded('qbit-done')
