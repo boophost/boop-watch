@@ -19,6 +19,7 @@ import {
   adminChaseChipLabel,
   formatAirShort,
   formatCountdown,
+  formatRetry,
   type EpisodeChase,
 } from '@/lib/chase'
 
@@ -344,11 +345,20 @@ function chaseStepActive(
   return state === 'ready' ? 'done' : 'pending'
 }
 
-function EpisodeChasePanel({ chase }: { chase: EpisodeChase }) {
+function EpisodeChasePanel({
+  chase,
+  onWantAction,
+}: {
+  chase: EpisodeChase
+  onWantAction?: (wantId: number, action: 'retry-now' | 'abandon') => void
+}) {
   const timing =
     chase.state === 'waiting'
       ? [formatAirShort(chase.airsAt), formatCountdown(chase.airsAt)].filter(Boolean).join(' · ')
       : formatCountdown(chase.airsAt) ?? adminChaseChipLabel(chase)
+  // A want-backed search shows its retry bookkeeping and offers admin actions.
+  const searchingWant = chase.state === 'searching' && chase.wantId != null
+  const retryLabel = formatRetry(chase.nextAttemptAt)
 
   const steps: Array<{ key: 'waiting' | 'download' | 'library' | 'onsite'; label: string }> = [
     {
@@ -405,6 +415,37 @@ function EpisodeChasePanel({ chase }: { chase: EpisodeChase }) {
           )
         })}
       </div>
+      {searchingWant ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2 text-xs text-muted-foreground">
+          <span>
+            {chase.attempts ? `${chase.attempts} attempt${chase.attempts === 1 ? '' : 's'}` : 'not tried yet'}
+            {retryLabel ? ` · ${retryLabel}` : ''}
+          </span>
+          {chase.note ? <span className="truncate italic opacity-80">{chase.note}</span> : null}
+          {onWantAction ? (
+            <span className="ml-auto flex gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => onWantAction(chase.wantId!, 'retry-now')}
+              >
+                Retry now
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px] text-muted-foreground"
+                onClick={() => onWantAction(chase.wantId!, 'abandon')}
+              >
+                Abandon
+              </Button>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -461,6 +502,19 @@ export default function SeriesDetail() {
       /* leave prior state */
     }
   }, [id])
+
+  const wantAction = async (wantId: number, action: 'retry-now' | 'abandon') => {
+    try {
+      await fetchAuth(`/api/series/${id}/wants/${wantId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      await loadDownloads()
+    } catch {
+      /* panel refresh shows the surviving state */
+    }
+  }
 
   const removeDownload = async (hash: string, deleteFiles: boolean) => {
     setBusyHash(hash)
@@ -781,7 +835,7 @@ export default function SeriesDetail() {
             qbitConfigured={dl?.qbitConfigured ?? false}
           />
           {dl?.nextChase && dl.nextChase.state !== 'ready' ? (
-            <EpisodeChasePanel chase={dl.nextChase} />
+            <EpisodeChasePanel chase={dl.nextChase} onWantAction={wantAction} />
           ) : null}
         </div>
 

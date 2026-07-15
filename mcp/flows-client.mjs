@@ -92,6 +92,14 @@ export const flows = {
   runs: (limit = 100) => api('GET', `/api/flows/runs?limit=${Number(limit)}`),
 }
 
+// Sourcing reconciliation (torrent ledger × wants × qBittorrent × library).
+export const sourcing = {
+  wants: (status) => api('GET', `/api/sourcing/wants${status ? `?status=${status}` : ''}`),
+  ledger: () => api('GET', '/api/sourcing/ledger'),
+  backfill: (dryRun = true) => api('POST', '/api/sourcing/backfill', { dryRun }),
+  reconcile: (dryRun = true) => api('POST', '/api/sourcing/reconcile', { dryRun }),
+}
+
 // Scheduled flow runs. A schedule = { flowId, kind, spec, dryRun?, enabled? }.
 // kind/spec: 'interval' {every,unit:'minutes'|'hours'} | 'daily' {at:'HH:MM'} |
 // 'weekly' {day:'sun'..'sat',at} | 'once' {runAt:ISO}.

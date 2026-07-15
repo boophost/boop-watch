@@ -8,7 +8,7 @@
 // Code after a restart (MCP config is read at startup). The CLI needs no
 // restart, so it's the way to drive flows within a live session.
 
-import { flows, schedules, cfg } from './flows-client.mjs'
+import { flows, schedules, sourcing, cfg } from './flows-client.mjs'
 
 // --------------------------------------------------------------------------
 // CLI mode
@@ -113,6 +113,32 @@ async function cli(argv) {
     case 'schedule-delete':
       out(await schedules.remove(rest[0]))
       return
+    case 'wants': {
+      // wants [open|sourced|fulfilled|abandoned]
+      const { wants } = await sourcing.wants(rest[0])
+      out(
+        wants
+          .map(
+            (w) =>
+              `#${w.id}  mal ${w.mal_id}  ${w.kind}${w.episode != null ? ` ep${w.episode}` : ''}  ${w.status}` +
+              (w.attempts ? `  attempts=${w.attempts}` : '') +
+              (w.next_attempt_at ? `  next=${w.next_attempt_at}` : '') +
+              (w.torrent_hash ? `  hash=${w.torrent_hash.slice(0, 8)}` : '') +
+              (w.note ? `  — ${w.note}` : ''),
+          )
+          .join('\n') || '(no wants)',
+      )
+      return
+    }
+    case 'ledger':
+      out(await sourcing.ledger())
+      return
+    case 'backfill':
+      out(await sourcing.backfill(!rest.includes('--live')))
+      return
+    case 'reconcile':
+      out(await sourcing.reconcile(!rest.includes('--live')))
+      return
     case 'whoami':
       out({ ...cfg(), token: cfg().token ? '(set)' : '', secret: cfg().secret ? '(set)' : '' })
       return
@@ -123,6 +149,7 @@ async function cli(argv) {
           '  enable <id> | disable <id>   (automation switch: schedules + event triggers; manual runs unaffected)\n' +
           '  runs [limit]\n' +
           '  schedules | schedule-get <id> | schedule-create <flowId> <kind> <specJson> [--live] [--disabled] | schedule-update <id> <patchJson> | schedule-run <id> | schedule-delete <id>\n' +
+          '  wants [status] | ledger | backfill [--live] | reconcile [--live]   (sourcing reconciliation)\n' +
           '  whoami',
       )
       process.exit(cmd ? 1 : 0)

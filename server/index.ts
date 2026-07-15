@@ -25,6 +25,7 @@ import { searchAnimeAniList } from './anilist.js'
 import { warmScope, ensureScope, getPlayableIds } from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
+import { sourcingLedger, sourcingBackfill, sourcingReconcile, wantAction } from './sourcing.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import { createIssue, githubConfigured } from './github.js'
 import * as blacklist from './blacklist.js'
@@ -616,6 +617,62 @@ app.get('/api/library/ledger', requireAuth, requireAdmin, (_req, res) => {
     missing,
     rewritten,
   })
+})
+
+// Sourcing reconciliation: the torrent-lifecycle side of tracking (the route
+// above answers "disk vs library_files"; these answer "qBittorrent vs the
+// torrent ledger vs wants"). Report is read-only; backfill/reconcile default
+// to dry-run and only write when {dryRun:false} is explicit.
+app.get('/api/sourcing/ledger', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    res.json(await sourcingLedger())
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Ledger report failed' })
+  }
+})
+
+app.get('/api/sourcing/wants', requireAuth, requireAdmin, (req, res) => {
+  const raw = typeof req.query.status === 'string' ? req.query.status : undefined
+  const status =
+    raw === 'open' || raw === 'sourced' || raw === 'fulfilled' || raw === 'abandoned' ? raw : undefined
+  res.json({ wants: seriesDb.listWants(status) })
+})
+
+app.post('/api/sourcing/backfill', requireAuth, requireAdmin, async (req, res) => {
+  const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  try {
+    res.json(await sourcingBackfill(dryRun))
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Backfill failed' })
+  }
+})
+
+app.post('/api/sourcing/reconcile', requireAuth, requireAdmin, async (req, res) => {
+  const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  try {
+    res.json(await sourcingReconcile(dryRun))
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Reconcile failed' })
+  }
+})
+
+// Admin action on one want (the chase panel's "retry now" / "abandon").
+app.post('/api/series/:id/wants/:wantId', requireAuth, requireAdmin, (req, res) => {
+  const wantId = Number(req.params.wantId)
+  const action = (req.body as { action?: unknown } | undefined)?.action
+  if (!Number.isFinite(wantId) || (action !== 'retry-now' && action !== 'abandon' && action !== 'reopen')) {
+    res.status(400).json({ error: 'action must be retry-now | abandon | reopen' })
+    return
+  }
+  const want = wantAction(wantId, action)
+  if (!want) {
+    res.status(404).json({ error: 'Want not found' })
+    return
+  }
+  res.json({ want })
 })
 
 // Per-episode media facts for the files actually in the library (codec, audio

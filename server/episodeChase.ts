@@ -15,6 +15,66 @@ export interface EpisodeChase {
   airsAt: string | null
   state: ChaseState
   progress?: number | null
+  /** Persisted want backing this state (absent when derived from live qBit only). */
+  wantId?: number
+  attempts?: number
+  nextAttemptAt?: string | null
+  note?: string | null
+}
+
+/** Minimal shapes of the persisted sourcing rows (server/db.ts), so this file
+ * stays pure/import-free. */
+export interface WantStateRow {
+  id: number
+  status: 'open' | 'sourced' | 'fulfilled' | 'abandoned'
+  attempts: number
+  next_attempt_at: string | null
+  note: string | null
+}
+export interface TorrentStateRow {
+  status: string
+}
+
+/**
+ * Overlay the persisted want/ledger state onto a derived chase. The want is
+ * the source of truth for *intent* (searching with N attempts vs silently
+ * stuck); live qBit still owns download progress when we have it. A chase with
+ * no want row passes through unchanged (pre-wants series).
+ */
+export function applyWantState(
+  chase: EpisodeChase | null,
+  want: WantStateRow | null,
+  torrent: TorrentStateRow | null,
+): EpisodeChase | null {
+  if (!chase || !want) return chase
+  const out: EpisodeChase = {
+    ...chase,
+    wantId: want.id,
+    attempts: want.attempts,
+    nextAttemptAt: want.next_attempt_at,
+    note: want.note,
+  }
+  // Future episodes stay 'waiting' regardless of want bookkeeping.
+  if (chase.state === 'waiting') return out
+  if (want.status === 'open' || want.status === 'abandoned') {
+    // Nothing sourced: honest state is searching (retrying on backoff), even
+    // when a stale/unrelated torrent made the derived state look busier.
+    return { ...out, state: 'searching', progress: null }
+  }
+  if (want.status === 'sourced') {
+    if (torrent && (torrent.status === 'completed' || torrent.status === 'imported')) {
+      return { ...out, state: 'importing' }
+    }
+    if (torrent && torrent.status === 'exhausted') {
+      // Its torrent turned out to contain nothing importable — the reconciler
+      // will reopen it; show the truth meanwhile.
+      return { ...out, state: 'searching', progress: null }
+    }
+    // queued/downloading — keep live progress when the derived pass had it.
+    return { ...out, state: 'downloading' }
+  }
+  // fulfilled: the file is placed; if the portal hasn't caught up it's importing.
+  return { ...out, state: chase.state === 'ready' ? 'ready' : 'importing' }
 }
 
 export interface ChaseTorrent {
