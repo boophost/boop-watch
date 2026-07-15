@@ -24,7 +24,19 @@ import {
   fulfilEpisodeWant,
   fulfilBatchWant,
   getTorrent,
+  getSeriesStatus,
+  saveSeriesStatus,
+  upsertEpisodeAirDates,
+  episodesCacheInfo,
+  getCachedEpisodes,
+  listWantsJoined,
+  upsertWant,
+  recordWantAttempt,
+  updateWantStatus,
+  type WantKind,
+  type WantStatus,
 } from './db.js'
+import { fetchAniListAiring } from './anilist.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
@@ -2544,6 +2556,13 @@ const torrentSearch: NodeImpl = {
       { key: 'baseUrl', label: 'Index base URL', kind: 'text', default: '', help: 'Override the provider’s API host. Empty = default.' },
       { key: 'queryField', label: 'Query field', kind: 'text', default: 'torrent_query' },
       {
+        key: 'episodeField',
+        label: 'Episode pin field',
+        kind: 'text',
+        default: '',
+        help: 'When set and the item carries a number there (e.g. torrent_episode from a want), episode mode grabs ONLY that episode instead of the most recent ones. Empty = off.',
+      },
+      {
         key: 'mode',
         label: 'What to grab',
         kind: 'select',
@@ -2578,6 +2597,7 @@ const torrentSearch: NodeImpl = {
       str(config, 'baseUrl', '').replace(/\/$/, '') ||
       (provider === 'tsukihime' ? TSUKI_URL : TOSHO_URL)
     const queryField = str(config, 'queryField', 'torrent_query')
+    const episodeField = str(config, 'episodeField', '')
     const configMode = str(config, 'mode', 'auto')
     const opts: SearchOpts = {
       resolution: str(config, 'resolution', '1080p'),
@@ -2686,19 +2706,26 @@ const torrentSearch: NodeImpl = {
               : `no releases passed filters for "${q}"`
           ctx.notes.push(why)
         } else if (mode === 'episode') {
-          // Best release per episode number, most recent episodes first.
+          // A pinned episode (a want) narrows the grab to exactly that number;
+          // otherwise: best release per episode, most recent first.
+          const pinnedEp = episodeField ? asNumber(item[episodeField]) : null
           const byEp = new Map<number, Candidate>()
           for (const c of cands) {
             if (c.isBatch || c.episode == null) continue
+            if (pinnedEp != null && c.episode !== pinnedEp) continue
             const cur = byEp.get(c.episode)
             if (!cur || scoreCandidate(c, opts) > scoreCandidate(cur, opts)) byEp.set(c.episode, c)
           }
           const eps = [...byEp.entries()].sort((a, b) => b[0] - a[0]).slice(0, maxEpisodes)
           if (eps.length === 0) {
             missed.push(item)
-            ctx.notes.push(`no single-episode releases for "${q}"`)
+            ctx.notes.push(
+              pinnedEp != null
+                ? `no release for "${q}" episode ${pinnedEp}${cands.some((c) => !c.isBatch) ? ` (${cands.filter((c) => !c.isBatch).length} other-episode releases ignored)` : ''}`
+                : `no single-episode releases for "${q}"`,
+            )
           } else {
-            for (const [, c] of eps) found.push({ ...item, ...candidateFields(c) })
+            for (const [, c] of eps) found.push({ ...item, ...candidateFields(c), torrent_provider: provider })
             ctx.notes.push(`${q}: ${eps.length} episode(s), best seeders ${Math.max(...eps.map(([, c]) => c.seeders ?? 0))}`)
           }
         } else {
@@ -2706,7 +2733,7 @@ const torrentSearch: NodeImpl = {
           const batches = cands.filter((c) => c.isBatch)
           const pool = batches.length > 0 ? batches : cands
           const best = pool.sort((a, b) => scoreCandidate(b, opts) - scoreCandidate(a, opts))[0]
-          found.push({ ...item, ...candidateFields(best) })
+          found.push({ ...item, ...candidateFields(best), torrent_provider: provider })
           ctx.notes.push(
             `${q}: ${best.resolution || '?'} ${best.videoCodec || '?'} ${best.dualAudio ? 'dual' : 'sub'} ${best.isBatch ? 'batch' : 'single'} · ${best.seeders ?? '?'} seeders`,
           )
@@ -2730,7 +2757,7 @@ const animeStatus: NodeImpl = {
     label: 'Anime status',
     category: 'enrich',
     description:
-      'Looks up airing status + episode count by MAL id (TsukiHime) and sets air_status / total_episodes / is_movie / want_mode.',
+      'Looks up airing status + episode count by MAL id and sets air_status / total_episodes / is_movie / want_mode. Cache-first: reads the catalog row and only hits TsukiHime when the cache is stale (finished shows are never re-polled).',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
       { id: 'out', label: 'out' },
@@ -2740,18 +2767,53 @@ const animeStatus: NodeImpl = {
       { key: 'malField', label: 'MAL id field', kind: 'text', default: 'mal_id' },
       { key: 'baseUrl', label: 'API base URL', kind: 'text', default: '', help: 'Empty = TsukiHime default.' },
       { key: 'maxItems', label: 'Max lookups', kind: 'number', default: 25, help: '0 = unlimited.' },
+      {
+        key: 'cacheTtlHours',
+        label: 'Cache TTL (hours)',
+        kind: 'number',
+        default: 24,
+        help: 'Serve airing/unknown statuses from the catalog cache for this long before re-checking. Finished is terminal — never re-polled. 0 = always fetch.',
+      },
     ],
   },
   async run(inputs, config, ctx) {
     const malField = str(config, 'malField', 'mal_id')
     const base = str(config, 'baseUrl', '').replace(/\/$/, '') || TSUKI_URL
     const maxItems = num(config, 'maxItems', 25)
+    const ttlMs = Math.max(0, num(config, 'cacheTtlHours', 24)) * 3600_000
     const out: FlowItem[] = []
     const unknown: FlowItem[] = []
     let looked = 0
+    let fromCache = 0
     for (const item of allInputs(inputs)) {
       const mal = Number(item[malField])
-      if (!Number.isFinite(mal) || mal <= 0 || (maxItems > 0 && looked >= maxItems)) {
+      if (!Number.isFinite(mal) || mal <= 0) {
+        unknown.push(item)
+        continue
+      }
+      // Cache-first: a finished show never changes; an airing/unknown one is
+      // trusted for the TTL. Only stale rows cost a network call.
+      const cached = getSeriesStatus(mal)
+      if (ttlMs > 0 && cached?.air_status && cached.status_checked_at) {
+        const fresh =
+          cached.air_status === 'finished' ||
+          Date.now() - new Date(cached.status_checked_at + 'Z').getTime() < ttlMs
+        if (fresh) {
+          fromCache++
+          out.push({
+            ...item,
+            air_status: cached.air_status,
+            total_episodes: cached.total_episodes,
+            is_movie: !!cached.is_movie,
+            want_mode: cached.air_status === 'airing' ? 'episode' : 'batch',
+            anidb_id: cached.anidb_id,
+            tsuki_id: cached.tsuki_id,
+            anilist_id: cached.anilist_id,
+          })
+          continue
+        }
+      }
+      if (maxItems > 0 && looked >= maxItems) {
         unknown.push(item)
         continue
       }
@@ -2762,6 +2824,19 @@ const animeStatus: NodeImpl = {
         // TsukiHime air_status: 1 = airing, 2 = finished.
         const airStatus = a.air_status === 1 ? 'airing' : a.air_status === 2 ? 'finished' : 'unknown'
         const wantMode = airStatus === 'airing' ? 'episode' : 'batch'
+        // Persist the lookup on the catalog row so the next run reads our DB
+        // instead of TsukiHime (dry runs too: this caches an observation, it
+        // doesn't take a side effect the flow was asked to skip).
+        if (airStatus !== 'unknown') {
+          saveSeriesStatus(mal, {
+            air_status: airStatus,
+            total_episodes: a.total_episodes != null ? Number(a.total_episodes) : null,
+            is_movie: isMovie ? 1 : 0,
+            anidb_id: a.anidb != null ? Number(a.anidb) : null,
+            tsuki_id: a.id != null ? Number(a.id) : null,
+            anilist_id: a.anilist != null ? Number(a.anilist) : null,
+          })
+        }
         out.push({
           ...item,
           air_status: airStatus,
@@ -2784,8 +2859,309 @@ const animeStatus: NodeImpl = {
       // under it with headroom.
       await new Promise((r) => setTimeout(r, 550))
     }
-    ctx.notes.push(`resolved status for ${out.length}, ${unknown.length} unknown`)
+    ctx.notes.push(
+      `resolved status for ${out.length}${fromCache ? ` (${fromCache} from cache)` : ''}, ${unknown.length} unknown`,
+    )
     return { out, unknown }
+  },
+}
+
+const episodesNode: NodeImpl = {
+  spec: {
+    type: 'enrich.episodes',
+    label: 'Aired episodes',
+    category: 'enrich',
+    description:
+      'Expands a series item into one item per *aired* episode (episode/torrent_episode set, MAL per-cour numbering). Cache-first: reads series_episodes and only asks AniList (airingSchedule by MAL id) when the cache is missing or stale; air dates are written back to the cache.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'aired', label: 'aired' },
+      { id: 'none', label: 'none' },
+    ],
+    config: [
+      { key: 'malField', label: 'MAL id field', kind: 'text', default: 'mal_id' },
+      {
+        key: 'cacheTtlHours',
+        label: 'Cache TTL (hours)',
+        kind: 'number',
+        default: 6,
+        help: 'For airing shows, refresh the episode cache when older than this. A cache that already covers every episode of a finished show is never refreshed. 0 = always fetch.',
+      },
+      { key: 'maxFetch', label: 'Max upstream fetches', kind: 'number', default: 10, help: 'Cap of AniList lookups per run; items beyond it use whatever the cache has. 0 = unlimited.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const malField = str(config, 'malField', 'mal_id')
+    const ttlMs = Math.max(0, num(config, 'cacheTtlHours', 6)) * 3600_000
+    const maxFetch = num(config, 'maxFetch', 10)
+    const aired: FlowItem[] = []
+    const none: FlowItem[] = []
+    let fetched = 0
+    let fromCache = 0
+    for (const item of allInputs(inputs)) {
+      const mal = Number(item[malField])
+      if (!Number.isFinite(mal) || mal <= 0) {
+        none.push(item)
+        continue
+      }
+      const info = episodesCacheInfo(mal)
+      const total = asNumber(item.total_episodes) ?? getSeriesStatus(mal)?.total_episodes ?? null
+      const finished = String(item.air_status ?? getSeriesStatus(mal)?.air_status ?? '') === 'finished'
+      // The cache answers when it's complete (finished show, every episode
+      // present) or recent enough. Missing air dates count as incomplete —
+      // pre-AniList rows only carried titles.
+      const cachedRows = getCachedEpisodes(mal)
+      const withDates = cachedRows.filter((e) => e.aired)
+      const complete = finished && total != null && withDates.length >= total
+      const freshEnough =
+        info.updated_at != null &&
+        withDates.length > 0 &&
+        (ttlMs === 0 ? false : Date.now() - new Date(info.updated_at + 'Z').getTime() < ttlMs)
+      let episodes = withDates
+      if (!complete && !freshEnough && (maxFetch === 0 || fetched < maxFetch)) {
+        fetched++
+        const al = await fetchAniListAiring(mal)
+        if (al && al.episodes.length > 0) {
+          // Cache every known air time (future ones included — they become
+          // "aired" by pure time passage, no refetch needed).
+          upsertEpisodeAirDates(mal, al.episodes.map((e) => ({ number: e.number, aired: e.airedAt })))
+          episodes = getCachedEpisodes(mal).filter((e) => e.aired)
+        }
+      } else if (episodes.length > 0) {
+        fromCache++
+      }
+      const now = Date.now()
+      const past = episodes.filter((e) => new Date(String(e.aired)).getTime() <= now)
+      if (past.length === 0) {
+        none.push(item)
+        continue
+      }
+      for (const e of past) {
+        aired.push({
+          ...item,
+          episode: e.number,
+          torrent_episode: e.number,
+          episode_aired: e.aired,
+          episode_title: e.title ?? null,
+        })
+      }
+    }
+    ctx.notes.push(
+      `${aired.length} aired episode(s) across ${new Set(aired.map((i) => i[malField])).size} series` +
+        (fromCache ? `, ${fromCache} series from cache` : '') +
+        (fetched ? `, ${fetched} AniList fetch(es)` : '') +
+        (none.length ? `, ${none.length} with none aired` : ''),
+    )
+    return { aired, none }
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Wants: the persistent memory of what the sourcing flows are trying to
+// obtain. Domain source/sink nodes over the `wants` table (db.ts) — decision
+// logic (aired vs airing, provider fallback) stays in the generic filter/
+// compare nodes per the repo convention.
+// ---------------------------------------------------------------------------
+
+const wantsSource: NodeImpl = {
+  spec: {
+    type: 'source.wants',
+    label: 'Wants',
+    category: 'source',
+    description:
+      'Emits wants (episodes/season packs the system still needs), joined to their catalog rows. Open wants in backoff (next attempt in the future) are skipped by default. Sets want_mode so Torrent search "auto" grabs the right shape.',
+    inputs: [{ id: 'when', label: 'when' }],
+    outputs: [{ id: 'items', label: 'wants' }],
+    config: [
+      {
+        key: 'status',
+        label: 'Status',
+        kind: 'select',
+        options: [
+          { value: 'open', label: 'Open (still unsourced)' },
+          { value: 'sourced', label: 'Sourced (torrent queued)' },
+          { value: 'fulfilled', label: 'Fulfilled' },
+          { value: 'abandoned', label: 'Abandoned' },
+        ],
+        default: 'open',
+      },
+      {
+        key: 'kind',
+        label: 'Kind',
+        kind: 'select',
+        options: [
+          { value: '', label: 'Any' },
+          { value: 'episode', label: 'Episodes' },
+          { value: 'batch', label: 'Season packs' },
+        ],
+        default: '',
+      },
+      { key: 'respectBackoff', label: 'Respect retry backoff', kind: 'boolean', default: true, help: 'Skip wants whose next_attempt_at is still in the future. Turn off to retry everything now.' },
+      { key: 'maxItems', label: 'Max wants', kind: 'number', default: 10, help: 'Per run, least-tried first. 0 = unlimited.' },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const status = str(config, 'status', 'open') as WantStatus
+    const kind = str(config, 'kind', '') as WantKind | ''
+    const respectBackoff = bool(config, 'respectBackoff', true)
+    const maxItems = num(config, 'maxItems', 10)
+    let rows = listWantsJoined({ status, kind: kind || undefined, respectBackoff })
+    const total = rows.length
+    if (maxItems > 0) rows = rows.slice(0, maxItems)
+    const items: FlowItem[] = rows.map((w) => ({
+      want_id: w.id,
+      want_kind: w.kind,
+      want_status: w.status,
+      want_reason: w.reason,
+      attempts: w.attempts,
+      mal_id: w.mal_id,
+      // MAL per-cour episode number — doubles as the search pin.
+      episode: w.episode,
+      torrent_episode: w.episode,
+      // Lets enrich.torrent-search mode:"auto" pick batch vs episode.
+      want_mode: w.kind,
+      torrent_hash: w.torrent_hash,
+      title: w.title,
+      title_english: w.title_english,
+      name: w.title,
+      tvdb_id: w.tvdb_id,
+      tvdb_season: w.tvdb_season,
+      episode_offset: w.episode_offset,
+      air_status: w.air_status,
+      is_movie: w.is_movie != null ? !!w.is_movie : null,
+      total_episodes: w.series_total_episodes,
+    }))
+    ctx.notes.push(
+      `${items.length} ${status} want(s)` +
+        (total > items.length ? ` of ${total}` : '') +
+        (kind ? ` (${kind})` : ''),
+    )
+    return { items }
+  },
+}
+
+const wantUpsert: NodeImpl = {
+  spec: {
+    type: 'sink.want-upsert',
+    label: 'Record want',
+    category: 'sink',
+    description:
+      'Creates a want per item (one per target, ever — an existing open/sourced want is left alone; a fulfilled one is only reopened when told to). This is what turns "a show was added" / "an episode aired" into persistent, retryable intent.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [
+      { key: 'malField', label: 'MAL id field', kind: 'text', default: 'mal_id' },
+      {
+        key: 'kind',
+        label: 'Kind',
+        kind: 'select',
+        options: [
+          { value: 'episode', label: 'Episode (uses the episode field)' },
+          { value: 'batch', label: 'Season pack' },
+          { value: 'field', label: 'From item field (kindField)' },
+        ],
+        default: 'episode',
+      },
+      { key: 'kindField', label: 'Kind field', kind: 'text', default: 'want_mode', help: 'Only read when Kind = "From item field".' },
+      { key: 'episodeField', label: 'Episode field', kind: 'text', default: 'torrent_episode', help: 'MAL per-cour episode number for episode wants.' },
+      { key: 'reason', label: 'Reason', kind: 'text', default: 'flow', help: 'Recorded on the want: show-added | release-aired | upgrade | backfill | …' },
+      { key: 'reopen', label: 'Reopen fulfilled/abandoned', kind: 'boolean', default: false, help: 'On = a fulfilled or abandoned want for the same target goes back to open (e.g. an explicit re-source). Off = it stays as-is.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const malField = str(config, 'malField', 'mal_id')
+    const kindMode = str(config, 'kind', 'episode')
+    const kindField = str(config, 'kindField', 'want_mode')
+    const episodeField = str(config, 'episodeField', 'torrent_episode')
+    const reason = str(config, 'reason', 'flow')
+    const reopen = bool(config, 'reopen', false)
+    const out: FlowItem[] = []
+    let created = 0
+    let reopened = 0
+    let existing = 0
+    let invalid = 0
+    for (const item of allInputs(inputs)) {
+      const mal = asNumber(item[malField])
+      const kind = (kindMode === 'field' ? String(item[kindField] ?? '') : kindMode) as WantKind
+      const episode = kind === 'episode' ? asNumber(item[episodeField]) : null
+      if (mal == null || (kind !== 'episode' && kind !== 'batch') || (kind === 'episode' && episode == null)) {
+        invalid++
+        out.push(item)
+        continue
+      }
+      if (ctx.dryRun) {
+        out.push({ ...item, want_kind: kind })
+        continue
+      }
+      const r = upsertWant({ mal_id: mal, kind, episode, reason, reopen })
+      if (r.created) created++
+      else if (r.reopened) reopened++
+      else existing++
+      out.push({ ...item, want_id: r.want.id, want_kind: kind, want_status: r.want.status })
+    }
+    ctx.notes.push(
+      ctx.dryRun
+        ? `dry run — would record ${allInputs(inputs).length - invalid} want(s)`
+        : `wants: ${created} created, ${reopened} reopened, ${existing} already tracked` +
+            (invalid ? `, ${invalid} item(s) missing mal/episode` : ''),
+    )
+    return { out }
+  },
+}
+
+const wantUpdate: NodeImpl = {
+  spec: {
+    type: 'sink.want-update',
+    label: 'Update want',
+    category: 'sink',
+    description:
+      'Transitions wants: record a failed search attempt (with exponential backoff before the next try), abandon, or reopen. Wire Torrent search\'s "missed" here so a fruitless hunt is remembered instead of retried blindly every run.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [
+      { key: 'wantIdField', label: 'Want id field', kind: 'text', default: 'want_id' },
+      {
+        key: 'action',
+        label: 'Action',
+        kind: 'select',
+        options: [
+          { value: 'attempt', label: 'Record failed attempt (backoff)' },
+          { value: 'abandon', label: 'Abandon' },
+          { value: 'reopen', label: 'Reopen' },
+        ],
+        default: 'attempt',
+      },
+      { key: 'backoffBaseMinutes', label: 'Backoff base (minutes)', kind: 'number', default: 360, help: 'Next attempt after base × 2^attempts (capped at 32×). 360 = 6h, 12h, 24h, …' },
+      { key: 'note', label: 'Note', kind: 'text', default: 'search missed', help: 'Recorded on the want; {field} placeholders are filled from the item.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const wantIdField = str(config, 'wantIdField', 'want_id')
+    const action = str(config, 'action', 'attempt')
+    const backoff = Math.max(1, num(config, 'backoffBaseMinutes', 360))
+    const noteTpl = str(config, 'note', 'search missed')
+    const items = allInputs(inputs)
+    let updated = 0
+    let skippedNoId = 0
+    for (const item of items) {
+      const id = asNumber(item[wantIdField])
+      if (id == null) {
+        skippedNoId++
+        continue
+      }
+      if (ctx.dryRun) continue
+      const note = noteTpl ? fillTemplate(noteTpl, item, 'none') : undefined
+      if (action === 'attempt') recordWantAttempt(id, backoff, note)
+      else if (action === 'abandon') updateWantStatus(id, 'abandoned', note)
+      else updateWantStatus(id, 'open', note)
+      updated++
+    }
+    ctx.notes.push(
+      ctx.dryRun
+        ? `dry run — would ${action} ${items.length - skippedNoId} want(s)`
+        : `${action}: ${updated} want(s)` + (skippedNoId ? `, ${skippedNoId} without a want_id` : ''),
+    )
+    return { out: items }
   },
 }
 
@@ -3607,16 +3983,22 @@ const metadataEnrich: NodeImpl = {
     const items = allInputs(inputs)
     const enriched: FlowItem[] = []
     const skipped: FlowItem[] = []
+    // A library-import run feeds this node one item per FILE, so the same
+    // mal_id arrives dozens of times — memoise per run (observed: ~100
+    // identical Jikan /full fetches for one show in one run).
+    const memo = new Map<number, Awaited<ReturnType<typeof fetchAnimeFull>>>()
+    const seasonNoted = new Set<number>()
     let looked = 0
     for (const item of items) {
       const mal = Number(item[malField])
-      if (!Number.isFinite(mal) || mal <= 0 || (maxItems > 0 && looked >= maxItems)) {
+      if (!Number.isFinite(mal) || mal <= 0 || (!memo.has(mal) && maxItems > 0 && looked >= maxItems)) {
         skipped.push(item)
         continue
       }
-      looked++
+      if (!memo.has(mal)) looked++
       try {
-        const a = await fetchAnimeFull(mal)
+        const a = memo.get(mal) ?? (await fetchAnimeFull(mal))
+        memo.set(mal, a)
         const studios = JSON.stringify((a.studios ?? []).map((s) => s.name))
         const genres = JSON.stringify((a.genres ?? []).map((g) => g.name))
         const meta = {
@@ -3658,7 +4040,8 @@ const metadataEnrich: NodeImpl = {
         } catch (e) {
           ctx.notes.push(`season-map lookup failed for mal ${mal}: ${e instanceof Error ? e.message : String(e)}`)
         }
-        if (season) {
+        if (season && !seasonNoted.has(mal)) {
+          seasonNoted.add(mal)
           ctx.notes.push(
             `mal ${mal} → tvdb ${season.tvdbId ?? '?'} S${season.tvdbSeason ?? '?'} +${season.episodeOffset}` +
               (season.reason ? ` (${season.reason})` : ''),
@@ -5074,6 +5457,10 @@ const IMPLS: NodeImpl[] = [
   urlValue,
   jsonValue,
   animeStatus,
+  episodesNode,
+  wantsSource,
+  wantUpsert,
+  wantUpdate,
   torrentSearch,
   diff,
   merge,
