@@ -17,6 +17,7 @@ import {
 } from './downloads.js'
 import { getAllPortalItems } from './portalDb.js'
 import {
+  applyWantState,
   resolveChaseTarget,
   resolveExpected,
   resolveNextChase,
@@ -25,6 +26,7 @@ import {
   type EpisodeChase,
   type MalBroadcast,
 } from './episodeChase.js'
+import { wantForEpisode } from './sourcing.js'
 import { fetchAnimeFull } from './jikan.js'
 
 export type { EpisodeChase }
@@ -72,7 +74,7 @@ function chaseFromStatus(
 } {
   const airInfos = airInfosForSeries(series)
   const { airedCount, expected } = resolveExpected(series.episodes, airInfos)
-  const nextChase = resolveNextChase({
+  const derived = resolveNextChase({
     episodes: airInfos,
     siteEpisodes: status.siteEpisodes,
     libraryEpisodes,
@@ -80,6 +82,11 @@ function chaseFromStatus(
     malEpisodes: series.episodes,
     broadcast: broadcast ?? parseStoredBroadcast(series.broadcast),
   })
+  // Persisted sourcing state wins over pure derivation: a want row knows
+  // whether the episode is being retried (and when next), not just whether a
+  // torrent happens to be visible in qBittorrent right now.
+  const wantState = derived ? wantForEpisode(series.mal_id, derived.episode) : null
+  const nextChase = applyWantState(derived, wantState?.want ?? null, wantState?.torrent ?? null)
   return { airedCount, expectedForPipeline: expected, nextChase }
 }
 
@@ -187,7 +194,12 @@ export async function buildSeriesChase(
     malEpisodes: series.episodes,
     broadcast: parseStoredBroadcast(series.broadcast),
   })
-  const status = await getSeriesDownloadStatus(seriesId, { skipQbit: !target || !target.due })
+  // A persisted open want means nothing is queued — qBit can add nothing, so
+  // skip its (slow while busy) query too. Only a sourced want (or no want row
+  // at all, the pre-wants fallback) still needs live download progress.
+  const targetWant = target?.due ? wantForEpisode(series.mal_id, target.episode) : null
+  const skipQbit = !target || !target.due || targetWant?.want.status === 'open'
+  const status = await getSeriesDownloadStatus(seriesId, { skipQbit })
   let libraryEpisodes = new Set<number>()
   if (opts.includeLibrary !== false) {
     try {

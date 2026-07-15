@@ -574,7 +574,9 @@ export interface FlowRunRow {
   activity: RunActivity[]
 }
 
-const RUN_LOG_LIMIT = 200
+// Sized for the wants era: an hourly chase + event fires churn history faster
+// than the old 3h schedules did.
+const RUN_LOG_LIMIT = 400
 
 // Returns the id of the inserted flow_runs row (so a scheduled fire can record
 // which run it produced in flow_schedules.last_run_id).
