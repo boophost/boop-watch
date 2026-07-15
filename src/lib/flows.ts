@@ -250,6 +250,8 @@ export interface Flow {
   description: string | null
   graph: FlowGraph
   component: FlowComponentMeta | null
+  /** 0/1 from SQLite: automation (schedules + event triggers) on/off. */
+  enabled: number
   created_at: string
   updated_at: string
 }
@@ -260,6 +262,7 @@ export interface FlowSummary {
   description: string | null
   node_count: number
   published: boolean
+  enabled: boolean
   updated_at: string
 }
 
@@ -342,7 +345,13 @@ export const createFlow = (name: string, description?: string) =>
 
 export const saveFlow = (
   id: number,
-  patch: { name?: string; description?: string | null; graph?: FlowGraph; component?: FlowComponentMeta | null },
+  patch: {
+    name?: string
+    description?: string | null
+    graph?: FlowGraph
+    component?: FlowComponentMeta | null
+    enabled?: boolean
+  },
 ) =>
   fetchAuth(`/api/flows/${id}`, {
     method: 'PUT',

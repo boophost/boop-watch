@@ -310,8 +310,16 @@ flowRouter.put('/api/flows/:id', (req, res) => {
     description?: unknown
     graph?: unknown
     component?: unknown
+    enabled?: unknown
   }
   const patch: Parameters<typeof flowsDb.updateFlow>[1] = {}
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled must be a boolean' })
+      return
+    }
+    patch.enabled = body.enabled
+  }
   if (body.name !== undefined) {
     if (typeof body.name !== 'string' || !body.name.trim()) {
       res.status(400).json({ error: 'name must be a non-empty string' })
@@ -502,6 +510,9 @@ export function dispatchFires(fires: FireRequest[] | undefined): void {
   })().catch((e) => console.error('dispatchFires failed', e))
 }
 
+// Deliberately ignores flows.enabled: disable turns off *automation*
+// (schedules + event triggers), while manual runs are how you iterate on a
+// disabled flow before switching it back on.
 flowRouter.post('/api/flows/:id/run', async (req, res) => {
   const id = Number(req.params.id)
   const row = Number.isFinite(id) ? flowsDb.getFlow(id) : undefined
