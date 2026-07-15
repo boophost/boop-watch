@@ -14,6 +14,13 @@ export interface AniListSearchHit {
   synopsis: string
   image_url: string | null
   url: string
+  /** Extra facts for the add-series UI's grid cards + detail panel. */
+  year: number | null
+  /** MAL-style media type: TV | Movie | OVA | ONA | Special | Music. */
+  type: string | null
+  /** MAL-style airing status string. */
+  status: string | null
+  episodes: number | null
 }
 
 const stripHtml = (s: string): string =>
@@ -32,7 +39,8 @@ export async function searchAnimeAniList(
   const q = query.trim()
   if (!q) return []
   const gql = `query($q:String,$n:Int){ Page(perPage:$n){ media(search:$q, type:ANIME, sort:SEARCH_MATCH){
-    idMal title{ romaji english } description(asHtml:false) coverImage{ large medium } } } }`
+    idMal title{ romaji english } description(asHtml:false) coverImage{ large medium }
+    format status episodes seasonYear startDate{ year } } } }`
   const res = await limitedFetch('anilist', ANILIST_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -47,6 +55,11 @@ export async function searchAnimeAniList(
           title: { romaji: string | null; english: string | null }
           description: string | null
           coverImage: { large: string | null; medium: string | null }
+          format?: string | null
+          status?: string | null
+          episodes?: number | null
+          seasonYear?: number | null
+          startDate?: { year?: number | null }
         }>
       }
     }
@@ -62,6 +75,10 @@ export async function searchAnimeAniList(
       synopsis: m.description ? stripHtml(m.description) : '',
       image_url: m.coverImage.large || m.coverImage.medium || null,
       url: `https://myanimelist.net/anime/${m.idMal}`,
+      year: m.seasonYear ?? m.startDate?.year ?? null,
+      type: mapAniListFormat(m.format),
+      status: mapAniListStatus(m.status),
+      episodes: m.episodes ?? null,
     })
   }
   return out
