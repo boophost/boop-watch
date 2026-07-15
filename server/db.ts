@@ -245,6 +245,61 @@ export function getDb(): Database.Database {
       attempted_at INTEGER NOT NULL,
       PRIMARY KEY (kind, key)
     );
+
+    -- One row per episode (or season pack) the system has decided it needs.
+    -- This is the persistent memory the sourcing flows work from: a search
+    -- miss leaves the want open (with backoff) instead of vanishing, and a
+    -- fulfilled want never gets re-queued. episode is the MAL per-cour number
+    -- (what torrent search and release triggers speak) — NOT the post-offset
+    -- tvdb episode that library_files stores.
+    CREATE TABLE IF NOT EXISTS wants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mal_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,                    -- 'episode' | 'batch'
+      episode INTEGER,                       -- MAL per-cour number; NULL for batch
+      status TEXT NOT NULL DEFAULT 'open',   -- open | sourced | fulfilled | abandoned
+      reason TEXT,                           -- show-added | release-aired | upgrade | backfill | manual
+      torrent_hash TEXT,                     -- torrents.hash currently sourcing it
+      library_path TEXT,                     -- library_files.path that fulfilled it
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at TEXT,
+      next_attempt_at TEXT,                  -- backoff gate: skip while in the future
+      note TEXT,                             -- last miss reason
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- One want per target, ever — re-needing something reopens the row.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wants_episode ON wants(mal_id, episode) WHERE kind = 'episode';
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wants_batch ON wants(mal_id) WHERE kind = 'batch';
+    CREATE INDEX IF NOT EXISTS idx_wants_status ON wants(status, next_attempt_at);
+
+    -- Lifecycle ledger for every torrent the flows queue: nothing gets queued
+    -- twice (sink.qbittorrent refuses hashes already tracked) and nothing gets
+    -- lost (a completed torrent that imports nothing is marked exhausted
+    -- instead of re-firing the import forever). library_files stays the
+    -- per-file ledger; this is the per-torrent one.
+    CREATE TABLE IF NOT EXISTS torrents (
+      hash TEXT PRIMARY KEY,                 -- lowercased info-hash
+      mal_id INTEGER,
+      kind TEXT,                             -- 'episode' | 'batch'
+      episode INTEGER,                       -- MAL per-cour number for single-ep grabs
+      tvdb_season INTEGER,
+      want_id INTEGER,                       -- wants.id it was queued to satisfy
+      name TEXT,
+      category TEXT,
+      provider TEXT,                         -- tsukihime | animetosho | manual | backfill
+      size INTEGER,
+      status TEXT NOT NULL DEFAULT 'queued', -- queued | downloading | completed | imported | exhausted | superseded | cleaned | failed
+      imported_files INTEGER NOT NULL DEFAULT 0,
+      queued_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      imported_at TEXT,
+      cleaned_at TEXT,
+      note TEXT,                             -- why exhausted/failed/superseded
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_torrents_status ON torrents(status);
+    CREATE INDEX IF NOT EXISTS idx_torrents_mal ON torrents(mal_id, episode);
   `)
 
   // Additive migration for the richer metadata columns.
@@ -862,6 +917,312 @@ export function importedTorrentHashes(): Set<string> {
     )
     .all() as { h: string }[]
   return new Set(rows.map((r) => r.h))
+}
+
+// --- Wants (what the sourcing flows are trying to obtain) -------------------
+
+export type WantKind = 'episode' | 'batch'
+export type WantStatus = 'open' | 'sourced' | 'fulfilled' | 'abandoned'
+
+export interface WantRow {
+  id: number
+  mal_id: number
+  kind: WantKind
+  episode: number | null // MAL per-cour number; NULL for batch
+  status: WantStatus
+  reason: string | null
+  torrent_hash: string | null
+  library_path: string | null
+  attempts: number
+  last_attempt_at: string | null
+  next_attempt_at: string | null
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+function findWant(mal_id: number, kind: WantKind, episode: number | null): WantRow | undefined {
+  return (
+    kind === 'episode'
+      ? getDb()
+          .prepare(`SELECT * FROM wants WHERE mal_id = ? AND kind = 'episode' AND episode = ?`)
+          .get(mal_id, episode)
+      : getDb().prepare(`SELECT * FROM wants WHERE mal_id = ? AND kind = 'batch'`).get(mal_id)
+  ) as WantRow | undefined
+}
+
+/**
+ * Create a want, or revive an existing one. There is only ever one want per
+ * target: an open/sourced want is left untouched, a fulfilled/abandoned one is
+ * reopened only when `reopen` says so (a re-aired trigger must not re-source
+ * an episode we already have).
+ */
+export function upsertWant(args: {
+  mal_id: number
+  kind: WantKind
+  episode?: number | null
+  reason?: string
+  reopen?: boolean
+}): { want: WantRow; created: boolean; reopened: boolean } {
+  const db = getDb()
+  const episode = args.kind === 'episode' ? (args.episode ?? null) : null
+  const tx = db.transaction(() => {
+    const existing = findWant(args.mal_id, args.kind, episode)
+    if (!existing) {
+      const info = db
+        .prepare(`INSERT INTO wants (mal_id, kind, episode, reason) VALUES (?, ?, ?, ?)`)
+        .run(args.mal_id, args.kind, episode, args.reason ?? null)
+      const want = db.prepare('SELECT * FROM wants WHERE id = ?').get(info.lastInsertRowid) as WantRow
+      return { want, created: true, reopened: false }
+    }
+    const revivable = existing.status === 'fulfilled' || existing.status === 'abandoned'
+    if (revivable && args.reopen) {
+      db.prepare(
+        `UPDATE wants SET status = 'open', reason = ?, torrent_hash = NULL, library_path = NULL,
+           attempts = 0, next_attempt_at = NULL, note = NULL, updated_at = datetime('now')
+         WHERE id = ?`,
+      ).run(args.reason ?? existing.reason, existing.id)
+      return { want: db.prepare('SELECT * FROM wants WHERE id = ?').get(existing.id) as WantRow, created: false, reopened: true }
+    }
+    return { want: existing, created: false, reopened: false }
+  })
+  return tx()
+}
+
+/** A search pass came up empty: bump attempts and push the next try out with
+ * exponential backoff (base * 2^attempts, capped at 2^5 = 32x). */
+export function recordWantAttempt(id: number, backoffBaseMinutes: number, note?: string): void {
+  const row = getDb().prepare('SELECT attempts FROM wants WHERE id = ?').get(id) as
+    | { attempts: number }
+    | undefined
+  if (!row) return
+  const minutes = Math.round(backoffBaseMinutes * 2 ** Math.min(row.attempts, 5))
+  getDb()
+    .prepare(
+      `UPDATE wants SET attempts = attempts + 1, last_attempt_at = datetime('now'),
+         next_attempt_at = datetime('now', '+' || ? || ' minutes'), note = ?, updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .run(minutes, note ?? null, id)
+}
+
+/** A torrent was queued for this want. */
+export function markWantSourced(id: number, torrentHash: string): void {
+  getDb()
+    .prepare(
+      `UPDATE wants SET status = 'sourced', torrent_hash = ?, note = NULL, updated_at = datetime('now') WHERE id = ?`,
+    )
+    .run(torrentHash.toLowerCase(), id)
+}
+
+export function updateWantStatus(id: number, status: WantStatus, note?: string): void {
+  getDb()
+    .prepare(`UPDATE wants SET status = ?, note = COALESCE(?, note), updated_at = datetime('now') WHERE id = ?`)
+    .run(status, note ?? null, id)
+}
+
+/** An episode landed in the library — fulfil its want, whatever state it was
+ * in. `episode` is the MAL per-cour number (pre episode_offset), matching how
+ * the want was minted. */
+export function fulfilEpisodeWant(
+  mal_id: number,
+  episode: number,
+  torrentHash: string | null,
+  libraryPath: string | null,
+): boolean {
+  return (
+    getDb()
+      .prepare(
+        `UPDATE wants SET status = 'fulfilled',
+           torrent_hash = COALESCE(?, torrent_hash), library_path = COALESCE(?, library_path),
+           note = NULL, updated_at = datetime('now')
+         WHERE mal_id = ? AND kind = 'episode' AND episode = ? AND status <> 'fulfilled'`,
+      )
+      .run(torrentHash ? torrentHash.toLowerCase() : null, libraryPath, mal_id, episode).changes > 0
+  )
+}
+
+/** A season pack imported — fulfil the batch want it was sourcing. */
+export function fulfilBatchWant(mal_id: number, torrentHash: string | null): boolean {
+  return (
+    getDb()
+      .prepare(
+        `UPDATE wants SET status = 'fulfilled', torrent_hash = COALESCE(?, torrent_hash),
+           note = NULL, updated_at = datetime('now')
+         WHERE mal_id = ? AND kind = 'batch' AND status <> 'fulfilled'`,
+      )
+      .run(torrentHash ? torrentHash.toLowerCase() : null, mal_id).changes > 0
+  )
+}
+
+export function getWant(id: number): WantRow | undefined {
+  return getDb().prepare('SELECT * FROM wants WHERE id = ?').get(id) as WantRow | undefined
+}
+
+export function listWants(status?: WantStatus): WantRow[] {
+  return (
+    status
+      ? getDb().prepare('SELECT * FROM wants WHERE status = ? ORDER BY id').all(status)
+      : getDb().prepare('SELECT * FROM wants ORDER BY id').all()
+  ) as WantRow[]
+}
+
+// --- Torrent lifecycle ledger ------------------------------------------------
+
+export type TorrentStatus =
+  | 'queued'
+  | 'downloading'
+  | 'completed'
+  | 'imported'
+  | 'exhausted'
+  | 'superseded'
+  | 'cleaned'
+  | 'failed'
+
+export interface TorrentRow {
+  hash: string
+  mal_id: number | null
+  kind: string | null
+  episode: number | null
+  tvdb_season: number | null
+  want_id: number | null
+  name: string | null
+  category: string | null
+  provider: string | null
+  size: number | null
+  status: TorrentStatus
+  imported_files: number
+  queued_at: string
+  completed_at: string | null
+  imported_at: string | null
+  cleaned_at: string | null
+  note: string | null
+  updated_at: string
+}
+
+export interface TorrentIdentity {
+  hash: string
+  mal_id?: number | null
+  kind?: string | null
+  episode?: number | null
+  tvdb_season?: number | null
+  want_id?: number | null
+  name?: string | null
+  category?: string | null
+  provider?: string | null
+  size?: number | null
+}
+
+/** Ledger a torrent at queue time. Re-queuing a hash we already track resets
+ * it to `queued` (only reachable for `failed` rows — sink.qbittorrent refuses
+ * every other status via blockedTorrentHashes). */
+export function recordTorrentQueued(t: TorrentIdentity): void {
+  getDb()
+    .prepare(
+      `INSERT INTO torrents (hash, mal_id, kind, episode, tvdb_season, want_id, name, category, provider, size, status)
+       VALUES (@hash, @mal_id, @kind, @episode, @tvdb_season, @want_id, @name, @category, @provider, @size, 'queued')
+       ON CONFLICT(hash) DO UPDATE SET
+         mal_id=excluded.mal_id, kind=excluded.kind, episode=excluded.episode, tvdb_season=excluded.tvdb_season,
+         want_id=excluded.want_id, name=excluded.name, category=excluded.category, provider=excluded.provider,
+         size=excluded.size, status='queued', queued_at=datetime('now'), note=NULL, updated_at=datetime('now')`,
+    )
+    .run({
+      hash: t.hash.toLowerCase(),
+      mal_id: t.mal_id ?? null,
+      kind: t.kind ?? null,
+      episode: t.episode ?? null,
+      tvdb_season: t.tvdb_season ?? null,
+      want_id: t.want_id ?? null,
+      name: t.name ?? null,
+      category: t.category ?? null,
+      provider: t.provider ?? null,
+      size: t.size ?? null,
+    })
+}
+
+/** Ledger an *observed* outcome (imported/exhausted) even for torrents queued
+ * before the ledger existed — the row is created on the spot so pre-ledger
+ * junk stops re-firing the import too. */
+export function recordTorrentOutcome(
+  t: TorrentIdentity,
+  status: 'imported' | 'exhausted',
+  extra?: { imported_files?: number; note?: string },
+): void {
+  const db = getDb()
+  const hash = t.hash.toLowerCase()
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT OR IGNORE INTO torrents (hash, mal_id, kind, episode, tvdb_season, name, category, provider, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'backfill', 'completed')`,
+    ).run(hash, t.mal_id ?? null, t.kind ?? null, t.episode ?? null, t.tvdb_season ?? null, t.name ?? null, t.category ?? null)
+    db.prepare(
+      `UPDATE torrents SET status = ?, imported_files = COALESCE(?, imported_files), note = COALESCE(?, note),
+         mal_id = COALESCE(mal_id, ?),
+         imported_at = CASE WHEN ? = 'imported' THEN datetime('now') ELSE imported_at END,
+         updated_at = datetime('now')
+       WHERE hash = ?`,
+    ).run(status, extra?.imported_files ?? null, extra?.note ?? null, t.mal_id ?? null, status, hash)
+  })
+  tx()
+}
+
+/** Status transition for hashes we already track; timestamps follow the status. */
+export function setTorrentStatus(
+  hash: string,
+  status: TorrentStatus,
+  note?: string,
+): boolean {
+  return (
+    getDb()
+      .prepare(
+        `UPDATE torrents SET status = ?, note = COALESCE(?, note),
+           completed_at = CASE WHEN ? = 'completed' THEN datetime('now') ELSE completed_at END,
+           cleaned_at   = CASE WHEN ? IN ('cleaned','superseded') THEN datetime('now') ELSE cleaned_at END,
+           updated_at = datetime('now')
+         WHERE hash = ?`,
+      )
+      .run(status, note ?? null, status, status, hash.toLowerCase()).changes > 0
+  )
+}
+
+/** Observation backstop: torrents seen completed in qBittorrent move off
+ * queued/downloading even when no qbit-complete watcher is running. */
+export function markTorrentsCompleted(hashes: string[]): void {
+  if (hashes.length === 0) return
+  const stmt = getDb().prepare(
+    `UPDATE torrents SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
+     WHERE hash = ? AND status IN ('queued', 'downloading')`,
+  )
+  const tx = getDb().transaction((hs: string[]) => {
+    for (const h of hs) stmt.run(h.toLowerCase())
+  })
+  tx(hashes)
+}
+
+export function getTorrent(hash: string): TorrentRow | undefined {
+  return getDb().prepare('SELECT * FROM torrents WHERE hash = ?').get(hash.toLowerCase()) as
+    | TorrentRow
+    | undefined
+}
+
+/** Hashes sink.qbittorrent must refuse to re-queue: everything we track except
+ * `failed` (queued-but-vanished, worth retrying). Re-queuing an `exhausted`
+ * torrent would loop the same junk forever; re-queuing an `imported`/`cleaned`
+ * one re-downloads data the library already has. */
+export function blockedTorrentHashes(): Set<string> {
+  const rows = getDb().prepare(`SELECT hash FROM torrents WHERE status <> 'failed'`).all() as {
+    hash: string
+  }[]
+  return new Set(rows.map((r) => r.hash))
+}
+
+/** Hashes whose processing is finished (nothing left for the import flow to
+ * do) — union with importedTorrentHashes() for pre-ledger history. */
+export function processedTorrentHashes(): Set<string> {
+  const rows = getDb()
+    .prepare(`SELECT hash FROM torrents WHERE status IN ('imported','exhausted','superseded','cleaned')`)
+    .all() as { hash: string }[]
+  return new Set(rows.map((r) => r.hash))
 }
 
 /** Record the on-disk copy of a candidate's art (see banners.ts `cacheBannerFile`). */

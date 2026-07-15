@@ -14,6 +14,16 @@ import {
   recordLibraryFile,
   forgetLibraryFile,
   importedTorrentHashes,
+  recordTorrentQueued,
+  recordTorrentOutcome,
+  setTorrentStatus,
+  blockedTorrentHashes,
+  processedTorrentHashes,
+  markTorrentsCompleted,
+  markWantSourced,
+  fulfilEpisodeWant,
+  fulfilBatchWant,
+  getTorrent,
 } from './db.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
@@ -927,16 +937,31 @@ const qbittorrentSource: NodeImpl = {
       })
     }
 
-    // Drop torrents already in the library ledger before they reach the
-    // expensive probe/mux nodes. Only exact re-imports (same torrent hash) are
-    // dropped — a quality upgrade is a *new* torrent (new hash, not yet in the
-    // ledger), so it still runs.
-    let skipped = 0
+    // Observation backstop: anything qBittorrent reports complete moves off
+    // queued/downloading in the torrent ledger, even when no qbit-complete
+    // watcher is running. Pure bookkeeping of observed reality, but dry runs
+    // still leave the DB untouched.
+    if (!ctx.dryRun) {
+      markTorrentsCompleted(torrents.filter((t) => (t.progress ?? 0) >= 1).map((t) => t.hash))
+    }
+
+    // Drop torrents whose processing is finished before they reach the
+    // expensive probe/mux nodes: imported ones (library ledger + torrent
+    // ledger) and ones the torrent ledger knows are done for other reasons —
+    // exhausted (nothing importable in them), superseded, cleaned. A quality
+    // upgrade is a *new* torrent (new hash), so it still runs.
+    let skippedImported = 0
+    let skippedProcessed = 0
     if (skipImported) {
       const imported = importedTorrentHashes()
-      const before = torrents.length
-      torrents = torrents.filter((t) => !imported.has(t.hash))
-      skipped = before - torrents.length
+      const processed = processedTorrentHashes()
+      const keep: typeof torrents = []
+      for (const t of torrents) {
+        if (imported.has(t.hash)) skippedImported++
+        else if (processed.has(t.hash)) skippedProcessed++
+        else keep.push(t)
+      }
+      torrents = keep
     }
 
     const items = torrents.map((t): FlowItem => {
@@ -963,7 +988,8 @@ const qbittorrentSource: NodeImpl = {
     })
     ctx.notes.push(
       `${items.length} torrent(s)${completedOnly ? ' (completed)' : ''}${category ? ` in "${category}"` : ''}` +
-        (skipped ? `, skipped ${skipped} already imported` : ''),
+        (skippedImported ? `, skipped ${skippedImported} already imported` : '') +
+        (skippedProcessed ? `, skipped ${skippedProcessed} already processed (exhausted/cleaned)` : ''),
     )
     return { items }
   },
@@ -3717,9 +3743,22 @@ const qbittorrentSink: NodeImpl = {
   async run(inputs, config, ctx) {
     const urlField = str(config, 'urlField', 'torrent_magnet')
     const items = allInputs(inputs)
-    const withMagnet = items.filter((it) => String(it[urlField] ?? '').startsWith('magnet:'))
+    let withMagnet = items.filter((it) => String(it[urlField] ?? '').startsWith('magnet:'))
     if (items.length > withMagnet.length) {
       ctx.notes.push(`skipped ${items.length - withMagnet.length} items without a magnet link`)
+    }
+    // The "nothing gets queued twice" guard: refuse hashes the torrent ledger
+    // already tracks (queued, downloading, completed, imported, exhausted, …
+    // — everything except failed). This is what stops a flow that re-decides
+    // it needs something from re-sending the same magnet run after run.
+    const blocked = blockedTorrentHashes()
+    const already = withMagnet.filter((it) => {
+      const h = String(it.torrent_hash ?? '').toLowerCase()
+      return h !== '' && blocked.has(h)
+    })
+    if (already.length > 0) {
+      withMagnet = withMagnet.filter((it) => !already.includes(it))
+      ctx.notes.push(`skipped ${already.length} already tracked in the torrent ledger`)
     }
     if (withMagnet.length === 0) return { sent: [] }
     if (ctx.dryRun) {
@@ -3766,10 +3805,38 @@ const qbittorrentSink: NodeImpl = {
     // metadata) reviewable instead of showing as a bare hash. Best-effort.
     let renamed = 0
     let tagged = 0
+    let ledgered = 0
+    let untracked = 0
     for (const it of withMagnet) {
       const hash = String(it.torrent_hash ?? '').toLowerCase()
       const name = String(it.torrent_name ?? '')
-      if (!hash) continue
+      if (!hash) {
+        // A magnet without an info-hash field can't be tracked or guarded —
+        // it was still sent, so say so rather than silently losing it.
+        untracked++
+        continue
+      }
+      // Ledger the queue while we still know why it happened: identity from
+      // the search/status nodes, the want it satisfies, and the provider.
+      const epNum = asNumber(it.torrent_episode)
+      const kind = String(
+        it.want_kind ?? it.want_mode ?? (it.torrent_is_batch ? 'batch' : epNum != null ? 'episode' : ''),
+      )
+      recordTorrentQueued({
+        hash,
+        mal_id: asNumber(it.mal_id),
+        kind: kind || null,
+        episode: epNum,
+        tvdb_season: asNumber(it.tvdb_season),
+        want_id: asNumber(it.want_id),
+        name: name || null,
+        category: str(config, 'category', 'anime') || null,
+        provider: it.torrent_provider != null ? String(it.torrent_provider) : null,
+        size: asNumber(it.torrent_size),
+      })
+      const wantId = asNumber(it.want_id)
+      if (wantId != null) markWantSourced(wantId, hash)
+      ledgered++
       const tags = tagTpl ? tagsFor(it) : ''
       if (tags) {
         try {
@@ -3800,7 +3867,9 @@ const qbittorrentSink: NodeImpl = {
     ctx.notes.push(
       `sent ${withMagnet.length} magnet(s) to qBittorrent${paused ? ' (paused)' : ''}` +
         (renamed ? `, named ${renamed}` : '') +
-        (tagged ? `, tagged ${tagged}` : ''),
+        (tagged ? `, tagged ${tagged}` : '') +
+        (ledgered ? `, ledgered ${ledgered}` : '') +
+        (untracked ? `, ${untracked} WITHOUT a hash (untracked!)` : ''),
     )
     return { sent: withMagnet }
   },
@@ -3821,11 +3890,23 @@ const qbittorrentDelete: NodeImpl = {
       { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
       { key: 'hashField', label: 'Torrent hash field', kind: 'text', default: 'torrent_hash' },
       { key: 'deleteFiles', label: 'Delete downloaded files', kind: 'boolean', default: true, help: 'On = also remove the files from disk. Only feed this fully-superseded torrents (see the Difference node in the seed).' },
+      {
+        key: 'reason',
+        label: 'Ledger status',
+        kind: 'select',
+        options: [
+          { value: 'cleaned', label: 'Cleaned (routine post-import removal)' },
+          { value: 'superseded', label: 'Superseded (a better release replaced it)' },
+        ],
+        default: 'cleaned',
+        help: 'What the torrent ledger records for the removed torrents — provenance for why they left qBittorrent.',
+      },
     ],
   },
   async run(inputs, config, ctx) {
     const hashField = str(config, 'hashField', 'torrent_hash')
     const deleteFiles = bool(config, 'deleteFiles', true)
+    const reason = str(config, 'reason', 'cleaned') === 'superseded' ? 'superseded' : 'cleaned'
     const items = allInputs(inputs)
     const hashes = [
       ...new Set(items.map((it) => String(it[hashField] ?? '').toLowerCase()).filter(Boolean)),
@@ -3847,7 +3928,14 @@ const qbittorrentDelete: NodeImpl = {
       signal: AbortSignal.timeout(15_000),
     })
     if (!res.ok) throw new Error(`qBittorrent delete failed (${res.status})`)
-    ctx.notes.push(`removed ${hashes.length} torrent(s)${deleteFiles ? ' + files' : ''}`)
+    // Ledger the removal for hashes we track (unknown hashes stay unknown —
+    // this node must not invent provenance for torrents it didn't queue).
+    let ledgered = 0
+    for (const h of hashes) if (setTorrentStatus(h, reason)) ledgered++
+    ctx.notes.push(
+      `removed ${hashes.length} torrent(s)${deleteFiles ? ' + files' : ''}` +
+        (ledgered ? `, ledgered ${ledgered} as ${reason}` : ''),
+    )
     return { removed: items }
   },
 }
@@ -4085,14 +4173,14 @@ const libraryImport: NodeImpl = {
       const rawShow = String(item[showField] ?? item.title ?? item.name ?? item.series_name ?? '').trim()
       if (!src || !rawShow) {
         ctx.notes.push(`skipped an item missing file or show name`)
-        skipped.push(item)
+        skipped.push({ ...item, import_status: 'missing-fields' })
         continue
       }
       // Never create a library folder from a torrent release name — that becomes
       // a junk Jellyfin "series" (Erai-raws / Yameii folders) and can leak into Public.
       if (looksLikeReleaseName(rawShow) && item.tvdb_season == null && !item.title_english && !item.title) {
         ctx.notes.push(`skipped release-named show folder: ${rawShow.slice(0, 80)}`)
-        skipped.push(item)
+        skipped.push({ ...item, import_status: 'release-name' })
         continue
       }
       const ext = path.extname(src)
@@ -4132,7 +4220,7 @@ const libraryImport: NodeImpl = {
       const templated = sanitizeSegments(fillPathTemplate(tpl, ctxItem))
       if (!templated) {
         ctx.notes.push(`skipped "${show}" — template produced an empty path`)
-        skipped.push(item)
+        skipped.push({ ...item, import_status: 'empty-path' })
         continue
       }
       // Land in the folder that already holds this show/season rather than the
@@ -4155,9 +4243,22 @@ const libraryImport: NodeImpl = {
       let existing = fs.existsSync(dest) ? dest : null
       if (!existing && marker) existing = findSiblingEpisodeFile(destDir, marker, destBasename)
 
+      // The want that asked for this file lives in MAL per-cour episode space —
+      // fulfil with the PRE-offset number (epNum), never the post-offset
+      // `episode` that names the library file.
+      const fulfilHere = (libPath: string | null) => {
+        if (ctx.dryRun) return
+        const mal = asNumber(item.mal_id)
+        if (mal == null) return
+        const hash = item.torrent_hash != null ? String(item.torrent_hash) : null
+        if (Number.isFinite(epNum)) fulfilEpisodeWant(mal, epNum, hash, libPath)
+      }
+
       if (existing) {
-        // Nothing there to upgrade → honour the plain skip.
+        // Nothing there to upgrade → honour the plain skip. The episode is in
+        // the library though, so any open want for it is satisfied.
         if (!overwrite) {
+          fulfilHere(existing)
           skipped.push({ ...item, library_path: existing, import_status: 'exists' })
           continue
         }
@@ -4184,6 +4285,7 @@ const libraryImport: NodeImpl = {
               })
             } catch { /* backfill is best-effort */ }
           }
+          fulfilHere(existing)
           skipped.push({ ...item, library_path: existing, import_status: 'current' })
           continue
         }
@@ -4230,6 +4332,7 @@ const libraryImport: NodeImpl = {
         } catch (e) {
           ctx.notes.push(`ledger write failed for ${path.basename(dest)}: ${e instanceof Error ? e.message : String(e)}`)
         }
+        fulfilHere(dest)
         if (used === 'copy' && method === 'hardlink') copied++
         const out: FlowItem = { ...item, library_path: dest, import_method: used, import_status: replacing ? 'replaced' : 'new' }
         // Bring subtitle + font sidecars next to the video (same basename).
@@ -4253,9 +4356,83 @@ const libraryImport: NodeImpl = {
         imported.push(out)
       } catch (e) {
         ctx.notes.push(`import failed for ${path.basename(src)}: ${e instanceof Error ? e.message : String(e)}`)
-        skipped.push(item)
+        skipped.push({ ...item, import_status: 'error' })
       }
     }
+
+    // Torrent-level outcomes. A torrent that placed at least one file is
+    // `imported`; one whose every file was skipped for a *terminal* reason is
+    // `exhausted` — the marker that finally stops a junk torrent from
+    // re-firing this flow every run. Transient failures (I/O errors) leave it
+    // as-is so the next pass retries.
+    if (!ctx.dryRun) {
+      const TERMINAL = new Set([
+        'missing-fields',
+        'release-name',
+        'unresolved-season',
+        'unresolved-episode',
+        'empty-path',
+        'exists',
+        'current',
+      ])
+      const byHash = new Map<
+        string,
+        { first: FlowItem; imported: number; terminal: Set<string>; transient: number }
+      >()
+      const agg = (it: FlowItem) => {
+        const h = String(it.torrent_hash ?? '').toLowerCase()
+        if (!h) return null
+        let a = byHash.get(h)
+        if (!a) byHash.set(h, (a = { first: it, imported: 0, terminal: new Set(), transient: 0 }))
+        return a
+      }
+      for (const it of imported) {
+        const a = agg(it)
+        if (a) a.imported++
+      }
+      for (const it of skipped) {
+        const a = agg(it)
+        if (!a) continue
+        const s = String(it.import_status ?? '')
+        if (TERMINAL.has(s)) a.terminal.add(s)
+        else a.transient++
+      }
+      let outImported = 0
+      let outExhausted = 0
+      for (const [hash, a] of byHash) {
+        const identity = {
+          hash,
+          mal_id: asNumber(a.first.mal_id),
+          kind: a.first.want_kind != null ? String(a.first.want_kind) : a.first.torrent_is_batch ? 'batch' : null,
+          episode: asNumber(a.first.torrent_episode),
+          tvdb_season: asNumber(a.first.tvdb_season),
+          name: String(a.first.torrent_name ?? '') || null,
+          category: String(a.first.torrent_category ?? '') || null,
+        }
+        if (a.imported > 0) {
+          recordTorrentOutcome(identity, 'imported', { imported_files: a.imported })
+          outImported++
+          // A finished season pack satisfies its batch want (episode wants
+          // were fulfilled per file above).
+          const row = getTorrent(hash)
+          const mal = asNumber(a.first.mal_id) ?? row?.mal_id ?? null
+          if (mal != null && (row?.kind === 'batch' || a.first.torrent_is_batch === true)) {
+            fulfilBatchWant(Number(mal), hash)
+          }
+        } else if (a.terminal.size > 0 && a.transient === 0) {
+          recordTorrentOutcome(identity, 'exhausted', {
+            note: `all files skipped: ${[...a.terminal].join(', ')}`,
+          })
+          outExhausted++
+        }
+      }
+      if (outImported || outExhausted) {
+        ctx.notes.push(
+          `torrent ledger: ${outImported} imported` + (outExhausted ? `, ${outExhausted} exhausted` : ''),
+        )
+      }
+    }
+
     ctx.notes.push(
       ctx.dryRun
         ? `dry run — would import ${imported.length} file(s), skip ${skipped.length}`
