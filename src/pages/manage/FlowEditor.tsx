@@ -39,6 +39,8 @@ import {
   StickyNote,
   Waypoints,
   Trash2,
+  Undo2,
+  Redo2,
   Unlink,
   X,
 } from 'lucide-react'
@@ -71,6 +73,7 @@ import {
   editorNodeTypes,
   editorRfType,
 } from './flowEditorAnnotations'
+import { useFlowHistory } from './useFlowHistory'
 
 // ---- graph <-> React Flow conversion ---------------------------------------
 
@@ -786,6 +789,51 @@ function FlowEditorInner() {
   const addAt = useRef(0)
   const clipboardRef = useRef<{ nodes: RFNode[]; edges: RFEdge[] } | null>(null)
   const { screenToFlowPosition } = useReactFlow()
+  const nodesRef = useRef(nodes)
+  const edgesRef = useRef(edges)
+  nodesRef.current = nodes
+  edgesRef.current = edges
+  const {
+    takeSnapshot: pushHistory,
+    undo: undoHistory,
+    redo: redoHistory,
+    clear: clearHistory,
+    canUndo,
+    canRedo,
+  } = useFlowHistory<RFNode, RFEdge>()
+
+  const snapshot = useCallback(() => {
+    pushHistory(nodesRef.current, edgesRef.current)
+  }, [pushHistory])
+
+  // Delete often emits node removes then edge removes in the same turn — one
+  // snapshot for the whole gesture, not one per handler.
+  const snapLock = useRef(false)
+  const snapshotOnce = useCallback(() => {
+    if (snapLock.current) return
+    snapLock.current = true
+    snapshot()
+    queueMicrotask(() => {
+      snapLock.current = false
+    })
+  }, [snapshot])
+
+  const restoreSnapshot = useCallback(
+    (snap: { nodes: RFNode[]; edges: RFEdge[] }) => {
+      setNodes(snap.nodes)
+      setEdges(snap.edges)
+      setDirty(true)
+    },
+    [setNodes, setEdges],
+  )
+
+  const undo = useCallback(() => {
+    undoHistory(nodesRef.current, edgesRef.current, restoreSnapshot)
+  }, [undoHistory, restoreSnapshot])
+
+  const redo = useCallback(() => {
+    redoHistory(nodesRef.current, edgesRef.current, restoreSnapshot)
+  }, [redoHistory, restoreSnapshot])
 
   useEffect(() => {
     if (!Number.isFinite(id)) {
@@ -811,6 +859,8 @@ function FlowEditorInner() {
         const rf = toRF(flow.flow.graph)
         setNodes(rf.nodes)
         setEdges(rf.edges)
+        clearHistory()
+        setDirty(false)
       } catch {
         if (!cancelled) navigate('/manage/flows', { replace: true })
       } finally {
@@ -820,7 +870,7 @@ function FlowEditorInner() {
     return () => {
       cancelled = true
     }
-  }, [id, navigate, setNodes, setEdges])
+  }, [id, navigate, setNodes, setEdges, clearHistory])
 
   const selected = nodes.find((n) => n.selected)
   const selectedSpec = selected && !isEditorNode(selected.data.specType)
@@ -926,18 +976,20 @@ function FlowEditorInner() {
 
   const onConnect = useCallback(
     (conn: Connection) => {
+      snapshot()
       setEdges((eds) => addEdge(conn, eds))
       setDirty(true)
     },
-    [setEdges],
+    [setEdges, snapshot],
   )
 
   const onReconnect = useCallback(
     (oldEdge: RFEdge, newConnection: Connection) => {
+      snapshot()
       setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds))
       setDirty(true)
     },
-    [setEdges],
+    [setEdges, snapshot],
   )
 
   /** Resolves the NodePort behind one end of a connection: subflow nodes via
@@ -1036,6 +1088,7 @@ function FlowEditorInner() {
     specType: 'editor.sticky' | 'editor.arrow' | 'editor.group',
     position?: { x: number; y: number },
   ) => {
+    snapshot()
     const n = addAt.current++
     const config = { ...EDITOR_DEFAULTS[specType] }
     const rfType = editorRfType(specType)
@@ -1060,6 +1113,7 @@ function FlowEditorInner() {
   }
 
   const addNode = (spec: NodeSpec, position?: { x: number; y: number }) => {
+    snapshot()
     const n = addAt.current++
     const config =
       spec.type === 'flow.subflow'
@@ -1098,6 +1152,7 @@ function FlowEditorInner() {
   }
 
   const addReroute = (position?: { x: number; y: number }) => {
+    snapshot()
     const n = addAt.current
     const node = newReroute(position ?? { x: 120 + n * 24, y: 120 + n * 24 })
     setNodes((ns) => [...ns.map((x) => ({ ...x, selected: false })), { ...node, selected: true }])
@@ -1109,6 +1164,7 @@ function FlowEditorInner() {
   // Double-clicking a wire drops an anchor onto it, splitting source→target into
   // source→reroute→target at the click point.
   const insertReroute = (edge: RFEdge, position: { x: number; y: number }) => {
+    snapshot()
     // Center the box (and thus the visible dot) on the click point.
     const node = newReroute({ x: position.x - 15, y: position.y - 15 })
     setNodes((ns) => [...ns.map((x) => ({ ...x, selected: false })), { ...node, selected: true }])
@@ -1121,6 +1177,7 @@ function FlowEditorInner() {
   }
 
   const removeNode = (nodeId: string) => {
+    snapshot()
     const target = nodes.find((n) => n.id === nodeId)
     if (target?.data.specType === 'editor.group') {
       setNodes((ns) =>
@@ -1150,6 +1207,7 @@ function FlowEditorInner() {
   const removeSelected = useCallback(() => {
     const ids = new Set(nodes.filter((n) => n.selected).map((n) => n.id))
     if (ids.size === 0) return
+    snapshot()
     setNodes((ns) => {
       let next = ns.filter((n) => !ids.has(n.id))
       for (const target of nodes) {
@@ -1172,11 +1230,12 @@ function FlowEditorInner() {
     setEdges((es) => es.filter((e) => !ids.has(e.source) && !ids.has(e.target)))
     setMenu(null)
     setDirty(true)
-  }, [nodes, setNodes, setEdges])
+  }, [nodes, setNodes, setEdges, snapshot])
 
   const groupSelection = useCallback(() => {
     const picked = nodes.filter((n) => n.selected && n.data.specType !== 'editor.group')
     if (picked.length < 2) return
+    snapshot()
     const bounds = getNodesBounds(picked)
     const padding = 24
     const titleH = 28
@@ -1217,7 +1276,7 @@ function FlowEditorInner() {
     ])
     setMenu(null)
     setDirty(true)
-  }, [nodes, setNodes])
+  }, [nodes, setNodes, snapshot])
 
   const copyNodes = useCallback(
     (nodeIds: string[]) => {
@@ -1243,6 +1302,7 @@ function FlowEditorInner() {
   const pasteClipboard = useCallback(() => {
     const clip = clipboardRef.current
     if (!clip) return
+    snapshot()
     const idMap = new Map<string, string>()
     for (const node of clip.nodes) {
       idMap.set(node.id, `n${Date.now().toString(36)}${addAt.current++}`)
@@ -1266,7 +1326,7 @@ function FlowEditorInner() {
     setEdges((es) => [...es, ...newEdges])
     setMenu(null)
     setDirty(true)
-  }, [setNodes, setEdges])
+  }, [setNodes, setEdges, snapshot])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1287,15 +1347,22 @@ function FlowEditorInner() {
       } else if (mod && e.key === 'g') {
         e.preventDefault()
         groupSelection()
+      } else if (mod && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undo()
+      } else if ((mod && e.key === 'y') || (mod && e.key === 'z' && e.shiftKey)) {
+        e.preventDefault()
+        redo()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [copySelection, pasteClipboard, groupSelection])
+  }, [copySelection, pasteClipboard, groupSelection, undo, redo])
 
   const duplicateNode = (nodeId: string) => {
     const src = nodes.find((n) => n.id === nodeId)
     if (!src) return
+    snapshot()
     const n = addAt.current++
     setNodes((ns) => [
       ...ns.map((node) => ({ ...node, selected: false })),
@@ -1314,6 +1381,7 @@ function FlowEditorInner() {
   }
 
   const removeEdge = (edgeId: string) => {
+    snapshot()
     setEdges((es) => es.filter((e) => e.id !== edgeId))
     setMenu(null)
     setDirty(true)
@@ -1482,6 +1550,26 @@ function FlowEditorInner() {
             {component?.published ? (
               <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden />
             ) : null}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
+            title="Undo (Ctrl+Z)"
+            disabled={!canUndo}
+            onClick={() => undo()}
+          >
+            <Undo2 className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
+            title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+            disabled={!canRedo}
+            onClick={() => redo()}
+          >
+            <Redo2 className="size-4" />
           </Button>
           <Button
             variant="outline"
@@ -1722,7 +1810,11 @@ function FlowEditorInner() {
           edges={styledEdges}
           nodeTypes={nodeTypes}
           isValidConnection={isValidConnection}
+          deleteKeyCode={['Backspace', 'Delete']}
+          onNodeDragStart={() => snapshot()}
+          onSelectionDragStart={() => snapshot()}
           onNodesChange={(changes) => {
+            if (changes.some((c) => c.type === 'remove')) snapshotOnce()
             onNodesChange(changes)
             if (
               changes.some(
@@ -1737,6 +1829,7 @@ function FlowEditorInner() {
             }
           }}
           onEdgesChange={(changes) => {
+            if (changes.some((c) => c.type === 'remove')) snapshotOnce()
             onEdgesChange(changes)
             if (changes.some((c) => c.type === 'remove')) markDirty()
           }}
