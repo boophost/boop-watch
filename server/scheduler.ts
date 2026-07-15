@@ -132,6 +132,12 @@ async function fireScheduled(sched: FlowSchedule): Promise<void> {
     })
     return
   }
+  if (!flow.enabled) {
+    // Automation is off for this flow: roll the cadence forward without
+    // running, so re-enabling later doesn't unleash a backlog of missed fires.
+    rollSchedule(sched, now)
+    return
+  }
   let runId: number | null = null
   try {
     const graph = JSON.parse(flow.graph) as FlowGraph
@@ -163,6 +169,10 @@ async function fireScheduled(sched: FlowSchedule): Promise<void> {
 export async function runScheduleNow(sched: FlowSchedule): Promise<RunReport> {
   const flow = getFlow(sched.flow_id)
   if (!flow) throw new Error('Flow not found for this schedule')
+  // Manual runs of the flow itself stay allowed (POST /api/flows/:id/run);
+  // running it *through its schedule* while disabled is almost always a
+  // mistake, so fail loudly instead.
+  if (!flow.enabled) throw new Error(`Flow "${flow.name}" is disabled — enable it to run its schedule`)
   const graph = JSON.parse(flow.graph) as FlowGraph
   const resolver = buildSpecResolver(flow.id, getFlow)
   const invalid = validateGraph(graph, resolver)

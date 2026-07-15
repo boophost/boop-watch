@@ -12,6 +12,7 @@ export interface FlowRow {
   description: string | null
   graph: string // JSON FlowGraph
   component: string | null
+  enabled: number // 0 = automation off (schedules + event triggers skip it)
   created_at: string
   updated_at: string
 }
@@ -22,6 +23,7 @@ export interface FlowSummary {
   description: string | null
   node_count: number
   published: boolean
+  enabled: boolean
   updated_at: string
 }
 
@@ -89,6 +91,12 @@ function db() {
     const cols = instance.prepare(`PRAGMA table_info(flows)`).all() as { name: string }[]
     if (!cols.some((c) => c.name === 'component')) {
       instance.exec(`ALTER TABLE flows ADD COLUMN component TEXT`)
+    }
+    // enabled = 0 turns a flow's automation off: its schedules roll forward
+    // without running and event triggers (trigger.new-item / trigger.release /
+    // …) no longer treat it as a subscriber. Manual runs stay allowed.
+    if (!cols.some((c) => c.name === 'enabled')) {
+      instance.exec(`ALTER TABLE flows ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`)
     }
     // A schedule can target a trigger name (fires every flow with that trigger)
     // instead of a single flow_id; legacy flow_id rows keep working.
@@ -354,6 +362,7 @@ export function listFlows(): FlowSummary[] {
       description: r.description,
       node_count: nodeCount,
       published: !!meta?.published,
+      enabled: !!r.enabled,
       updated_at: r.updated_at,
     }
   })
@@ -361,6 +370,17 @@ export function listFlows(): FlowSummary[] {
 
 export function listFlowGraphs(): { id: number; name: string; graph: string }[] {
   return db().prepare('SELECT id, name, graph FROM flows').all() as {
+    id: number
+    name: string
+    graph: string
+  }[]
+}
+
+// Only flows whose automation is on — what schedules and event triggers fan
+// out over. Structural consumers (component references, the editor) keep using
+// listFlowGraphs: a disabled flow still exists, it just doesn't fire.
+function listActiveFlowGraphs(): { id: number; name: string; graph: string }[] {
+  return db().prepare('SELECT id, name, graph FROM flows WHERE enabled = 1').all() as {
     id: number
     name: string
     graph: string
@@ -385,10 +405,10 @@ function triggerNamesOf(graphJson: string): string[] {
   }
 }
 
-// Flows whose graph contains a trigger.start with the given name — the
+// Enabled flows whose graph contains a trigger.start with the given name — the
 // subscribers a fireTrigger(name) publish fans out to (server/flowRoutes.ts).
 export function flowsWithTrigger(name: string): { id: number; name: string; graph: string }[] {
-  return listFlowGraphs().filter((f) => triggerNamesOf(f.graph).includes(name))
+  return listActiveFlowGraphs().filter((f) => triggerNamesOf(f.graph).includes(name))
 }
 
 // Distinct trigger names across all flows, sorted — for the schedule target
@@ -409,10 +429,12 @@ function graphHasNodeType(graphJson: string, type: string): boolean {
   }
 }
 
-// Flows whose graph contains a node of the given type — the subscribers an event
-// trigger (trigger.new-item / trigger.release) fires (server/flowRoutes.ts).
+// Enabled flows whose graph contains a node of the given type — the subscribers
+// an event trigger (trigger.new-item / trigger.release) fires
+// (server/flowRoutes.ts). Disabled flows also stop their watcher from polling
+// (server/scheduler.ts gates each watcher on this being non-empty).
 export function flowsWithTriggerType(type: string): { id: number; name: string; graph: string }[] {
-  return listFlowGraphs().filter((f) => graphHasNodeType(f.graph, type))
+  return listActiveFlowGraphs().filter((f) => graphHasNodeType(f.graph, type))
 }
 
 // --- Event-trigger watermark state ---------------------------------------
@@ -482,13 +504,19 @@ export function createFlow(name: string, description: string | null): FlowRow {
 
 export function updateFlow(
   id: number,
-  patch: { name?: string; description?: string | null; graph?: FlowGraph; component?: FlowComponentMeta | null },
+  patch: {
+    name?: string
+    description?: string | null
+    graph?: FlowGraph
+    component?: FlowComponentMeta | null
+    enabled?: boolean
+  },
 ): FlowRow | undefined {
   const existing = getFlow(id)
   if (!existing) return undefined
   db()
     .prepare(
-      `UPDATE flows SET name = ?, description = ?, graph = ?, component = ?, updated_at = datetime('now') WHERE id = ?`,
+      `UPDATE flows SET name = ?, description = ?, graph = ?, component = ?, enabled = ?, updated_at = datetime('now') WHERE id = ?`,
     )
     .run(
       patch.name ?? existing.name,
@@ -499,6 +527,7 @@ export function updateFlow(
         : patch.component
           ? JSON.stringify(patch.component)
           : null,
+      patch.enabled === undefined ? existing.enabled : patch.enabled ? 1 : 0,
       id,
     )
   return getFlow(id)

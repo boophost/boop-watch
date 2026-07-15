@@ -24,7 +24,11 @@ async function cli(argv) {
     }
     case 'list': {
       const { flows: list } = await flows.list()
-      out(list.map((f) => `#${f.id}  ${f.name}${f.description ? ' — ' + f.description : ''}`).join('\n') || '(no flows)')
+      out(
+        list
+          .map((f) => `#${f.id}  ${f.enabled === false ? '[OFF]  ' : ''}${f.name}${f.description ? ' — ' + f.description : ''}`)
+          .join('\n') || '(no flows)',
+      )
       return
     }
     case 'get':
@@ -43,6 +47,14 @@ async function cli(argv) {
     case 'delete':
       out(await flows.remove(rest[0]))
       return
+    case 'enable':
+    case 'disable': {
+      // Automation switch: disabled flows are skipped by schedules and ignored
+      // by event triggers; manual `run` still works.
+      const { flow } = await flows.save(rest[0], { enabled: cmd === 'enable' })
+      out(`#${flow.id}  ${flow.name}  automation ${flow.enabled ? 'on' : 'off'}`)
+      return
+    }
     case 'run': {
       const dryRun = !rest.includes('--live')
       const { report } = await flows.run(rest[0], dryRun)
@@ -108,6 +120,7 @@ async function cli(argv) {
       out(
         'commands:\n' +
           '  node-types | list | get <id> | create <name> [desc] | save <id> <graph.json> | run <id> [--live] | delete <id>\n' +
+          '  enable <id> | disable <id>   (automation switch: schedules + event triggers; manual runs unaffected)\n' +
           '  runs [limit]\n' +
           '  schedules | schedule-get <id> | schedule-create <flowId> <kind> <specJson> [--live] [--disabled] | schedule-update <id> <patchJson> | schedule-run <id> | schedule-delete <id>\n' +
           '  whoami',
@@ -157,19 +170,21 @@ async function serve() {
   server.registerTool(
     'save_flow',
     {
-      description: 'Update a flow. Pass graph as {nodes,edges}; name/description optional. The server validates the graph (unknown node types / bad edges / cycles are rejected).',
+      description: 'Update a flow. Pass graph as {nodes,edges}; name/description optional. enabled=false turns automation off (schedules skip it, event triggers ignore it; manual runs still work). The server validates the graph (unknown node types / bad edges / cycles are rejected).',
       inputSchema: {
         id: z.number().int(),
         name: z.string().optional(),
         description: z.string().optional(),
         graph: z.object({ nodes: z.array(z.any()), edges: z.array(z.any()) }).optional(),
+        enabled: z.boolean().optional(),
       },
     },
-    wrap(({ id, name, description, graph }) => {
+    wrap(({ id, name, description, graph, enabled }) => {
       const patch = {}
       if (name !== undefined) patch.name = name
       if (description !== undefined) patch.description = description
       if (graph !== undefined) patch.graph = graph
+      if (enabled !== undefined) patch.enabled = enabled
       return flows.save(id, patch)
     }),
   )

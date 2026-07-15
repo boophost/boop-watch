@@ -765,6 +765,7 @@ function FlowEditorInner() {
   const [components, setComponents] = useState<NodeSpec[]>([])
   const [name, setName] = useState('')
   const [component, setComponent] = useState<FlowComponentMeta | null>(null)
+  const [enabled, setEnabled] = useState(true)
   const [componentPanelOpen, setComponentPanelOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [dirty, setDirty] = useState(false)
@@ -806,6 +807,7 @@ function FlowEditorInner() {
         setComponents(comps)
         setName(flow.flow.name)
         setComponent(flow.flow.component)
+        setEnabled(!!flow.flow.enabled)
         const rf = toRF(flow.flow.graph)
         setNodes(rf.nodes)
         setEdges(rf.edges)
@@ -1360,6 +1362,19 @@ function FlowEditorInner() {
     }
   }
 
+  // Persists immediately, independent of unsaved graph edits — flipping
+  // automation off must not require (or wait for) a graph save.
+  const toggleEnabled = async () => {
+    const next = !enabled
+    setEnabled(next)
+    try {
+      await saveFlow(id, { enabled: next })
+    } catch (e) {
+      setEnabled(!next)
+      setError(e instanceof Error ? e.message : 'Failed to update automation')
+    }
+  }
+
   const run = async (dryRun: boolean, trigger?: RunTrigger, fromNodeId?: string) => {
     if (!dryRun && !window.confirm('Really run this flow live? It will write to the portal database.')) {
       return
@@ -1529,6 +1544,25 @@ function FlowEditorInner() {
               </>
             ) : null}
           </div>
+          {/* Automation on/off — whether schedules + event triggers fire this
+              flow. Independent of Dry/Live, which only shapes manual runs here. */}
+          <button
+            type="button"
+            className={`rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              enabled
+                ? 'border-input text-emerald-400 hover:bg-muted/60'
+                : 'border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+            }`}
+            title={
+              enabled
+                ? 'Automation on: schedules and event triggers fire this flow. Click to turn off.'
+                : 'Automation off: schedules skip this flow and event triggers ignore it. Manual runs still work. Click to turn on.'
+            }
+            onClick={() => void toggleEnabled()}
+          >
+            <span className="hidden sm:inline">Auto </span>
+            {enabled ? 'on' : 'off'}
+          </button>
           {/* Dry vs Live applies to every run — the per-trigger ▶ buttons and the
               whole-flow Run below. */}
           <div
