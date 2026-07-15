@@ -177,18 +177,21 @@ export function arrowPathD(points: EditorArrowPoint[], w: number, h: number): st
 }
 
 /**
- * Outward unit tangent at an endpoint — start heads point against the path,
- * end heads point along it.
+ * Outward unit tangent at an endpoint in *pixel* space.
+ * Pass the box size so non-square arrows get the visual angle (normalized
+ * [0,1] slopes ≠ pixel slopes when width ≠ height).
  */
 export function arrowEndpointTangent(
   points: EditorArrowPoint[],
   which: 'start' | 'end',
+  width = 1,
+  height = 1,
 ): { x: number; y: number; angle: number } {
   if (points.length < 2) return { x: 1, y: 0, angle: 0 }
   const a = which === 'start' ? points[0] : points[points.length - 2]
   const b = which === 'start' ? points[1] : points[points.length - 1]
-  let dx = b.x - a.x
-  let dy = b.y - a.y
+  let dx = (b.x - a.x) * Math.max(1, width)
+  let dy = (b.y - a.y) * Math.max(1, height)
   if (which === 'start') {
     dx = -dx
     dy = -dy
@@ -197,4 +200,11 @@ export function arrowEndpointTangent(
   dx /= len
   dy /= len
   return { x: dx, y: dy, angle: (Math.atan2(dy, dx) * 180) / Math.PI }
+}
+
+/** How far to pull the stroke back from a filled tip so it meets the head cleanly. */
+export function arrowHeadInset(kind: ArrowHead | undefined, strokeWidth: number): number {
+  if (!kind || kind === 'none' || kind === 'open') return 0
+  if (kind === 'dot') return Math.max(2, strokeWidth * 1.2)
+  return Math.max(5, strokeWidth * 2.6)
 }

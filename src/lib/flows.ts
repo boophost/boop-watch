@@ -332,12 +332,20 @@ export interface FlowMapEntry {
 
 export interface FlowMapNote {
   id: string
+  /** Defaults to sticky for pre-arrow map notes. */
+  kind?: 'sticky' | 'arrow'
   x: number
   y: number
   width: number
   height: number
-  text: string
+  text?: string
   color?: string
+  /** Arrow-only styling (ignored for stickies). */
+  strokeWidth?: number
+  dash?: 'solid' | 'dashed' | 'dotted'
+  startHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  endHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  points?: { x: number; y: number }[]
 }
 
 export interface FlowMapLayout {
