@@ -67,6 +67,72 @@ export async function searchAnimeAniList(
   return out
 }
 
+export interface AniListAiring {
+  /** AniList status: RELEASING | FINISHED | NOT_YET_RELEASED | CANCELLED | HIATUS */
+  status: string | null
+  totalEpisodes: number | null
+  /** Every episode with a known air timestamp (past AND future). */
+  episodes: { number: number; airedAt: string }[]
+  nextAiringAt: string | null
+}
+
+/**
+ * Per-episode air timestamps for a MAL id, from AniList's `airingSchedule`.
+ * This is the freshness-critical lookup (which episodes exist *now*), so it
+ * deliberately avoids MAL/Jikan: AniList is auth-free, current, and not
+ * meaningfully rate-limited at our volume. Callers cache the result in
+ * `series_episodes` — never poll this per run.
+ */
+export async function fetchAniListAiring(malId: number): Promise<AniListAiring | null> {
+  const gql = `query($idMal:Int,$page:Int){ Media(idMal:$idMal, type:ANIME){
+    status episodes nextAiringEpisode{ airingAt }
+    airingSchedule(page:$page, perPage:50){ pageInfo{ hasNextPage } nodes{ episode airingAt } } } }`
+  const episodes: { number: number; airedAt: string }[] = []
+  let status: string | null = null
+  let totalEpisodes: number | null = null
+  let nextAiringAt: string | null = null
+  try {
+    // airingSchedule is paginated; 50/page × 6 pages covers any sane series.
+    for (let page = 1; page <= 6; page++) {
+      const res = await limitedFetch('anilist', ANILIST_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query: gql, variables: { idMal: malId, page } }),
+      })
+      if (!res.ok) return null
+      const json = (await res.json()) as {
+        data?: {
+          Media?: {
+            status?: string | null
+            episodes?: number | null
+            nextAiringEpisode?: { airingAt?: number | null } | null
+            airingSchedule?: {
+              pageInfo?: { hasNextPage?: boolean }
+              nodes?: Array<{ episode: number; airingAt: number }>
+            }
+          } | null
+        }
+      }
+      const media = json.data?.Media
+      if (!media) return null
+      status = media.status ?? status
+      totalEpisodes = media.episodes ?? totalEpisodes
+      if (media.nextAiringEpisode?.airingAt) {
+        nextAiringAt = new Date(media.nextAiringEpisode.airingAt * 1000).toISOString()
+      }
+      for (const n of media.airingSchedule?.nodes ?? []) {
+        if (Number.isFinite(n.episode) && Number.isFinite(n.airingAt)) {
+          episodes.push({ number: n.episode, airedAt: new Date(n.airingAt * 1000).toISOString() })
+        }
+      }
+      if (!media.airingSchedule?.pageInfo?.hasNextPage) break
+    }
+    return { status, totalEpisodes, episodes, nextAiringAt }
+  } catch {
+    return null
+  }
+}
+
 /** AniList's wide `bannerImage` and portrait `coverImage`, in one request. */
 export async function fetchAniListArt(
   malId: number,

@@ -68,6 +68,16 @@ const SERIES_EXTRA_COLUMNS: [string, string][] = [
   ['episode_offset', 'INTEGER'],
   ['mapping_source', 'TEXT'],
   ['broadcast', 'TEXT'],
+  // Cached airing-status lookups (enrich.anime-status writes these so flows
+  // read our DB instead of re-polling TsukiHime per run; 'finished' is
+  // terminal and never re-checked).
+  ['air_status', 'TEXT'],
+  ['total_episodes', 'INTEGER'],
+  ['is_movie', 'INTEGER'],
+  ['anidb_id', 'INTEGER'],
+  ['tsuki_id', 'INTEGER'],
+  ['anilist_id', 'INTEGER'],
+  ['status_checked_at', 'TEXT'],
 ]
 
 export interface SeriesMetadata {
@@ -919,6 +929,71 @@ export function importedTorrentHashes(): Set<string> {
   return new Set(rows.map((r) => r.h))
 }
 
+// --- Cached external lookups (status + episode air dates) --------------------
+
+export interface SeriesStatusCache {
+  air_status: string | null
+  total_episodes: number | null
+  is_movie: number | null
+  anidb_id: number | null
+  tsuki_id: number | null
+  anilist_id: number | null
+  status_checked_at: string | null
+}
+
+export function getSeriesStatus(mal_id: number): SeriesStatusCache | undefined {
+  return getDb()
+    .prepare(
+      `SELECT air_status, total_episodes, is_movie, anidb_id, tsuki_id, anilist_id, status_checked_at
+       FROM series WHERE mal_id = ?`,
+    )
+    .get(mal_id) as SeriesStatusCache | undefined
+}
+
+/** Cache a status lookup on the catalog row (no-op for non-catalog mal_ids). */
+export function saveSeriesStatus(
+  mal_id: number,
+  s: Omit<SeriesStatusCache, 'status_checked_at'>,
+): boolean {
+  return (
+    getDb()
+      .prepare(
+        `UPDATE series SET air_status = ?, total_episodes = ?, is_movie = ?,
+           anidb_id = ?, tsuki_id = ?, anilist_id = ?, status_checked_at = datetime('now')
+         WHERE mal_id = ?`,
+      )
+      .run(s.air_status, s.total_episodes, s.is_movie, s.anidb_id, s.tsuki_id, s.anilist_id, mal_id)
+      .changes > 0
+  )
+}
+
+/** Merge air dates into the episode cache without clobbering Jikan-fetched
+ * titles (upsertEpisodes overwrites every column; this one only sets `aired`). */
+export function upsertEpisodeAirDates(
+  mal_id: number,
+  rows: { number: number; aired: string }[],
+): void {
+  if (rows.length === 0) return
+  const stmt = getDb().prepare(`
+    INSERT INTO series_episodes (mal_id, number, aired, updated_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(mal_id, number) DO UPDATE SET aired = excluded.aired, updated_at = excluded.updated_at
+  `)
+  const tx = getDb().transaction((rs: { number: number; aired: string }[]) => {
+    for (const r of rs) if (Number.isFinite(r.number)) stmt.run(mal_id, r.number, r.aired)
+  })
+  tx(rows)
+}
+
+/** How complete/fresh the episode cache is for a series. */
+export function episodesCacheInfo(mal_id: number): { count: number; updated_at: string | null } {
+  return getDb()
+    .prepare(
+      `SELECT COUNT(*) AS count, MAX(updated_at) AS updated_at FROM series_episodes WHERE mal_id = ?`,
+    )
+    .get(mal_id) as { count: number; updated_at: string | null }
+}
+
 // --- Wants (what the sourcing flows are trying to obtain) -------------------
 
 export type WantKind = 'episode' | 'batch'
@@ -1057,6 +1132,41 @@ export function fulfilBatchWant(mal_id: number, torrentHash: string | null): boo
 
 export function getWant(id: number): WantRow | undefined {
   return getDb().prepare('SELECT * FROM wants WHERE id = ?').get(id) as WantRow | undefined
+}
+
+export interface WantWithSeries extends WantRow {
+  title: string | null
+  title_english: string | null
+  tvdb_id: number | null
+  tvdb_season: number | null
+  episode_offset: number | null
+  air_status: string | null
+  is_movie: number | null
+  series_total_episodes: number | null
+}
+
+/** Wants for the chase flow, joined to their catalog rows for the fields the
+ * search pipeline needs (titles, season mapping, cached status). Least-tried
+ * first so a fresh want isn't starved behind a hopeless one. */
+export function listWantsJoined(args: {
+  status: WantStatus
+  kind?: WantKind
+  respectBackoff?: boolean
+}): WantWithSeries[] {
+  const clauses = ['w.status = @status']
+  if (args.kind) clauses.push('w.kind = @kind')
+  if (args.respectBackoff !== false) {
+    clauses.push(`(w.next_attempt_at IS NULL OR w.next_attempt_at <= datetime('now'))`)
+  }
+  return getDb()
+    .prepare(
+      `SELECT w.*, s.title, s.title_english, s.tvdb_id, s.tvdb_season, s.episode_offset,
+              s.air_status, s.is_movie, s.total_episodes AS series_total_episodes
+       FROM wants w LEFT JOIN series s ON s.mal_id = w.mal_id
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY w.attempts ASC, w.id ASC`,
+    )
+    .all({ status: args.status, kind: args.kind }) as WantWithSeries[]
 }
 
 export function listWants(status?: WantStatus): WantRow[] {
