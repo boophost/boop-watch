@@ -411,15 +411,22 @@ export function listFlowsForMap(): {
   })
 }
 
-/** Shared Flow Map layout + sticky notes (singleton row). */
+/** Shared Flow Map layout + sticky notes / arrows (singleton row). */
 export interface FlowMapNote {
   id: string
+  /** Defaults to sticky for pre-arrow map notes. */
+  kind?: 'sticky' | 'arrow'
   x: number
   y: number
   width: number
   height: number
-  text: string
+  text?: string
   color?: string
+  strokeWidth?: number
+  dash?: 'solid' | 'dashed' | 'dotted'
+  startHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  endHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  points?: { x: number; y: number }[]
 }
 
 export interface FlowMapState {
@@ -464,15 +471,57 @@ export function getFlowMapState(): FlowMapState {
 export function saveFlowMapState(state: FlowMapState): FlowMapState {
   const cleaned: FlowMapState = {
     layout: state.layout ?? {},
-    notes: (state.notes ?? []).map((n) => ({
-      id: String(n.id),
-      x: Math.round(n.x),
-      y: Math.round(n.y),
-      width: Math.max(80, Math.round(n.width || 180)),
-      height: Math.max(60, Math.round(n.height || 120)),
-      text: String(n.text ?? ''),
-      ...(n.color ? { color: String(n.color) } : {}),
-    })),
+    notes: (state.notes ?? []).map((n): FlowMapNote => {
+      const kind: 'sticky' | 'arrow' = n.kind === 'arrow' ? 'arrow' : 'sticky'
+      if (kind === 'arrow') {
+        const dash =
+          n.dash === 'dashed' || n.dash === 'dotted' || n.dash === 'solid' ? n.dash : undefined
+        const headOk = (v: unknown): v is NonNullable<FlowMapNote['startHead']> =>
+          v === 'none' ||
+          v === 'arrow' ||
+          v === 'triangle' ||
+          v === 'open' ||
+          v === 'diamond' ||
+          v === 'dot'
+        const points = Array.isArray(n.points)
+          ? n.points
+              .filter(
+                (p): p is { x: number; y: number } =>
+                  !!p && typeof p === 'object' && typeof p.x === 'number' && typeof p.y === 'number',
+              )
+              .map((p) => ({
+                x: Math.min(1, Math.max(0, p.x)),
+                y: Math.min(1, Math.max(0, p.y)),
+              }))
+          : undefined
+        return {
+          id: String(n.id),
+          kind: 'arrow',
+          x: Math.round(n.x),
+          y: Math.round(n.y),
+          width: Math.max(64, Math.round(n.width || 200)),
+          height: Math.max(48, Math.round(n.height || 120)),
+          ...(n.color ? { color: String(n.color) } : {}),
+          ...(typeof n.strokeWidth === 'number'
+            ? { strokeWidth: Math.min(16, Math.max(1, n.strokeWidth)) }
+            : {}),
+          ...(dash ? { dash } : {}),
+          ...(headOk(n.startHead) ? { startHead: n.startHead } : {}),
+          ...(headOk(n.endHead) ? { endHead: n.endHead } : {}),
+          ...(points && points.length >= 2 ? { points } : {}),
+        }
+      }
+      return {
+        id: String(n.id),
+        kind: 'sticky',
+        x: Math.round(n.x),
+        y: Math.round(n.y),
+        width: Math.max(80, Math.round(n.width || 180)),
+        height: Math.max(60, Math.round(n.height || 120)),
+        text: String(n.text ?? ''),
+        ...(n.color ? { color: String(n.color) } : {}),
+      }
+    }),
   }
   db()
     .prepare(

@@ -1,5 +1,5 @@
 // Live Flow Map: every flow as a movable parent group on one canvas.
-// Group positions + sticky notes are saved server-side; Ctrl+Z/Y undoes map edits.
+// Group positions + sticky notes/arrows are saved server-side; Ctrl+Z/Y undoes map edits.
 // Inner flow nodes stay fixed (read-only); live activity paints running nodes.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -28,6 +28,7 @@ import '@xyflow/react/dist/style.css'
 import './flowMap.css'
 import {
   AlertTriangle,
+  ArrowRight,
   Check,
   ExternalLink,
   FlaskConical,
@@ -41,8 +42,16 @@ import {
   Undo2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { isEditorNode } from '@/lib/flowEditorMeta'
+import {
+  DEFAULT_ARROW_POINTS,
+  isEditorNode,
+  normalizeArrowConfig,
+  rotateArrowPoints,
+  type ArrowDash,
+  type ArrowHead,
+} from '@/lib/flowEditorMeta'
 import { ArrowCurveGraphic } from './flowEditorAnnotations'
 import {
   getFlowMap,
@@ -74,6 +83,28 @@ const EST_NODE = { w: 180, h: 96 }
 const EST_REROUTE = { w: 16, h: 16 }
 const EST_STICKY = { w: 160, h: 100 }
 const DEFAULT_NOTE = { w: 200, h: 140, color: '#fef08a' }
+const DEFAULT_MAP_ARROW = {
+  w: 200,
+  h: 120,
+  color: '#a1a1aa',
+  strokeWidth: 2,
+  dash: 'solid' as ArrowDash,
+  startHead: 'none' as ArrowHead,
+  endHead: 'arrow' as ArrowHead,
+  points: DEFAULT_ARROW_POINTS,
+}
+
+type NotePatch = {
+  text?: string
+  width?: number
+  height?: number
+  color?: string
+  strokeWidth?: number
+  dash?: ArrowDash
+  startHead?: ArrowHead
+  endHead?: ArrowHead
+  points?: { x: number; y: number }[]
+}
 
 const CATEGORY_DOT: Record<NodeCategory, string> = {
   trigger: 'bg-lime-400',
@@ -134,12 +165,21 @@ interface MapNodeData extends Record<string, unknown> {
   running?: boolean
   report?: NodeReport
   noteId?: string
+  noteKind?: 'sticky' | 'arrow'
   text?: string
   color?: string
-  onNoteChange?: (patch: { text?: string; width?: number; height?: number }) => void
+  strokeWidth?: number
+  dash?: ArrowDash
+  startHead?: ArrowHead
+  endHead?: ArrowHead
+  points?: { x: number; y: number }[]
+  onNoteChange?: (patch: NotePatch) => void
 }
 
-type MapRFNode = Node<MapNodeData, 'mapGroup' | 'mapFlow' | 'mapReroute' | 'mapNote' | 'mapSticky'>
+type MapRFNode = Node<
+  MapNodeData,
+  'mapGroup' | 'mapFlow' | 'mapReroute' | 'mapNote' | 'mapSticky' | 'mapArrow'
+>
 type MapRFEdge = Edge<{ pulse?: number; pulseAt?: number }>
 type SavedLayout = FlowMapLayout
 
@@ -371,29 +411,69 @@ function buildMapGraph(
   return { nodes, edges }
 }
 
-function stickyNodesFromNotes(
+function annotationNodesFromNotes(
   notes: FlowMapNote[],
-  onNoteChange: (noteId: string, patch: { text?: string; width?: number; height?: number }) => void,
+  onNoteChange: (noteId: string, patch: NotePatch) => void,
 ): MapRFNode[] {
-  return notes.map((n) => ({
-    id: `note:${n.id}`,
-    type: 'mapSticky' as const,
-    position: { x: n.x, y: n.y },
-    style: { width: n.width, height: n.height },
-    draggable: true,
-    selectable: true,
-    connectable: false,
-    zIndex: 5,
-    data: {
-      flowId: 0,
-      flowName: '',
-      published: false,
-      noteId: n.id,
-      text: n.text,
-      color: n.color ?? DEFAULT_NOTE.color,
-      onNoteChange: (patch) => onNoteChange(n.id, patch),
-    },
-  }))
+  return notes.map((n) => {
+    const kind = n.kind === 'arrow' ? 'arrow' : 'sticky'
+    if (kind === 'arrow') {
+      const cfg = normalizeArrowConfig({
+        color: n.color,
+        strokeWidth: n.strokeWidth,
+        dash: n.dash,
+        startHead: n.startHead,
+        endHead: n.endHead,
+        points: n.points,
+        width: n.width,
+        height: n.height,
+      })
+      return {
+        id: `note:${n.id}`,
+        type: 'mapArrow' as const,
+        position: { x: n.x, y: n.y },
+        style: { width: n.width || DEFAULT_MAP_ARROW.w, height: n.height || DEFAULT_MAP_ARROW.h },
+        draggable: true,
+        selectable: true,
+        connectable: false,
+        zIndex: 5,
+        data: {
+          flowId: 0,
+          flowName: '',
+          published: false,
+          noteId: n.id,
+          noteKind: 'arrow' as const,
+          color: cfg.color,
+          strokeWidth: cfg.strokeWidth,
+          dash: cfg.dash,
+          startHead: cfg.startHead,
+          endHead: cfg.endHead,
+          points: cfg.points,
+          onNoteChange: (patch: NotePatch) => onNoteChange(n.id, patch),
+        },
+      }
+    }
+    return {
+      id: `note:${n.id}`,
+      type: 'mapSticky' as const,
+      position: { x: n.x, y: n.y },
+      style: { width: n.width, height: n.height },
+      draggable: true,
+      selectable: true,
+      connectable: false,
+      zIndex: 5,
+      data: {
+        flowId: 0,
+        flowName: '',
+        published: false,
+        noteId: n.id,
+        noteKind: 'sticky' as const,
+        text: n.text ?? '',
+        color: n.color ?? DEFAULT_NOTE.color,
+        onNoteChange: (patch: NotePatch) => onNoteChange(n.id, patch),
+      },
+    }
+  })
 }
 
 function layoutFromNodes(nodes: MapRFNode[]): SavedLayout {
@@ -408,22 +488,61 @@ function layoutFromNodes(nodes: MapRFNode[]): SavedLayout {
   return layout
 }
 
+function isMapAnnotation(n: MapRFNode): boolean {
+  return n.type === 'mapSticky' || n.type === 'mapArrow'
+}
+
 function notesFromNodes(nodes: MapRFNode[]): FlowMapNote[] {
-  return nodes
-    .filter((n) => n.type === 'mapSticky' && n.data.noteId)
-    .map((n) => {
-      const w = typeof n.style?.width === 'number' ? n.style.width : DEFAULT_NOTE.w
-      const h = typeof n.style?.height === 'number' ? n.style.height : DEFAULT_NOTE.h
+  return nodes.filter(isMapAnnotation).map((n) => {
+    const w =
+      typeof n.style?.width === 'number'
+        ? n.style.width
+        : n.type === 'mapArrow'
+          ? DEFAULT_MAP_ARROW.w
+          : DEFAULT_NOTE.w
+    const h =
+      typeof n.style?.height === 'number'
+        ? n.style.height
+        : n.type === 'mapArrow'
+          ? DEFAULT_MAP_ARROW.h
+          : DEFAULT_NOTE.h
+    if (n.type === 'mapArrow') {
+      const cfg = normalizeArrowConfig({
+        color: n.data.color,
+        strokeWidth: n.data.strokeWidth,
+        dash: n.data.dash,
+        startHead: n.data.startHead,
+        endHead: n.data.endHead,
+        points: n.data.points,
+        width: w,
+        height: h,
+      })
       return {
         id: n.data.noteId!,
+        kind: 'arrow' as const,
         x: Math.round(n.position.x),
         y: Math.round(n.position.y),
         width: Math.round(w),
         height: Math.round(h),
-        text: String(n.data.text ?? ''),
-        ...(n.data.color ? { color: String(n.data.color) } : {}),
+        color: cfg.color,
+        strokeWidth: cfg.strokeWidth,
+        dash: cfg.dash,
+        startHead: cfg.startHead,
+        endHead: cfg.endHead,
+        points: cfg.points,
       }
-    })
+    }
+    return {
+      id: n.data.noteId!,
+      kind: 'sticky' as const,
+      x: Math.round(n.position.x),
+      y: Math.round(n.position.y),
+      width: Math.round(w),
+      height: Math.round(h),
+      text: String(n.data.text ?? ''),
+      ...(n.data.color ? { color: String(n.data.color) } : {}),
+    }
+  })
 }
 
 /** Title grows as you zoom out so group names stay readable; never shrinks below 1×. */
@@ -683,6 +802,38 @@ const MapStickyNode = memo(function MapStickyNode({ data, selected }: NodeProps<
   )
 })
 
+/** Map-level curve arrow (editable handles when selected). */
+const MapArrowNode = memo(function MapArrowNode({ data, selected, width, height }: NodeProps<MapRFNode>) {
+  const w = width ?? DEFAULT_MAP_ARROW.w
+  const h = height ?? DEFAULT_MAP_ARROW.h
+  const config = {
+    color: data.color,
+    strokeWidth: data.strokeWidth,
+    dash: data.dash,
+    startHead: data.startHead,
+    endHead: data.endHead,
+    points: data.points,
+  }
+
+  return (
+    <div className={cn('relative h-full w-full', selected ? 'rounded ring-2 ring-ring/40' : null)}>
+      <NodeResizer
+        minWidth={64}
+        minHeight={48}
+        isVisible={Boolean(selected)}
+        onResizeEnd={(_, p) => data.onNoteChange?.({ width: Math.round(p.width), height: Math.round(p.height) })}
+      />
+      <ArrowCurveGraphic
+        config={config}
+        width={w}
+        height={h}
+        interactive={Boolean(selected)}
+        onPointsChange={(points) => data.onNoteChange?.({ points })}
+      />
+    </div>
+  )
+})
+
 function MapThroughputEdge({
   id,
   sourceX,
@@ -743,10 +894,32 @@ const nodeTypes = {
   mapReroute: MapRerouteNode,
   mapNote: MapNoteNode,
   mapSticky: MapStickyNode,
+  mapArrow: MapArrowNode,
 }
 
 const edgeTypes = {
   throughput: MapThroughputEdge,
+}
+
+function applyNotePatch(node: MapRFNode, patch: NotePatch): MapRFNode {
+  return {
+    ...node,
+    style: {
+      ...node.style,
+      ...(patch.width != null ? { width: patch.width } : null),
+      ...(patch.height != null ? { height: patch.height } : null),
+    },
+    data: {
+      ...node.data,
+      ...(patch.text != null ? { text: patch.text } : null),
+      ...(patch.color != null ? { color: patch.color } : null),
+      ...(patch.strokeWidth != null ? { strokeWidth: patch.strokeWidth } : null),
+      ...(patch.dash != null ? { dash: patch.dash } : null),
+      ...(patch.startHead != null ? { startHead: patch.startHead } : null),
+      ...(patch.endHead != null ? { endHead: patch.endHead } : null),
+      ...(patch.points != null ? { points: patch.points } : null),
+    },
+  }
 }
 
 // ---- page ------------------------------------------------------------------
@@ -804,31 +977,17 @@ function FlowMapInner() {
 
   const restoreSnapshot = useCallback(
     (snap: { nodes: MapRFNode[]; edges: MapRFEdge[] }) => {
-      // Re-bind sticky callbacks after JSON round-trip from history.
+      // Re-bind annotation callbacks after JSON round-trip from history.
       const restored = snap.nodes.map((n) => {
-        if (n.type !== 'mapSticky' || !n.data.noteId) return n
+        if (!isMapAnnotation(n) || !n.data.noteId) return n
         const noteId = n.data.noteId
         return {
           ...n,
           data: {
             ...n.data,
-            onNoteChange: (patch: { text?: string; width?: number; height?: number }) => {
+            onNoteChange: (patch: NotePatch) => {
               setNodes((ns) =>
-                ns.map((x) => {
-                  if (x.data.noteId !== noteId) return x
-                  return {
-                    ...x,
-                    style: {
-                      ...x.style,
-                      ...(patch.width != null ? { width: patch.width } : null),
-                      ...(patch.height != null ? { height: patch.height } : null),
-                    },
-                    data: {
-                      ...x.data,
-                      ...(patch.text != null ? { text: patch.text } : null),
-                    },
-                  }
-                }),
+                ns.map((x) => (x.data.noteId !== noteId ? x : applyNotePatch(x, patch))),
               )
             },
           },
@@ -850,23 +1009,9 @@ function FlowMapInner() {
   }, [redoHistory, restoreSnapshot])
 
   const onNoteChange = useCallback(
-    (noteId: string, patch: { text?: string; width?: number; height?: number }) => {
+    (noteId: string, patch: NotePatch) => {
       setNodes((ns) => {
-        const next = ns.map((x) => {
-          if (x.data.noteId !== noteId) return x
-          return {
-            ...x,
-            style: {
-              ...x.style,
-              ...(patch.width != null ? { width: patch.width } : null),
-              ...(patch.height != null ? { height: patch.height } : null),
-            },
-            data: {
-              ...x.data,
-              ...(patch.text != null ? { text: patch.text } : null),
-            },
-          }
-        })
+        const next = ns.map((x) => (x.data.noteId !== noteId ? x : applyNotePatch(x, patch)))
         persistSoon(next)
         return next
       })
@@ -877,7 +1022,7 @@ function FlowMapInner() {
   const attachStickies = useCallback(
     (base: MapRFNode[], notes: FlowMapNote[]) => [
       ...base,
-      ...stickyNodesFromNotes(notes, onNoteChange),
+      ...annotationNodesFromNotes(notes, onNoteChange),
     ],
     [onNoteChange],
   )
@@ -951,14 +1096,14 @@ function FlowMapInner() {
 
   const onNodeDragStart = useCallback(
     (_: unknown, node: Node) => {
-      if (node.type === 'mapGroup' || node.type === 'mapSticky') snapshot()
+      if (node.type === 'mapGroup' || node.type === 'mapSticky' || node.type === 'mapArrow') snapshot()
     },
     [snapshot],
   )
 
   const onNodeDragStop = useCallback(
     (_: unknown, node: Node) => {
-      if (node.type !== 'mapGroup' && node.type !== 'mapSticky') return
+      if (node.type !== 'mapGroup' && node.type !== 'mapSticky' && node.type !== 'mapArrow') return
       persistSoon(nodesRef.current)
     },
     [persistSoon],
@@ -973,6 +1118,7 @@ function FlowMapInner() {
     })
     const note: FlowMapNote = {
       id,
+      kind: 'sticky',
       x: Math.round(pos.x - DEFAULT_NOTE.w / 2),
       y: Math.round(pos.y - DEFAULT_NOTE.h / 2),
       width: DEFAULT_NOTE.w,
@@ -981,18 +1127,46 @@ function FlowMapInner() {
       color: DEFAULT_NOTE.color,
     }
     setNodes((ns) => {
-      const next = [...ns, ...stickyNodesFromNotes([note], onNoteChange)]
+      const next = [...ns, ...annotationNodesFromNotes([note], onNoteChange)]
       persistSoon(next)
       return next
     })
   }, [snapshot, screenToFlowPosition, setNodes, onNoteChange, persistSoon])
 
-  const deleteSelectedStickies = useCallback(() => {
-    const selected = nodesRef.current.filter((n) => n.selected && n.type === 'mapSticky')
+  const addArrow = useCallback(() => {
+    snapshot()
+    const id = `a${Date.now().toString(36)}${noteSeq.current++}`
+    const pos = screenToFlowPosition({
+      x: window.innerWidth / 2,
+      y: window.innerHeight / 2,
+    })
+    const note: FlowMapNote = {
+      id,
+      kind: 'arrow',
+      x: Math.round(pos.x - DEFAULT_MAP_ARROW.w / 2),
+      y: Math.round(pos.y - DEFAULT_MAP_ARROW.h / 2),
+      width: DEFAULT_MAP_ARROW.w,
+      height: DEFAULT_MAP_ARROW.h,
+      color: DEFAULT_MAP_ARROW.color,
+      strokeWidth: DEFAULT_MAP_ARROW.strokeWidth,
+      dash: DEFAULT_MAP_ARROW.dash,
+      startHead: DEFAULT_MAP_ARROW.startHead,
+      endHead: DEFAULT_MAP_ARROW.endHead,
+      points: DEFAULT_MAP_ARROW.points.map((p) => ({ ...p })),
+    }
+    setNodes((ns) => {
+      const next = [...ns, ...annotationNodesFromNotes([note], onNoteChange)]
+      persistSoon(next)
+      return next
+    })
+  }, [snapshot, screenToFlowPosition, setNodes, onNoteChange, persistSoon])
+
+  const deleteSelectedAnnotations = useCallback(() => {
+    const selected = nodesRef.current.filter((n) => n.selected && isMapAnnotation(n))
     if (selected.length === 0) return
     snapshot()
     setNodes((ns) => {
-      const next = ns.filter((n) => !(n.selected && n.type === 'mapSticky'))
+      const next = ns.filter((n) => !(n.selected && isMapAnnotation(n)))
       persistSoon(next)
       return next
     })
@@ -1003,6 +1177,7 @@ function FlowMapInner() {
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement ||
         (e.target instanceof HTMLElement && e.target.isContentEditable)
       ) {
         return
@@ -1016,16 +1191,16 @@ function FlowMapInner() {
         e.preventDefault()
         redo()
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Only delete map stickies — flow groups/nodes stay.
-        if (nodesRef.current.some((n) => n.selected && n.type === 'mapSticky')) {
+        // Only delete map annotations — flow groups/nodes stay.
+        if (nodesRef.current.some((n) => n.selected && isMapAnnotation(n))) {
           e.preventDefault()
-          deleteSelectedStickies()
+          deleteSelectedAnnotations()
         }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [undo, redo, deleteSelectedStickies])
+  }, [undo, redo, deleteSelectedAnnotations])
 
   // Queue poll for side panel.
   useEffect(() => {
@@ -1193,7 +1368,7 @@ function FlowMapInner() {
             },
           }
         }
-        if (n.type === 'mapSticky') {
+        if (n.type === 'mapSticky' || n.type === 'mapArrow') {
           return { ...n, draggable: true }
         }
         const overlay = nodeLive[n.id]
@@ -1215,6 +1390,29 @@ function FlowMapInner() {
   const queueEntries = Object.entries(queues)
     .filter(([, q]) => q.total > 0 || q.inFlight > 0 || q.queued > 0)
     .sort((a, b) => b[1].recent - a[1].recent || b[1].total - a[1].total)
+
+  const selectedArrow = useMemo(
+    () => nodes.find((n) => n.selected && n.type === 'mapArrow') ?? null,
+    [nodes],
+  )
+  const selectedArrowCfg = selectedArrow
+    ? normalizeArrowConfig({
+        color: selectedArrow.data.color,
+        strokeWidth: selectedArrow.data.strokeWidth,
+        dash: selectedArrow.data.dash,
+        startHead: selectedArrow.data.startHead,
+        endHead: selectedArrow.data.endHead,
+        points: selectedArrow.data.points,
+      })
+    : null
+
+  const patchSelectedArrow = useCallback(
+    (patch: NotePatch) => {
+      if (!selectedArrow?.data.noteId) return
+      onNoteChange(selectedArrow.data.noteId, patch)
+    },
+    [selectedArrow, onNoteChange],
+  )
 
   return (
     <div className="flex h-screen flex-col">
@@ -1244,6 +1442,10 @@ function FlowMapInner() {
         <Button size="sm" variant="outline" className="gap-1" onClick={() => addNote()}>
           <StickyNote className="size-4" />
           <span className="hidden sm:inline">Note</span>
+        </Button>
+        <Button size="sm" variant="outline" className="gap-1" onClick={() => addArrow()}>
+          <ArrowRight className="size-4" />
+          <span className="hidden sm:inline">Arrow</span>
         </Button>
         <label className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:inline-flex">
           <input
@@ -1280,6 +1482,103 @@ function FlowMapInner() {
           <Link to="/manage/flows">Flows</Link>
         </Button>
       </header>
+      {selectedArrow && selectedArrowCfg ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-4 py-2 text-xs">
+          <span className="font-medium text-muted-foreground">Arrow</span>
+          <input
+            type="color"
+            className="h-7 w-8 cursor-pointer rounded border border-input bg-transparent p-0.5"
+            value={
+              /^#[0-9a-f]{6}$/i.test(String(selectedArrowCfg.color ?? ''))
+                ? String(selectedArrowCfg.color)
+                : '#a1a1aa'
+            }
+            onChange={(e) => patchSelectedArrow({ color: e.target.value })}
+            title="Color"
+          />
+          <label className="flex items-center gap-1 text-muted-foreground">
+            Thickness
+            <Input
+              className="h-7 w-14"
+              type="number"
+              min={1}
+              max={16}
+              value={selectedArrowCfg.strokeWidth ?? 2}
+              onChange={(e) =>
+                patchSelectedArrow({
+                  strokeWidth: Math.min(16, Math.max(1, Number(e.target.value) || 2)),
+                })
+              }
+            />
+          </label>
+          <select
+            className="h-7 rounded-md border border-input bg-transparent px-1.5"
+            value={selectedArrowCfg.dash ?? 'solid'}
+            onChange={(e) => patchSelectedArrow({ dash: e.target.value as ArrowDash })}
+          >
+            <option value="solid">Solid</option>
+            <option value="dashed">Dashed</option>
+            <option value="dotted">Dotted</option>
+          </select>
+          <label className="flex items-center gap-1 text-muted-foreground">
+            Start
+            <select
+              className="h-7 rounded-md border border-input bg-transparent px-1.5"
+              value={selectedArrowCfg.startHead ?? 'none'}
+              onChange={(e) => patchSelectedArrow({ startHead: e.target.value as ArrowHead })}
+            >
+              <option value="none">None</option>
+              <option value="arrow">Arrow</option>
+              <option value="triangle">Triangle</option>
+              <option value="open">Open</option>
+              <option value="diamond">Diamond</option>
+              <option value="dot">Dot</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-1 text-muted-foreground">
+            End
+            <select
+              className="h-7 rounded-md border border-input bg-transparent px-1.5"
+              value={selectedArrowCfg.endHead ?? 'arrow'}
+              onChange={(e) => patchSelectedArrow({ endHead: e.target.value as ArrowHead })}
+            >
+              <option value="none">None</option>
+              <option value="arrow">Arrow</option>
+              <option value="triangle">Triangle</option>
+              <option value="open">Open</option>
+              <option value="diamond">Diamond</option>
+              <option value="dot">Dot</option>
+            </select>
+          </label>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 px-2"
+            onClick={() =>
+              patchSelectedArrow({
+                points: rotateArrowPoints(selectedArrowCfg.points ?? DEFAULT_ARROW_POINTS, -15),
+              })
+            }
+          >
+            −15°
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 px-2"
+            onClick={() =>
+              patchSelectedArrow({
+                points: rotateArrowPoints(selectedArrowCfg.points ?? DEFAULT_ARROW_POINTS, 15),
+              })
+            }
+          >
+            +15°
+          </Button>
+          <span className="text-[10px] text-muted-foreground">Drag handles to reshape</span>
+        </div>
+      ) : null}
 
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">
@@ -1424,12 +1723,12 @@ function FlowMapInner() {
           </div>
 
           <p className="mt-auto text-[10px] leading-relaxed text-muted-foreground">
-            Drag flow groups and notes — layout is saved for everyone. Notes: Add → double-click to
-            edit → Delete/Backspace to remove. Ctrl+Z / Ctrl+Y undo map edits. Group titles stay
-            readable when zoomed out.
+            Drag flow groups, notes, and arrows — layout is saved for everyone. Notes: Add →
+            double-click to edit. Arrows: Add → select to drag curve handles / style them. Delete /
+            Backspace removes selected annotations. Ctrl+Z / Ctrl+Y undoes map edits.
           </p>
           <p className="flex items-center gap-1 text-[10px] text-muted-foreground">
-            <Trash2 className="size-3" /> selected notes only (groups stay)
+            <Trash2 className="size-3" /> selected notes/arrows only (groups stay)
           </p>
         </aside>
       </div>

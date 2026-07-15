@@ -4,6 +4,7 @@ import { Lock, Unlock } from 'lucide-react'
 import {
   arrowDashArray,
   arrowEndpointTangent,
+  arrowHeadInset,
   arrowPathD,
   normalizeArrowConfig,
   type ArrowHead,
@@ -211,11 +212,36 @@ export function ArrowCurveGraphic({
   const dash = arrowDashArray(cfg.dash, strokeWidth)
   const w = Math.max(1, width)
   const h = Math.max(1, height)
-  const d = arrowPathD(points, w, h)
-  const startT = arrowEndpointTangent(points, 'start')
-  const endT = arrowEndpointTangent(points, 'end')
+  const startT = arrowEndpointTangent(points, 'start', w, h)
+  const endT = arrowEndpointTangent(points, 'end', w, h)
   const start = points[0]
   const end = points[points.length - 1]
+
+  // Pull the stroke back into the head so the tip isn't fighting a round cap.
+  const strokePoints =
+    points.length >= 2
+      ? points.map((p, i) => {
+          if (i === 0) {
+            const inset = arrowHeadInset(cfg.startHead, strokeWidth)
+            if (inset <= 0) return p
+            return {
+              x: p.x - (startT.x * inset) / w,
+              y: p.y - (startT.y * inset) / h,
+            }
+          }
+          if (i === points.length - 1) {
+            const inset = arrowHeadInset(cfg.endHead, strokeWidth)
+            if (inset <= 0) return p
+            return {
+              x: p.x - (endT.x * inset) / w,
+              y: p.y - (endT.y * inset) / h,
+            }
+          }
+          return p
+        })
+      : points
+  const d = arrowPathD(strokePoints, w, h)
+  const hitD = arrowPathD(points, w, h)
 
   const dragIndex = useRef<number | null>(null)
   const boxRef = useRef<SVGSVGElement>(null)
@@ -263,7 +289,7 @@ export function ArrowCurveGraphic({
     <svg ref={boxRef} className="size-full overflow-visible" width={w} height={h}>
       {/* Wider invisible hit/stroke target */}
       <path
-        d={d}
+        d={hitD}
         fill="none"
         stroke="transparent"
         strokeWidth={Math.max(16, strokeWidth + 12)}
@@ -276,7 +302,7 @@ export function ArrowCurveGraphic({
         stroke={color}
         strokeWidth={strokeWidth}
         strokeDasharray={dash}
-        strokeLinecap="round"
+        strokeLinecap="butt"
         strokeLinejoin="round"
       />
       {start ? (
