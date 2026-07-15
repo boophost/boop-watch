@@ -20,6 +20,7 @@ function sanitizeNode<N extends Node>(n: N): N {
   delete data.onEditorChange
   delete data.onRunTrigger
   delete data.runDisabled
+  delete data.onNoteChange
   return { ...n, selected: false, data } as N
 }
 

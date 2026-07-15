@@ -87,6 +87,13 @@ function db() {
         kind TEXT PRIMARY KEY,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      -- Singleton Flow Map layout: group positions + freeform sticky notes.
+      -- Shared across admins (unlike localStorage). id is always 1.
+      CREATE TABLE IF NOT EXISTS flow_map (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        state TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `)
     const cols = instance.prepare(`PRAGMA table_info(flows)`).all() as { name: string }[]
     if (!cols.some((c) => c.name === 'component')) {
@@ -402,6 +409,78 @@ export function listFlowsForMap(): {
       graph,
     }
   })
+}
+
+/** Shared Flow Map layout + sticky notes (singleton row). */
+export interface FlowMapNote {
+  id: string
+  x: number
+  y: number
+  width: number
+  height: number
+  text: string
+  color?: string
+}
+
+export interface FlowMapState {
+  /** flowId string → absolute group position on the map canvas. */
+  layout: Record<string, { x: number; y: number }>
+  notes: FlowMapNote[]
+}
+
+const EMPTY_MAP_STATE: FlowMapState = { layout: {}, notes: [] }
+
+function parseMapState(raw: string | undefined | null): FlowMapState {
+  if (!raw) return { ...EMPTY_MAP_STATE, layout: {}, notes: [] }
+  try {
+    const parsed = JSON.parse(raw) as Partial<FlowMapState>
+    const layout =
+      parsed.layout && typeof parsed.layout === 'object' && !Array.isArray(parsed.layout)
+        ? (parsed.layout as FlowMapState['layout'])
+        : {}
+    const notes = Array.isArray(parsed.notes)
+      ? parsed.notes.filter(
+          (n): n is FlowMapNote =>
+            !!n &&
+            typeof n === 'object' &&
+            typeof (n as FlowMapNote).id === 'string' &&
+            typeof (n as FlowMapNote).x === 'number' &&
+            typeof (n as FlowMapNote).y === 'number',
+        )
+      : []
+    return { layout, notes }
+  } catch {
+    return { ...EMPTY_MAP_STATE, layout: {}, notes: [] }
+  }
+}
+
+export function getFlowMapState(): FlowMapState {
+  const row = db().prepare('SELECT state FROM flow_map WHERE id = 1').get() as
+    | { state: string }
+    | undefined
+  return parseMapState(row?.state)
+}
+
+export function saveFlowMapState(state: FlowMapState): FlowMapState {
+  const cleaned: FlowMapState = {
+    layout: state.layout ?? {},
+    notes: (state.notes ?? []).map((n) => ({
+      id: String(n.id),
+      x: Math.round(n.x),
+      y: Math.round(n.y),
+      width: Math.max(80, Math.round(n.width || 180)),
+      height: Math.max(60, Math.round(n.height || 120)),
+      text: String(n.text ?? ''),
+      ...(n.color ? { color: String(n.color) } : {}),
+    })),
+  }
+  db()
+    .prepare(
+      `INSERT INTO flow_map (id, state, updated_at) VALUES (1, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at`,
+    )
+    .run(JSON.stringify(cleaned))
+  return cleaned
 }
 
 // Only flows whose automation is on — what schedules and event triggers fan
