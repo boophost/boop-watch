@@ -985,6 +985,36 @@ export function upsertEpisodeAirDates(
   tx(rows)
 }
 
+/** Merge episode titles (and air dates for rows that lack one) into the cache
+ * without clobbering an air date AniList already set. Titles come from a merge
+ * of several sources (see server/episodes.ts); the caller controls which episode
+ * numbers to write — for an airing show only numbers already in the cache
+ * (AniList owns existence), for a finished show any number a source knows. */
+export function upsertEpisodeTitles(
+  mal_id: number,
+  rows: { number: number; title: string | null; title_japanese?: string | null; aired?: string | null }[],
+): void {
+  if (rows.length === 0) return
+  const stmt = getDb().prepare(`
+    INSERT INTO series_episodes (mal_id, number, title, title_japanese, aired, updated_at)
+    VALUES (@mal_id, @number, @title, @title_japanese, @aired, datetime('now'))
+    ON CONFLICT(mal_id, number) DO UPDATE SET
+      title = COALESCE(excluded.title, series_episodes.title),
+      title_japanese = COALESCE(excluded.title_japanese, series_episodes.title_japanese),
+      aired = COALESCE(series_episodes.aired, excluded.aired),
+      updated_at = datetime('now')
+  `)
+  const tx = getDb().transaction(
+    (rs: { number: number; title: string | null; title_japanese?: string | null; aired?: string | null }[]) => {
+      for (const r of rs) {
+        if (!Number.isFinite(r.number)) continue
+        stmt.run({ mal_id, number: r.number, title: r.title ?? null, title_japanese: r.title_japanese ?? null, aired: r.aired ?? null })
+      }
+    },
+  )
+  tx(rows)
+}
+
 /** How complete/fresh the episode cache is for a series. */
 export function episodesCacheInfo(mal_id: number): { count: number; updated_at: string | null } {
   return getDb()
