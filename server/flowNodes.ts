@@ -3983,16 +3983,22 @@ const metadataEnrich: NodeImpl = {
     const items = allInputs(inputs)
     const enriched: FlowItem[] = []
     const skipped: FlowItem[] = []
+    // A library-import run feeds this node one item per FILE, so the same
+    // mal_id arrives dozens of times — memoise per run (observed: ~100
+    // identical Jikan /full fetches for one show in one run).
+    const memo = new Map<number, Awaited<ReturnType<typeof fetchAnimeFull>>>()
+    const seasonNoted = new Set<number>()
     let looked = 0
     for (const item of items) {
       const mal = Number(item[malField])
-      if (!Number.isFinite(mal) || mal <= 0 || (maxItems > 0 && looked >= maxItems)) {
+      if (!Number.isFinite(mal) || mal <= 0 || (!memo.has(mal) && maxItems > 0 && looked >= maxItems)) {
         skipped.push(item)
         continue
       }
-      looked++
+      if (!memo.has(mal)) looked++
       try {
-        const a = await fetchAnimeFull(mal)
+        const a = memo.get(mal) ?? (await fetchAnimeFull(mal))
+        memo.set(mal, a)
         const studios = JSON.stringify((a.studios ?? []).map((s) => s.name))
         const genres = JSON.stringify((a.genres ?? []).map((g) => g.name))
         const meta = {
@@ -4034,7 +4040,8 @@ const metadataEnrich: NodeImpl = {
         } catch (e) {
           ctx.notes.push(`season-map lookup failed for mal ${mal}: ${e instanceof Error ? e.message : String(e)}`)
         }
-        if (season) {
+        if (season && !seasonNoted.has(mal)) {
+          seasonNoted.add(mal)
           ctx.notes.push(
             `mal ${mal} → tvdb ${season.tvdbId ?? '?'} S${season.tvdbSeason ?? '?'} +${season.episodeOffset}` +
               (season.reason ? ` (${season.reason})` : ''),
