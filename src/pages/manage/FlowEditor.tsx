@@ -101,6 +101,8 @@ interface FlowNodeData extends Record<string, unknown> {
   runDisabled?: boolean
   /** Soft-dim nodes not yet touched during a live/dry run. */
   dimmed?: boolean
+  /** Epoch ms — remount flash burst overlay while Date.now() < this. */
+  flashUntil?: number
 }
 
 type RFNode = Node<FlowNodeData, 'flow' | 'reroute' | 'sticky' | 'arrow' | 'group'>
@@ -472,9 +474,11 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
     .slice(0, 3)
 
   const running = data.running === true
+  const flashUntil = data.flashUntil
+  const flashing = typeof flashUntil === 'number' && flashUntil > Date.now()
   return (
     <div
-      className={`min-w-44 max-w-56 rounded-md border bg-card text-card-foreground shadow-sm ${
+      className={`relative min-w-44 max-w-56 rounded-md border bg-card text-card-foreground shadow-sm ${
         selected
           ? 'border-ring ring-2 ring-ring/40'
           : running
@@ -484,8 +488,14 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
               : report?.status === 'ok'
                 ? 'border-emerald-500/50'
                 : 'border-border'
-      } ${data.dimmed ? 'opacity-40' : ''}`}
+      } ${data.dimmed && !flashing ? 'opacity-40' : ''}`}
     >
+      {flashing ? (
+        <span
+          key={flashUntil}
+          className="flow-node-flash-burst pointer-events-none absolute inset-0 z-10 rounded-md"
+        />
+      ) : null}
       <div
         className="relative flex items-center gap-2 border-b border-border px-3 py-2"
         title={spec.description || undefined}
@@ -680,6 +690,8 @@ function canvasNodeId(streamId: string): string {
   const slash = streamId.indexOf('/')
   return slash >= 0 ? streamId.slice(0, slash) : streamId
 }
+
+const EDITOR_NODE_FLASH_MS = 550
 
 function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
   const lockedGroups = new Map(
@@ -1596,7 +1608,10 @@ function FlowEditorInner() {
     // Clear last run's per-node results so live progress paints from scratch.
     setReport(null)
     setNodes((ns) =>
-      ns.map((n) => ({ ...n, data: { ...n.data, report: undefined, running: false } })),
+      ns.map((n) => ({
+        ...n,
+        data: { ...n.data, report: undefined, running: false, flashUntil: undefined },
+      })),
     )
     setEdges((eds) =>
       eds.map((e) => ({
@@ -1605,6 +1620,22 @@ function FlowEditorInner() {
         data: { ...e.data, pulse: undefined, pulseAt: undefined },
       })),
     )
+    const flashNode = (nodeId: string) => {
+      const until = Date.now() + EDITOR_NODE_FLASH_MS
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId ? { ...n, data: { ...n.data, flashUntil: until } } : n,
+        ),
+      )
+      setTimeout(() => {
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id !== nodeId || n.data.flashUntil !== until) return n
+            return { ...n, data: { ...n.data, flashUntil: undefined } }
+          }),
+        )
+      }, EDITOR_NODE_FLASH_MS + 40)
+    }
     try {
       if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
       setDirty(false)
@@ -1620,6 +1651,7 @@ function FlowEditorInner() {
                 n.id === idOnCanvas ? { ...n, data: { ...n.data, running: true } } : n,
               ),
             )
+            flashNode(idOnCanvas)
           } else if (ev.type === 'node') {
             const idOnCanvas = canvasNodeId(ev.id)
             if (!paint(idOnCanvas)) return
@@ -1636,6 +1668,7 @@ function FlowEditorInner() {
                 }
               }),
             )
+            flashNode(idOnCanvas)
             if (!nested && ev.report.counts) {
               const nowMs = Date.now()
               setEdges((eds) =>

@@ -17,6 +17,8 @@ function sanitizeNode<N extends Node>(n: N): N {
   const data = { ...(n.data as Record<string, unknown>) }
   delete data.report
   delete data.running
+  delete data.flashUntil
+  delete data.dimmed
   delete data.onEditorChange
   delete data.onRunTrigger
   delete data.runDisabled
