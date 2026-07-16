@@ -8,23 +8,24 @@ import {
   searchAnime,
   pickPosterUrl,
   fetchAnimeFull,
-  fetchAnimeEpisodesPage,
-  episodeNumberFromUrl,
 } from './jikan.js'
 import * as seriesDb from './db.js'
+import { getEpisodesForDisplay } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView } from './publicRoutes.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
-import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
+import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock, fireEvent } from './flowRoutes.js'
+import type { FlowItem } from './flowNodes.js'
 import { pruneWorkDir, assertScratchVolumeSafe } from './flowNodes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
-import { searchAnimeAniList } from './anilist.js'
+import { searchAnimeAniList, fetchAniListMedia } from './anilist.js'
 import { warmScope, ensureScope, getPlayableIds } from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
+import { sourcingLedger, sourcingBackfill, sourcingReconcile, wantAction } from './sourcing.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import { createIssue, githubConfigured } from './github.js'
 import * as blacklist from './blacklist.js'
@@ -38,6 +39,11 @@ const app = express()
 app.disable('x-powered-by')
 const PORT = parseInt(process.env.PORT ?? '3001')
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
+// The qBittorrent category the code-built research flow queues into. Saved flows
+// carry their own category; this is for the one graph we construct in code, so a
+// dev instance sharing qBit with prod doesn't queue into prod's category. Set
+// QBIT_CATEGORY=anime-dev on staging; default 'anime' is prod-correct.
+const QBIT_CATEGORY = process.env.QBIT_CATEGORY || 'anime'
 const AUTH_USERNAME = process.env.AUTH_USERNAME ?? 'admin'
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD ?? 'changeme'
 // .trim() guards against stray whitespace in the env value — untrimmed, a
@@ -262,21 +268,32 @@ app.get('/api/search/anime', requireAuth, async (req, res) => {
   // Jikan only for the MAL-specific data AniList lacks (per-episode titles,
   // detail) — its search endpoint needs a Typesense index we don't run, so it's
   // the fallback here, used only if AniList is down.
+  // Tag each hit with whether it's already in our catalog so the add-series UI
+  // can mark/skip owned shows.
+  const withInCatalog = <T extends { mal_id: number }>(hits: T[]) =>
+    hits.map((h) => ({ ...h, inCatalog: !!seriesDb.findByMalId(h.mal_id) }))
   try {
     const results = await searchAnimeAniList(q)
-    res.json({ results })
+    res.json({ results: withInCatalog(results) })
   } catch (anilistErr) {
     console.error('search: AniList failed, trying Jikan —', anilistErr)
     try {
       const data = await searchAnime(q)
       res.json({
-        results: data.map((a) => ({
-          mal_id: a.mal_id,
-          title: a.title,
-          synopsis: a.synopsis ?? '',
-          image_url: pickPosterUrl(a),
-          url: a.url,
-        })),
+        results: withInCatalog(
+          data.map((a) => ({
+            mal_id: a.mal_id,
+            title: a.title,
+            synopsis: a.synopsis ?? '',
+            image_url: pickPosterUrl(a),
+            url: a.url,
+            // Jikan brief carries none of these — the UI degrades gracefully.
+            year: null,
+            type: null,
+            status: null,
+            episodes: null,
+          })),
+        ),
       })
     } catch (jikanErr) {
       console.error('search: Jikan fallback also failed —', jikanErr)
@@ -314,9 +331,40 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
     return
   }
   try {
-    const mal = await fetchAnimeFull(series.mal_id)
+    // AniList-primary (current, auth-free); MyAnimeList/Jikan only if AniList
+    // can't answer. `mal` keeps the Jikan-ish shape the /manage UI reads.
+    const al = await fetchAniListMedia(series.mal_id)
+    const mal = al
+      ? {
+          title: al.title,
+          title_english: al.titleEnglish,
+          title_japanese: al.titleNative,
+          synopsis: al.synopsis,
+          type: al.type,
+          episodes: al.totalEpisodes,
+          status: al.status,
+          score: al.score,
+          season: al.season,
+          year: al.year,
+          aired: { string: al.airedString },
+          broadcast: al.broadcast,
+          genres: al.genres.map((name) => ({ name })),
+          studios: al.studios.map((name) => ({ name })),
+          images: al.coverImage
+            ? {
+                webp: { large_image_url: al.coverImage, image_url: al.coverImage },
+                jpg: { large_image_url: al.coverImage, image_url: al.coverImage },
+              }
+            : undefined,
+          url: series.url ?? `https://myanimelist.net/anime/${series.mal_id}`,
+          // AniList carries no source/duration/rating — the UI hides them.
+          source: null,
+          duration: null,
+          rating: null,
+        }
+      : await fetchAnimeFull(series.mal_id)
     // Persist episode count + weekly broadcast so chase can estimate next air
-    // times when Jikan hasn't listed the next episode yet.
+    // times when the next episode hasn't been listed yet.
     try {
       const patch: Parameters<typeof seriesDb.upsertSeriesMetadata>[1] = {}
       if (typeof mal.episodes === 'number' && mal.episodes > 0 && mal.episodes !== series.episodes) {
@@ -344,7 +392,7 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
     res.json({
       series,
       mal: null,
-      malError: e instanceof Error ? e.message : 'Could not load MAL details',
+      malError: e instanceof Error ? e.message : 'Could not load catalog details',
     })
   }
 })
@@ -360,86 +408,65 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
     res.status(404).json({ error: 'Series not found' })
     return
   }
-  const pageRaw = req.query.page
-  const p =
-    typeof pageRaw === 'string' && Number.isFinite(Number(pageRaw))
-      ? Math.max(1, Math.floor(Number(pageRaw)))
-      : 1
   const malUrl = series.url ?? `https://myanimelist.net/anime/${series.mal_id}`
+  // `series_episodes` is the single source of truth: existence + air dates come
+  // from AniList (current, unlike MAL), titles from a multi-source merge (see
+  // server/episodes.ts). Cache-first — one page, all episodes at once.
+  const status = seriesDb.getSeriesStatus(series.mal_id)
+  const finished =
+    String(status?.air_status ?? '') === 'finished' || String(series.status ?? '') === 'Finished Airing'
+  const total = status?.total_episodes ?? series.episodes ?? null
   try {
-    const { episodes, pagination } = await fetchAnimeEpisodesPage(series.mal_id, p)
-    // The episode number drives every per-episode cell (library file, download,
-    // watch link). MAL episode URLs don't always carry `/episode/N`, so fall back
-    // to the episode's own mal_id (Jikan numbers episodes there) then its page
-    // position — never leave it null, or the whole row goes blank.
-    const rows = episodes.map((e, i) => ({
-      mal_id: e.mal_id,
-      url: e.url,
-      title: e.title,
-      title_japanese: e.title_japanese ?? null,
-      aired: e.aired ?? null,
-      filler: e.filler,
-      recap: e.recap,
-      episode: episodeNumberFromUrl(e.url) ?? e.mal_id ?? (p - 1) * 100 + i + 1,
+    const { episodes, source } = await getEpisodesForDisplay({
+      mal_id: series.mal_id,
+      finished,
+      totalEpisodes: total,
+    })
+    const rows = episodes.map((e) => ({
+      mal_id: series.mal_id,
+      url: malUrl,
+      title: e.title ?? `Episode ${e.number}`,
+      title_japanese: e.title_japanese,
+      aired: e.aired,
+      filler: false,
+      recap: false,
+      episode: e.number,
     }))
-    // Cache what we got so the fallback below can serve it next time Jikan is down.
-    seriesDb.upsertEpisodes(
-      series.mal_id,
-      rows.map((r) => ({
-        number: r.episode,
-        title: r.title,
-        title_japanese: r.title_japanese,
-        aired: r.aired,
-      })),
-    )
-    res.json({ episodes: rows, pagination, source: 'jikan' })
+    res.json({
+      episodes: rows,
+      pagination: { has_next_page: false, current_page: 1, last_visible_page: 1 },
+      source,
+    })
   } catch (e) {
-    // Jikan (MAL proxy) flakes constantly. Rather than an empty page, serve a
-    // fallback so the per-episode library/watch status is still visible: cached
-    // rows if we ever fetched them, else a synthesized 1..N from the known count.
+    // Every upstream failed: serve whatever the cache holds, else synthesize
+    // 1..N from the known count so the per-episode library/download status is
+    // still visible.
     console.error(e)
-    if (p > 1) {
-      // Fallbacks are a single page; deeper paging has nothing more to give.
-      res.json({ episodes: [], pagination: { has_next_page: false, current_page: p }, source: 'none' })
-      return
-    }
     const cached = seriesDb.getCachedEpisodes(series.mal_id)
-    let rows: {
-      mal_id: number
-      url: string
-      title: string
-      title_japanese: string | null
-      aired: string | null
-      filler: boolean
-      recap: boolean
-      episode: number
-    }[] = []
-    let source = ''
-    if (cached.length > 0) {
-      rows = cached.map((c) => ({
-        mal_id: series.mal_id,
-        url: malUrl,
-        title: c.title ?? `Episode ${c.number}`,
-        title_japanese: c.title_japanese ?? null,
-        aired: c.aired ?? null,
-        filler: false,
-        recap: false,
-        episode: c.number,
-      }))
-      source = 'cache'
-    } else if (series.episodes && series.episodes > 0) {
-      rows = Array.from({ length: series.episodes }, (_, i) => ({
-        mal_id: series.mal_id,
-        url: malUrl,
-        title: `Episode ${i + 1}`,
-        title_japanese: null,
-        aired: null,
-        filler: false,
-        recap: false,
-        episode: i + 1,
-      }))
-      source = 'synthesized'
-    }
+    const rows =
+      cached.length > 0
+        ? cached.map((c) => ({
+            mal_id: series.mal_id,
+            url: malUrl,
+            title: c.title ?? `Episode ${c.number}`,
+            title_japanese: c.title_japanese ?? null,
+            aired: c.aired ?? null,
+            filler: false,
+            recap: false,
+            episode: c.number,
+          }))
+        : total && total > 0
+          ? Array.from({ length: total }, (_, i) => ({
+              mal_id: series.mal_id,
+              url: malUrl,
+              title: `Episode ${i + 1}`,
+              title_japanese: null,
+              aired: null,
+              filler: false,
+              recap: false,
+              episode: i + 1,
+            }))
+          : []
     if (rows.length === 0) {
       res.status(502).json({ error: e instanceof Error ? e.message : 'Could not load episodes' })
       return
@@ -447,7 +474,7 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
     res.json({
       episodes: rows,
       pagination: { has_next_page: false, current_page: 1, last_visible_page: 1 },
-      source,
+      source: cached.length > 0 ? 'cache' : 'synthesized',
     })
   }
 })
@@ -618,6 +645,62 @@ app.get('/api/library/ledger', requireAuth, requireAdmin, (_req, res) => {
   })
 })
 
+// Sourcing reconciliation: the torrent-lifecycle side of tracking (the route
+// above answers "disk vs library_files"; these answer "qBittorrent vs the
+// torrent ledger vs wants"). Report is read-only; backfill/reconcile default
+// to dry-run and only write when {dryRun:false} is explicit.
+app.get('/api/sourcing/ledger', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    res.json(await sourcingLedger())
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Ledger report failed' })
+  }
+})
+
+app.get('/api/sourcing/wants', requireAuth, requireAdmin, (req, res) => {
+  const raw = typeof req.query.status === 'string' ? req.query.status : undefined
+  const status =
+    raw === 'open' || raw === 'sourced' || raw === 'fulfilled' || raw === 'abandoned' ? raw : undefined
+  res.json({ wants: seriesDb.listWants(status) })
+})
+
+app.post('/api/sourcing/backfill', requireAuth, requireAdmin, async (req, res) => {
+  const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  try {
+    res.json(await sourcingBackfill(dryRun))
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Backfill failed' })
+  }
+})
+
+app.post('/api/sourcing/reconcile', requireAuth, requireAdmin, async (req, res) => {
+  const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  try {
+    res.json(await sourcingReconcile(dryRun))
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Reconcile failed' })
+  }
+})
+
+// Admin action on one want (the chase panel's "retry now" / "abandon").
+app.post('/api/series/:id/wants/:wantId', requireAuth, requireAdmin, (req, res) => {
+  const wantId = Number(req.params.wantId)
+  const action = (req.body as { action?: unknown } | undefined)?.action
+  if (!Number.isFinite(wantId) || (action !== 'retry-now' && action !== 'abandon' && action !== 'reopen')) {
+    res.status(400).json({ error: 'action must be retry-now | abandon | reopen' })
+    return
+  }
+  const want = wantAction(wantId, action)
+  if (!want) {
+    res.status(404).json({ error: 'Want not found' })
+    return
+  }
+  res.json({ want })
+})
+
 // Per-episode media facts for the files actually in the library (codec, audio
 // tracks, resolution, size) — what the mux/import produced, not the torrents.
 app.get('/api/series/:id/library', requireAuth, async (req, res) => {
@@ -714,7 +797,7 @@ function buildResearchGraph(seriesId: number, query: string): FlowGraph {
       { id: 'tpl', type: 'transform.template', position: { x: 520, y: 0 }, config: { field: 'torrent_query', template: query } },
       { id: 'st', type: 'enrich.anime-status', position: { x: 780, y: 0 }, config: { malField: 'mal_id', maxItems: 0 } },
       { id: 'tor', type: 'enrich.torrent-search', position: { x: 1040, y: 0 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
-      { id: 'qb', type: 'sink.qbittorrent', position: { x: 1300, y: 0 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
+      { id: 'qb', type: 'sink.qbittorrent', position: { x: 1300, y: 0 }, config: { urlField: 'torrent_magnet', category: QBIT_CATEGORY, savepath: '', paused: false } },
     ],
     edges: [
       { id: 'e1', source: 'idx', sourceHandle: 'items', target: 'pick', targetHandle: 'in' },
@@ -754,6 +837,25 @@ app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res)
   } finally {
     releaseFlowLock()
   }
+})
+
+// Re-fire the `new-item` trigger for one series — the same event the scheduler
+// emits when a title is first added. Re-runs the "Show added" flow on this
+// series (resolve airing status, mint wants for aired-but-missing episodes,
+// chain into chase-wants), using each flow's own qBit category — so unlike the
+// legacy /research route it stays env-isolated. Fire-and-forget: the flow chain
+// runs in the background and shows up in the Activity tab.
+app.post('/api/series/:id/retrigger', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) {
+    res.status(404).json({ error: 'Series not found' })
+    return
+  }
+  void fireEvent('new-item', [series as unknown as FlowItem]).catch((e) =>
+    console.error(`retrigger new-item for series ${id} failed —`, e),
+  )
+  res.json({ ok: true })
 })
 
 // ---- Season-banner candidates (admin picker + upload) ---------------------

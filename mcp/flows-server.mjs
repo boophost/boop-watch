@@ -8,7 +8,7 @@
 // Code after a restart (MCP config is read at startup). The CLI needs no
 // restart, so it's the way to drive flows within a live session.
 
-import { flows, schedules, cfg } from './flows-client.mjs'
+import { flows, schedules, sourcing, cfg } from './flows-client.mjs'
 
 // --------------------------------------------------------------------------
 // CLI mode
@@ -24,7 +24,11 @@ async function cli(argv) {
     }
     case 'list': {
       const { flows: list } = await flows.list()
-      out(list.map((f) => `#${f.id}  ${f.name}${f.description ? ' — ' + f.description : ''}`).join('\n') || '(no flows)')
+      out(
+        list
+          .map((f) => `#${f.id}  ${f.enabled === false ? '[OFF]  ' : ''}${f.name}${f.description ? ' — ' + f.description : ''}`)
+          .join('\n') || '(no flows)',
+      )
       return
     }
     case 'get':
@@ -43,6 +47,14 @@ async function cli(argv) {
     case 'delete':
       out(await flows.remove(rest[0]))
       return
+    case 'enable':
+    case 'disable': {
+      // Automation switch: disabled flows are skipped by schedules and ignored
+      // by event triggers; manual `run` still works.
+      const { flow } = await flows.save(rest[0], { enabled: cmd === 'enable' })
+      out(`#${flow.id}  ${flow.name}  automation ${flow.enabled ? 'on' : 'off'}`)
+      return
+    }
     case 'run': {
       const dryRun = !rest.includes('--live')
       const { report } = await flows.run(rest[0], dryRun)
@@ -101,6 +113,32 @@ async function cli(argv) {
     case 'schedule-delete':
       out(await schedules.remove(rest[0]))
       return
+    case 'wants': {
+      // wants [open|sourced|fulfilled|abandoned]
+      const { wants } = await sourcing.wants(rest[0])
+      out(
+        wants
+          .map(
+            (w) =>
+              `#${w.id}  mal ${w.mal_id}  ${w.kind}${w.episode != null ? ` ep${w.episode}` : ''}  ${w.status}` +
+              (w.attempts ? `  attempts=${w.attempts}` : '') +
+              (w.next_attempt_at ? `  next=${w.next_attempt_at}` : '') +
+              (w.torrent_hash ? `  hash=${w.torrent_hash.slice(0, 8)}` : '') +
+              (w.note ? `  — ${w.note}` : ''),
+          )
+          .join('\n') || '(no wants)',
+      )
+      return
+    }
+    case 'ledger':
+      out(await sourcing.ledger())
+      return
+    case 'backfill':
+      out(await sourcing.backfill(!rest.includes('--live')))
+      return
+    case 'reconcile':
+      out(await sourcing.reconcile(!rest.includes('--live')))
+      return
     case 'whoami':
       out({ ...cfg(), token: cfg().token ? '(set)' : '', secret: cfg().secret ? '(set)' : '' })
       return
@@ -108,8 +146,10 @@ async function cli(argv) {
       out(
         'commands:\n' +
           '  node-types | list | get <id> | create <name> [desc] | save <id> <graph.json> | run <id> [--live] | delete <id>\n' +
+          '  enable <id> | disable <id>   (automation switch: schedules + event triggers; manual runs unaffected)\n' +
           '  runs [limit]\n' +
           '  schedules | schedule-get <id> | schedule-create <flowId> <kind> <specJson> [--live] [--disabled] | schedule-update <id> <patchJson> | schedule-run <id> | schedule-delete <id>\n' +
+          '  wants [status] | ledger | backfill [--live] | reconcile [--live]   (sourcing reconciliation)\n' +
           '  whoami',
       )
       process.exit(cmd ? 1 : 0)
@@ -157,19 +197,21 @@ async function serve() {
   server.registerTool(
     'save_flow',
     {
-      description: 'Update a flow. Pass graph as {nodes,edges}; name/description optional. The server validates the graph (unknown node types / bad edges / cycles are rejected).',
+      description: 'Update a flow. Pass graph as {nodes,edges}; name/description optional. enabled=false turns automation off (schedules skip it, event triggers ignore it; manual runs still work). The server validates the graph (unknown node types / bad edges / cycles are rejected).',
       inputSchema: {
         id: z.number().int(),
         name: z.string().optional(),
         description: z.string().optional(),
         graph: z.object({ nodes: z.array(z.any()), edges: z.array(z.any()) }).optional(),
+        enabled: z.boolean().optional(),
       },
     },
-    wrap(({ id, name, description, graph }) => {
+    wrap(({ id, name, description, graph, enabled }) => {
       const patch = {}
       if (name !== undefined) patch.name = name
       if (description !== undefined) patch.description = description
       if (graph !== undefined) patch.graph = graph
+      if (enabled !== undefined) patch.enabled = enabled
       return flows.save(id, patch)
     }),
   )

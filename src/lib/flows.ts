@@ -114,7 +114,65 @@ export function resolveNodePorts(
   if (spec.type === 'transform.pick') {
     return { inputs: spec.inputs, outputs: [{ id: 'value', label: 'value', dataType: dt ?? 'json' }] }
   }
+  if (spec.type === 'filter.switch') {
+    return resolveSwitchPorts(config)
+  }
   return { inputs: spec.inputs, outputs: spec.outputs }
+}
+
+/** Keep in sync with parseSwitchCases / switchPorts in server/flowNodes.ts. */
+function resolveSwitchPorts(config: Record<string, unknown>): {
+  inputs: NodePort[]
+  outputs: NodePort[]
+} {
+  const raw = config.cases
+  let arr: unknown[] = []
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      arr = Array.isArray(parsed) ? parsed : []
+    } catch {
+      arr = []
+    }
+  } else if (Array.isArray(raw)) {
+    arr = raw
+  }
+  const used = new Set<string>(['else', 'in'])
+  const slug = (s: string): string => {
+    let base = s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+    if (!base || used.has(base)) {
+      if (!base) base = 'case'
+      let id = base
+      let n = 2
+      while (used.has(id)) id = `${base}_${n++}`
+      used.add(id)
+      return id
+    }
+    used.add(base)
+    return base
+  }
+  const outputs: NodePort[] = []
+  for (const entry of arr) {
+    if (typeof entry === 'string') {
+      const value = entry
+      const id = slug(value || 'case')
+      outputs.push({ id, label: value || id })
+      continue
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const o = entry as Record<string, unknown>
+    const value = String(o.value ?? o.match ?? '')
+    const labelRaw = o.label != null && String(o.label) !== '' ? String(o.label) : value
+    const label = labelRaw || 'case'
+    const id =
+      typeof o.id === 'string' && o.id.trim() ? slug(o.id.trim()) : slug(label || value || 'case')
+    outputs.push({ id, label: label || id })
+  }
+  outputs.push({ id: 'else', label: 'else' })
+  return { inputs: [{ id: 'in', label: 'in' }], outputs }
 }
 
 /** A port's declared record type is "fixed" (doesn't propagate) when it's a
@@ -250,6 +308,8 @@ export interface Flow {
   description: string | null
   graph: FlowGraph
   component: FlowComponentMeta | null
+  /** 0/1 from SQLite: automation (schedules + event triggers) on/off. */
+  enabled: number
   created_at: string
   updated_at: string
 }
@@ -260,6 +320,7 @@ export interface FlowSummary {
   description: string | null
   node_count: number
   published: boolean
+  enabled: boolean
   updated_at: string
 }
 
@@ -317,6 +378,51 @@ async function json<T>(r: Response): Promise<T> {
 export const listFlows = () =>
   fetchAuth('/api/flows').then((r) => json<{ flows: FlowSummary[] }>(r))
 
+/** One flow with its full graph — payload for the read-only Flow Map. */
+export interface FlowMapEntry {
+  id: number
+  name: string
+  description: string | null
+  published: boolean
+  updated_at: string
+  graph: FlowGraph
+}
+
+export interface FlowMapNote {
+  id: string
+  /** Defaults to sticky for pre-arrow map notes. */
+  kind?: 'sticky' | 'arrow'
+  x: number
+  y: number
+  width: number
+  height: number
+  text?: string
+  color?: string
+  /** Arrow-only styling (ignored for stickies). */
+  strokeWidth?: number
+  headSize?: number
+  dash?: 'solid' | 'dashed' | 'dotted'
+  startHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  endHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  points?: { x: number; y: number }[]
+}
+
+export interface FlowMapLayout {
+  [flowId: string]: { x: number; y: number }
+}
+
+export const getFlowMap = () =>
+  fetchAuth('/api/flows/map').then((r) =>
+    json<{ flows: FlowMapEntry[]; layout: FlowMapLayout; notes: FlowMapNote[] }>(r),
+  )
+
+export const saveFlowMapState = (state: { layout: FlowMapLayout; notes: FlowMapNote[] }) =>
+  fetchAuth('/api/flows/map/state', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(state),
+  }).then((r) => json<{ layout: FlowMapLayout; notes: FlowMapNote[] }>(r))
+
 export const getNodeTypes = () =>
   fetchAuth('/api/flows/node-types').then((r) => json<{ nodeTypes: NodeSpec[] }>(r))
 
@@ -342,7 +448,13 @@ export const createFlow = (name: string, description?: string) =>
 
 export const saveFlow = (
   id: number,
-  patch: { name?: string; description?: string | null; graph?: FlowGraph; component?: FlowComponentMeta | null },
+  patch: {
+    name?: string
+    description?: string | null
+    graph?: FlowGraph
+    component?: FlowComponentMeta | null
+    enabled?: boolean
+  },
 ) =>
   fetchAuth(`/api/flows/${id}`, {
     method: 'PUT',
@@ -479,6 +591,9 @@ export type ActivityStreamEvent =
       status: 'ok' | 'error' | 'skipped'
       notes: string[]
       error?: string
+      /** Per-output-port item counts (Flow Map edge animation). */
+      counts?: Record<string, number>
+      durationMs?: number
     }
   | { type: 'done'; runToken: string; run: FlowRun }
   | { type: 'aborted'; runToken: string; error: string }

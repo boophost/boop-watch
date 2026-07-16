@@ -177,6 +177,24 @@ function topoOrder(graph: FlowGraph): FlowNode[] | null {
   return order.length === graph.nodes.length ? order : null
 }
 
+/**
+ * Exclusive routers (Switch): only non-empty output arms activate downstream.
+ * Splitters like Compare still schedule both branches even when one side is empty.
+ */
+function isExclusiveRouter(type: string): boolean {
+  return type === 'filter.switch'
+}
+
+/**
+ * Pure value producers (Random, Text, Number, …) have no inputs so topo-order
+ * would run them at the start of every flow. They are demand-driven instead:
+ * only evaluated when an active downstream consumer pulls them (e.g. once the
+ * path reaches the Switch / Set-field that needs the value).
+ */
+function isLazyProducer(type: string): boolean {
+  return type.startsWith('value.')
+}
+
 /** Live per-node progress callbacks, fired as the executor walks the graph. */
 export interface RunHooks {
   /** A node is about to run (after its inputs are gathered). */
@@ -247,61 +265,131 @@ export async function runFlow(
     return { ok: false, dryRun, startedAt, durationMs: Date.now() - t0, nodes: {}, error: invalid }
   }
 
-  const order = topoOrder(executableGraph(graph))!
+  const runnable = executableGraph(graph)
+  // Cycle check (also used by validateGraph); execution is demand-driven below.
+  if (topoOrder(runnable) === null) {
+    return { ok: false, dryRun, startedAt, durationMs: Date.now() - t0, nodes: {}, error: 'Graph has a cycle' }
+  }
+  const nodeById = new Map(runnable.nodes.map((n) => [n.id, n]))
+  const outgoing = new Map<string, FlowEdge[]>()
+  const incoming = new Map<string, FlowEdge[]>()
+  for (const n of runnable.nodes) {
+    outgoing.set(n.id, [])
+    incoming.set(n.id, [])
+  }
+  for (const e of runnable.edges) {
+    outgoing.get(e.source)?.push(e)
+    incoming.get(e.target)?.push(e)
+  }
+
   // node id -> output handle -> items
   const buffers = new Map<string, Record<string, FlowItem[]>>()
   const failed = new Set<string>()
+  /** Nodes that produced outputs (including gated empties). Exclusive-router gating. */
+  const active = new Set<string>()
+  /** Finished ensureRan (ran, gated, failed, or silent-skipped). */
+  const settled = new Set<string>()
+  const ensuring = new Set<string>()
 
-  for (const node of order) {
-    if (isEditorNode(node.type)) continue
+  /** An incoming edge activates its target when the source ran and — for
+   * exclusive routers like Switch — the specific output arm carried items. */
+  const edgeActivates = (e: FlowEdge): boolean => {
+    if (failed.has(e.source) || !active.has(e.source)) return false
+    const src = nodeById.get(e.source)
+    if (!src) return false
+    if (isExclusiveRouter(src.type)) {
+      return (buffers.get(e.source)?.[e.sourceHandle]?.length ?? 0) > 0
+    }
+    return true
+  }
+
+  const emptyBuffers = (node: FlowNode) => {
     const impl = NODE_REGISTRY.get(node.type)!
-    const reportKey = qid(node.id)
-    const incoming = graph.edges.filter((e) => e.target === node.id)
+    const ports = impl.resolvePorts?.(node.config ?? {}).outputs ?? impl.spec.outputs
+    const out: Record<string, FlowItem[]> = {}
+    for (const p of ports) out[p.id] = []
+    return { ports, out }
+  }
 
-    // Skip nodes downstream of a failure so one broken source doesn't cascade
-    // into misleading per-node errors.
-    if (incoming.some((e) => failed.has(e.source))) {
-      failed.add(node.id)
+  const scheduleActivated = (nodeId: string, pending: Set<string>) => {
+    for (const e of outgoing.get(nodeId) ?? []) {
+      if (edgeActivates(e)) pending.add(e.target)
+    }
+  }
+
+  async function ensureRan(nodeId: string, pending: Set<string>): Promise<void> {
+    if (settled.has(nodeId)) return
+    if (ensuring.has(nodeId)) return // cycle already rejected by validate; re-entry no-op
+    const node = nodeById.get(nodeId)
+    if (!node || isEditorNode(node.type)) {
+      settled.add(nodeId)
+      return
+    }
+    const impl = NODE_REGISTRY.get(node.type)
+    if (!impl) {
+      settled.add(nodeId)
+      return
+    }
+    ensuring.add(nodeId)
+
+    const ins = incoming.get(nodeId) ?? []
+    // Pull upstream first (lazy value.* nodes, deferred branches, …).
+    for (const e of ins) {
+      await ensureRan(e.source, pending)
+    }
+
+    const reportKey = qid(node.id)
+    const emitEmpty = (status: NodeReport['status'], notes: string[], error?: string) => {
+      const { ports, out } = emptyBuffers(node)
+      buffers.set(node.id, out)
       reports[reportKey] = {
-        status: 'skipped',
+        status,
         durationMs: 0,
-        counts: {},
+        counts: Object.fromEntries(ports.map((p) => [p.id, 0])),
         samples: {},
-        notes: ['skipped: upstream node failed'],
+        notes,
+        ...(error ? { error } : {}),
       }
       hooks?.onNodeDone?.(reportKey, reports[reportKey])
-      continue
+    }
+
+    if (ins.some((e) => failed.has(e.source))) {
+      failed.add(node.id)
+      emitEmpty('skipped', ['skipped: upstream node failed'])
+      settled.add(node.id)
+      ensuring.delete(node.id)
+      return
+    }
+
+    // Exclusive Switch: only arms that emitted items schedule downstream.
+    // Silent skip — no report/hooks — so untaken arms don't flash or wipe trails.
+    if (ins.length > 0 && !ins.some(edgeActivates)) {
+      const { out } = emptyBuffers(node)
+      buffers.set(node.id, out)
+      settled.add(node.id)
+      ensuring.delete(node.id)
+      return
     }
 
     hooks?.onNodeStart?.(reportKey)
 
     const inputs: Record<string, FlowItem[]> = {}
-    for (const port of impl.spec.inputs) inputs[port.id] = []
-    for (const e of incoming) {
+    const inPorts = impl.resolvePorts?.(node.config ?? {}).inputs ?? impl.spec.inputs
+    for (const port of inPorts) inputs[port.id] = []
+    for (const e of ins) {
       const produced = buffers.get(e.source)?.[e.sourceHandle] ?? []
       inputs[e.targetHandle] = [...(inputs[e.targetHandle] ?? []), ...produced]
     }
     finalInputs.set(node.id, inputs)
 
-    // Trigger gate: a node whose `when` port is wired but received nothing did
-    // not fire this run — skip it (emit empty), so a trigger can drive an
-    // otherwise self-starting source. Unwired `when` (or wired-with-items) runs
-    // normally, so existing flows are unaffected.
-    const whenWired = incoming.some((e) => e.targetHandle === 'when')
+    const whenWired = ins.some((e) => e.targetHandle === 'when')
     if (whenWired && (inputs.when?.length ?? 0) === 0) {
-      const outPorts = impl.resolvePorts?.(node.config ?? {}).outputs ?? impl.spec.outputs
-      const emptyOutputs: Record<string, FlowItem[]> = {}
-      for (const p of outPorts) emptyOutputs[p.id] = []
-      buffers.set(node.id, emptyOutputs)
-      reports[reportKey] = {
-        status: 'ok',
-        durationMs: 0,
-        counts: Object.fromEntries(outPorts.map((p) => [p.id, 0])),
-        samples: {},
-        notes: ['gated: not triggered'],
-      }
-      hooks?.onNodeDone?.(reportKey, reports[reportKey])
-      continue
+      emitEmpty('ok', ['gated: not triggered'])
+      active.add(node.id)
+      settled.add(node.id)
+      ensuring.delete(node.id)
+      scheduleActivated(node.id, pending)
+      return
     }
 
     const ctx: RunContext = {
@@ -320,6 +408,7 @@ export async function runFlow(
       const injected = node.type === 'boundary.input' ? injectOutput?.(node) ?? null : null
       const outputs = injected !== null ? { items: injected } : await impl.run(inputs, node.config ?? {}, ctx)
       buffers.set(node.id, outputs)
+      active.add(node.id)
       reports[reportKey] = {
         status: 'ok',
         durationMs: Date.now() - nodeT0,
@@ -341,8 +430,32 @@ export async function runFlow(
       }
     }
     hooks?.onNodeDone?.(reportKey, reports[reportKey])
+    settled.add(node.id)
+    ensuring.delete(node.id)
+    if (active.has(node.id)) scheduleActivated(node.id, pending)
   }
 
-  const ok = Object.values(reports).every((r) => r.status === 'ok')
+  // Starters: indegree-0 nodes that aren't lazy value producers. Lazy producers
+  // (value.random, value.text, …) are pulled only when an active consumer needs
+  // them — so a Random → Values-to-items chain feeding one Switch arm stays idle
+  // until that arm is taken (or until a pre-switch consumer on the live path pulls it).
+  let starters = runnable.nodes.filter(
+    (n) => !isEditorNode(n.type) && (incoming.get(n.id)?.length ?? 0) === 0 && !isLazyProducer(n.type),
+  )
+  if (starters.length === 0) {
+    // Pure value graphs (e.g. random → log) still need to run.
+    starters = runnable.nodes.filter(
+      (n) => !isEditorNode(n.type) && (incoming.get(n.id)?.length ?? 0) === 0,
+    )
+  }
+
+  const pending = new Set(starters.map((n) => n.id))
+  while (pending.size > 0) {
+    const id = pending.values().next().value!
+    pending.delete(id)
+    await ensureRan(id, pending)
+  }
+
+  const ok = Object.values(reports).every((r) => r.status !== 'error')
   return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports, finalInputs, fires: fireQueue }
 }

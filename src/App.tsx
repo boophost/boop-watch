@@ -12,8 +12,9 @@ import Users from './pages/manage/Users'
 import Suggestions from './pages/manage/Suggestions'
 import AdminSeriesDetail from './pages/SeriesDetail'
 
-// The graph editor pulls in @xyflow/react — keep it out of the portal bundle.
+// The graph editor / map pull in @xyflow/react — keep them out of the portal bundle.
 const FlowEditor = lazy(() => import('./pages/manage/FlowEditor'))
+const FlowMap = lazy(() => import('./pages/manage/FlowMap'))
 import Browse from './pages/Browse'
 import Title from './pages/Title'
 import Watch from './pages/Watch'
@@ -105,6 +106,20 @@ export default function App() {
             <Route path="suggestions" element={<Suggestions />} />
             <Route path="flows" element={<Flows />} />
             <Route path="schedules" element={<Schedules />} />
+            <Route
+              path="flows/map"
+              element={
+                <Suspense
+                  fallback={
+                    <div className="flex h-screen items-center justify-center">
+                      <div className="text-muted-foreground">Loading map…</div>
+                    </div>
+                  }
+                >
+                  <FlowMap />
+                </Suspense>
+              }
+            />
             <Route
               path="flows/:flowId"
               element={

@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ReactFlow,
@@ -7,6 +8,9 @@ import {
   Controls,
   Handle,
   Position,
+  BaseEdge,
+  EdgeLabelRenderer,
+  getBezierPath,
   useNodesState,
   useEdgesState,
   useReactFlow,
@@ -15,6 +19,7 @@ import {
   getNodesBounds,
   type Node,
   type Edge,
+  type EdgeProps,
   type NodeProps,
   type Connection,
 } from '@xyflow/react'
@@ -39,6 +44,8 @@ import {
   StickyNote,
   Waypoints,
   Trash2,
+  Undo2,
+  Redo2,
   Unlink,
   X,
 } from 'lucide-react'
@@ -66,11 +73,20 @@ import {
   type NodeReport,
   type ComponentInterface,
 } from '@/lib/flows'
-import { isEditorNode, editorRotationFromConfig, normalizeRotation } from '@/lib/flowEditorMeta'
+import {
+  DEFAULT_ARROW_POINTS,
+  isEditorNode,
+  editorRotationFromConfig,
+  normalizeArrowConfig,
+  normalizeRotation,
+  type ArrowDash,
+  type ArrowHead,
+} from '@/lib/flowEditorMeta'
 import {
   editorNodeTypes,
   editorRfType,
 } from './flowEditorAnnotations'
+import { useFlowHistory } from './useFlowHistory'
 
 // ---- graph <-> React Flow conversion ---------------------------------------
 
@@ -84,10 +100,14 @@ interface FlowNodeData extends Record<string, unknown> {
   onRunTrigger?: () => void
   /** True while any run is in progress (disables the per-node ▶). */
   runDisabled?: boolean
+  /** Soft-dim nodes not yet touched during a live/dry run. */
+  dimmed?: boolean
+  /** Epoch ms — remount flash burst overlay while Date.now() < this. */
+  flashUntil?: number
 }
 
 type RFNode = Node<FlowNodeData, 'flow' | 'reroute' | 'sticky' | 'arrow' | 'group'>
-type RFEdge = Edge
+type RFEdge = Edge<{ pulse?: number; pulseAt?: number }>
 
 const CATEGORY_DOT: Record<NodeCategory, string> = {
   trigger: 'bg-lime-400',
@@ -98,6 +118,19 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
   sink: 'bg-rose-400',
   value: 'bg-pink-400',
   boundary: 'bg-slate-400',
+}
+
+/** Raw rgb of each category's dot — the dry-run flash glows this color, so a
+ *  firing trigger reads lime, a sink rose, etc. (matches the title dot). */
+const CATEGORY_FLASH: Record<NodeCategory, string> = {
+  trigger: '163, 230, 53',
+  source: '167, 139, 250',
+  filter: '56, 189, 248',
+  enrich: '251, 191, 36',
+  combine: '52, 211, 153',
+  sink: '251, 113, 133',
+  value: '244, 114, 182',
+  boundary: '148, 163, 184',
 }
 
 const CATEGORY_LABEL: Record<NodeCategory, string> = {
@@ -433,7 +466,8 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
   const whenPort = allInputs.find((p) => p.id === 'when')
   const inputs = allInputs.filter((p) => p.id !== 'when')
   // Trigger nodes emit an activation signal — their outputs read lime.
-  const isTrigger = (componentInfo?.component?.category ?? spec.category) === 'trigger'
+  const flashCategory: NodeCategory = componentInfo?.component?.category ?? spec.category
+  const isTrigger = flashCategory === 'trigger'
   // Effective (propagated) type per port — a generic 'items' port shows the
   // record subtype flowing through it; falls back to the declared type.
   const effIn = (p: NodePort): PortDataType => propTypes.get(`${id}:in:${p.id}`) ?? p.dataType ?? 'items'
@@ -455,20 +489,31 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
     .slice(0, 3)
 
   const running = data.running === true
+  const flashUntil = data.flashUntil
+  const flashing = typeof flashUntil === 'number' && flashUntil > Date.now()
   return (
     <div
-      className={`min-w-44 max-w-56 rounded-md border bg-card text-card-foreground shadow-sm ${
+      className={`relative min-w-44 max-w-56 rounded-md border bg-card text-card-foreground shadow-sm ${
         selected
           ? 'border-ring ring-2 ring-ring/40'
           : running
             ? 'border-ring ring-2 ring-ring/30'
             : report?.status === 'error'
               ? 'border-destructive'
-              : 'border-border'
-      }`}
+              : report?.status === 'ok'
+                ? 'border-emerald-500/50'
+                : 'border-border'
+      } ${data.dimmed && !flashing ? 'opacity-40' : ''}`}
     >
+      {flashing ? (
+        <span
+          key={flashUntil}
+          className="flow-node-flash-burst pointer-events-none absolute"
+          style={{ '--flash-color': CATEGORY_FLASH[flashCategory] } as CSSProperties}
+        />
+      ) : null}
       <div
-        className="relative flex items-center gap-2 border-b border-border px-3 py-2"
+        className="relative z-[1] flex items-center gap-2 border-b border-border px-3 py-2"
         title={spec.description || undefined}
       >
         {whenPort ? (
@@ -511,7 +556,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
         </div>
       </div>
       {inputs.length > 0 ? (
-        <div className="border-b border-border py-1">
+        <div className="relative z-[1] border-b border-border py-1">
           {inputs.map((port) => (
             <div key={port.id} className="relative flex items-center gap-2 px-3 py-0.5">
               <Handle
@@ -530,7 +575,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
         </div>
       ) : null}
       {configLines.length > 0 ? (
-        <div className="space-y-0.5 border-b border-border px-3 py-1.5">
+        <div className="relative z-[1] space-y-0.5 border-b border-border px-3 py-1.5">
           {configLines.map((line) => (
             <p key={line} className="truncate text-[10px] text-muted-foreground">
               {line}
@@ -538,7 +583,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
           ))}
         </div>
       ) : null}
-      <div className="py-1">
+      <div className="relative z-[1] py-1">
         {outputs.map((port) => (
           <div key={port.id} className="relative flex items-center justify-end gap-2 px-3 py-0.5">
             {report ? (
@@ -606,6 +651,66 @@ function RerouteNode({ id, selected }: NodeProps<RFNode>) {
 
 const nodeTypes = { flow: FlowNodeView, reroute: RerouteNode, ...editorNodeTypes }
 
+function RunThroughputEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  style,
+  markerEnd,
+  data,
+}: EdgeProps<RFEdge>) {
+  const [path, labelX, labelY] = getBezierPath({
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourcePosition,
+    targetPosition,
+  })
+  const pulse = data?.pulse
+  const pulsing =
+    typeof pulse === 'number' && pulse > 0 && data?.pulseAt != null && Date.now() - data.pulseAt < 2200
+  return (
+    <>
+      <BaseEdge
+        id={id}
+        path={path}
+        markerEnd={markerEnd}
+        style={style}
+        className={pulsing ? 'flow-run-edge-pulse' : undefined}
+      />
+      {pulsing ? (
+        <EdgeLabelRenderer>
+          <div
+            className="nodrag nopan pointer-events-none absolute rounded bg-violet-500/90 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white shadow"
+            style={{
+              transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+            }}
+          >
+            {pulse}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
+  )
+}
+
+const edgeTypes = { throughput: RunThroughputEdge }
+
+/** Map nested stream ids (`sub/inner`) onto the canvas parent node id. */
+function canvasNodeId(streamId: string): string {
+  const slash = streamId.indexOf('/')
+  return slash >= 0 ? streamId.slice(0, slash) : streamId
+}
+
+const EDITOR_NODE_FLASH_MS = 1250
+/** Minimum gap between successive node flashes (trail readability). */
+const EDITOR_FLASH_COOLDOWN_MS = 250
+
 function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
   const lockedGroups = new Map(
     graph.nodes
@@ -617,16 +722,32 @@ function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
       const rfType = n.type === 'transform.reroute' ? 'reroute' : editorRfType(n.type)
       const groupId = typeof n.config.groupId === 'string' ? n.config.groupId : undefined
       const parentLocked = groupId ? lockedGroups.get(groupId) : false
-      const width = typeof n.config.width === 'number' ? n.config.width : undefined
-      const height = typeof n.config.height === 'number' ? n.config.height : undefined
       const config = { ...n.config }
       delete config.groupId
+      if (n.type === 'editor.arrow') {
+        const hadPoints = Array.isArray(n.config.points) && (n.config.points as unknown[]).length >= 2
+        const normalized = normalizeArrowConfig(config)
+        Object.assign(config, normalized)
+        delete config.rotation
+        delete config.direction
+        // Legacy short boxes were for straight shafts — give curves room when migrating.
+        if (!hadPoints && (typeof config.height !== 'number' || config.height < 80)) {
+          config.height = 120
+        }
+        if (!hadPoints && (typeof config.width !== 'number' || config.width < 120)) {
+          config.width = 200
+        }
+      }
+      const width = typeof config.width === 'number' ? config.width : undefined
+      const height = typeof config.height === 'number' ? config.height : undefined
       const style =
         width && height
           ? { width, height }
           : rfType === 'group'
             ? { width: width ?? 280, height: height ?? 180 }
-            : undefined
+            : rfType === 'arrow'
+              ? { width: width ?? 200, height: height ?? 120 }
+              : undefined
       return {
         id: n.id,
         type: rfType,
@@ -698,9 +819,34 @@ const EDITOR_DEFAULTS: Record<string, Record<string, unknown>> = {
     verticalAlign: 'top',
     rotation: 0,
   },
-  'editor.arrow': { width: 160, height: 48, rotation: 0 },
+  'editor.arrow': {
+    width: 200,
+    height: 120,
+    color: '#a1a1aa',
+    strokeWidth: 2,
+    headSize: 10,
+    dash: 'solid',
+    startHead: 'none',
+    endHead: 'arrow',
+    points: DEFAULT_ARROW_POINTS.map((p) => ({ ...p })),
+  },
   'editor.group': { title: 'Group', color: 'rgba(124, 92, 255, 0.12)', width: 280, height: 180, locked: false },
 }
+
+const ARROW_DASH_OPTIONS: { value: ArrowDash; label: string }[] = [
+  { value: 'solid', label: 'Solid' },
+  { value: 'dashed', label: 'Dashed' },
+  { value: 'dotted', label: 'Dotted' },
+]
+
+const ARROW_HEAD_OPTIONS: { value: ArrowHead; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'arrow', label: 'Arrow' },
+  { value: 'triangle', label: 'Triangle' },
+  { value: 'open', label: 'Open' },
+  { value: 'diamond', label: 'Diamond' },
+  { value: 'dot', label: 'Dot' },
+]
 
 function EditorRotationField({
   value,
@@ -765,6 +911,7 @@ function FlowEditorInner() {
   const [components, setComponents] = useState<NodeSpec[]>([])
   const [name, setName] = useState('')
   const [component, setComponent] = useState<FlowComponentMeta | null>(null)
+  const [enabled, setEnabled] = useState(true)
   const [componentPanelOpen, setComponentPanelOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [dirty, setDirty] = useState(false)
@@ -785,6 +932,117 @@ function FlowEditorInner() {
   const addAt = useRef(0)
   const clipboardRef = useRef<{ nodes: RFNode[]; edges: RFEdge[] } | null>(null)
   const { screenToFlowPosition } = useReactFlow()
+  const nodesRef = useRef(nodes)
+  const edgesRef = useRef(edges)
+  nodesRef.current = nodes
+  edgesRef.current = edges
+  const flashQueue = useRef<string[]>([])
+  const flashDrainTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flashNextAt = useRef(0)
+  const lastFlashAt = useRef(new Map<string, number>())
+  const flashClearTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+
+  const playFlash = useCallback((nodeId: string) => {
+    const now = Date.now()
+    lastFlashAt.current.set(nodeId, now)
+    const until = now + EDITOR_NODE_FLASH_MS
+    setNodes((ns) =>
+      ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, flashUntil: until } } : n)),
+    )
+    const prev = flashClearTimers.current.get(nodeId)
+    if (prev) clearTimeout(prev)
+    const t = setTimeout(() => {
+      flashClearTimers.current.delete(nodeId)
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (n.id !== nodeId || n.data.flashUntil !== until) return n
+          return { ...n, data: { ...n.data, flashUntil: undefined } }
+        }),
+      )
+    }, EDITOR_NODE_FLASH_MS + 40)
+    flashClearTimers.current.set(nodeId, t)
+  }, [setNodes])
+
+  const drainFlashQueue = useCallback(() => {
+    if (flashDrainTimer.current != null) return
+    const tick = () => {
+      flashDrainTimer.current = null
+      const id = flashQueue.current.shift()
+      if (!id) return
+      playFlash(id)
+      flashNextAt.current = Date.now() + EDITOR_FLASH_COOLDOWN_MS
+      if (flashQueue.current.length > 0) {
+        flashDrainTimer.current = setTimeout(tick, EDITOR_FLASH_COOLDOWN_MS)
+      }
+    }
+    const wait = Math.max(0, flashNextAt.current - Date.now())
+    flashDrainTimer.current = setTimeout(tick, wait)
+  }, [playFlash])
+
+  const flashNode = useCallback(
+    (nodeId: string) => {
+      const now = Date.now()
+      if (flashQueue.current.includes(nodeId)) return
+      const last = lastFlashAt.current.get(nodeId) ?? 0
+      if (now - last < EDITOR_FLASH_COOLDOWN_MS) return
+      flashQueue.current.push(nodeId)
+      drainFlashQueue()
+    },
+    [drainFlashQueue],
+  )
+
+  useEffect(() => {
+    const clearTimers = flashClearTimers.current
+    return () => {
+      for (const t of clearTimers.values()) clearTimeout(t)
+      clearTimers.clear()
+      if (flashDrainTimer.current) clearTimeout(flashDrainTimer.current)
+      flashDrainTimer.current = null
+      flashQueue.current = []
+    }
+  }, [])
+
+  const {
+    takeSnapshot: pushHistory,
+    undo: undoHistory,
+    redo: redoHistory,
+    clear: clearHistory,
+    canUndo,
+    canRedo,
+  } = useFlowHistory<RFNode, RFEdge>()
+
+  const snapshot = useCallback(() => {
+    pushHistory(nodesRef.current, edgesRef.current)
+  }, [pushHistory])
+
+  // Delete often emits node removes then edge removes in the same turn — one
+  // snapshot for the whole gesture, not one per handler.
+  const snapLock = useRef(false)
+  const snapshotOnce = useCallback(() => {
+    if (snapLock.current) return
+    snapLock.current = true
+    snapshot()
+    queueMicrotask(() => {
+      snapLock.current = false
+    })
+  }, [snapshot])
+
+  const restoreSnapshot = useCallback(
+    (snap: { nodes: RFNode[]; edges: RFEdge[] }) => {
+      setNodes(snap.nodes)
+      setEdges(snap.edges)
+      setDirty(true)
+    },
+    [setNodes, setEdges],
+  )
+
+  const undo = useCallback(() => {
+    undoHistory(nodesRef.current, edgesRef.current, restoreSnapshot)
+  }, [undoHistory, restoreSnapshot])
+
+  const redo = useCallback(() => {
+    redoHistory(nodesRef.current, edgesRef.current, restoreSnapshot)
+  }, [redoHistory, restoreSnapshot])
 
   useEffect(() => {
     if (!Number.isFinite(id)) {
@@ -806,9 +1064,12 @@ function FlowEditorInner() {
         setComponents(comps)
         setName(flow.flow.name)
         setComponent(flow.flow.component)
+        setEnabled(!!flow.flow.enabled)
         const rf = toRF(flow.flow.graph)
         setNodes(rf.nodes)
         setEdges(rf.edges)
+        clearHistory()
+        setDirty(false)
       } catch {
         if (!cancelled) navigate('/manage/flows', { replace: true })
       } finally {
@@ -818,7 +1079,7 @@ function FlowEditorInner() {
     return () => {
       cancelled = true
     }
-  }, [id, navigate, setNodes, setEdges])
+  }, [id, navigate, setNodes, setEdges, clearHistory])
 
   const selected = nodes.find((n) => n.selected)
   const selectedSpec = selected && !isEditorNode(selected.data.specType)
@@ -879,6 +1140,7 @@ function FlowEditorInner() {
     () =>
       nodes.map((n) => {
         const trigger = runTriggerFor(n.data.specType, n.data.config)
+        const touched = Boolean(n.data.running || n.data.report)
         return {
           ...n,
           data: {
@@ -888,6 +1150,7 @@ function FlowEditorInner() {
               : undefined,
             onRunTrigger: trigger ? () => runRef.current(!liveRef.current, trigger, n.id) : undefined,
             runDisabled: runningKind !== null,
+            dimmed: runningKind !== null && !touched && !isEditorNode(n.data.specType),
           },
         }
       }),
@@ -924,18 +1187,20 @@ function FlowEditorInner() {
 
   const onConnect = useCallback(
     (conn: Connection) => {
+      snapshot()
       setEdges((eds) => addEdge(conn, eds))
       setDirty(true)
     },
-    [setEdges],
+    [setEdges, snapshot],
   )
 
   const onReconnect = useCallback(
     (oldEdge: RFEdge, newConnection: Connection) => {
+      snapshot()
       setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds))
       setDirty(true)
     },
-    [setEdges],
+    [setEdges, snapshot],
   )
 
   /** Resolves the NodePort behind one end of a connection: subflow nodes via
@@ -1009,23 +1274,47 @@ function FlowEditorInner() {
     [findPort, nodes, propagatedTypes],
   )
 
-  // Wires take the color of the (propagated) type they carry; base items edges
-  // keep the default stroke.
+  // Wires take the color of the (propagated) type they carry; during a run,
+  // recently completed nodes also get a pulsing throughput overlay.
   const styledEdges = useMemo(
     () =>
       edges.map((e) => {
-        // The activation path — a wire into a `when` gate, or any wire out of a
-        // trigger node — reads lime, matching the sockets it connects.
+        const pulse = e.data?.pulse
+        const pulsing =
+          typeof pulse === 'number' &&
+          pulse > 0 &&
+          e.data?.pulseAt != null &&
+          Date.now() - e.data.pulseAt < 2200
         const sourceCat = specLookup.get(
           nodes.find((n) => n.id === e.source)?.data.specType ?? '',
         )?.category
-        if (e.targetHandle === 'when' || sourceCat === 'trigger')
-          return { ...e, style: { ...e.style, stroke: TRIGGER_LIME, strokeWidth: 1.5 } }
+        const strokeWidth = pulsing ? 2.5 : 1.5
+        if (e.targetHandle === 'when' || sourceCat === 'trigger') {
+          return {
+            ...e,
+            type: 'throughput' as const,
+            animated: pulsing,
+            style: { ...e.style, stroke: TRIGGER_LIME, strokeWidth },
+          }
+        }
         const dataType =
           propagatedTypes.get(`${e.source}:out:${e.sourceHandle}`) ??
           findPort(e.source, e.sourceHandle, 'out')?.dataType
-        if (!dataType || dataType === 'items') return e
-        return { ...e, style: { ...e.style, stroke: portColor(dataType), strokeWidth: 1.5 } }
+        const stroke = pulsing
+          ? '#a78bfa'
+          : dataType && dataType !== 'items'
+            ? portColor(dataType)
+            : undefined
+        return {
+          ...e,
+          type: 'throughput' as const,
+          animated: pulsing,
+          style: {
+            ...e.style,
+            ...(stroke ? { stroke } : null),
+            ...(pulsing || (dataType && dataType !== 'items') ? { strokeWidth } : null),
+          },
+        }
       }),
     [edges, findPort, propagatedTypes, nodes],
   )
@@ -1034,6 +1323,7 @@ function FlowEditorInner() {
     specType: 'editor.sticky' | 'editor.arrow' | 'editor.group',
     position?: { x: number; y: number },
   ) => {
+    snapshot()
     const n = addAt.current++
     const config = { ...EDITOR_DEFAULTS[specType] }
     const rfType = editorRfType(specType)
@@ -1058,6 +1348,7 @@ function FlowEditorInner() {
   }
 
   const addNode = (spec: NodeSpec, position?: { x: number; y: number }) => {
+    snapshot()
     const n = addAt.current++
     const config =
       spec.type === 'flow.subflow'
@@ -1096,6 +1387,7 @@ function FlowEditorInner() {
   }
 
   const addReroute = (position?: { x: number; y: number }) => {
+    snapshot()
     const n = addAt.current
     const node = newReroute(position ?? { x: 120 + n * 24, y: 120 + n * 24 })
     setNodes((ns) => [...ns.map((x) => ({ ...x, selected: false })), { ...node, selected: true }])
@@ -1107,6 +1399,7 @@ function FlowEditorInner() {
   // Double-clicking a wire drops an anchor onto it, splitting source→target into
   // source→reroute→target at the click point.
   const insertReroute = (edge: RFEdge, position: { x: number; y: number }) => {
+    snapshot()
     // Center the box (and thus the visible dot) on the click point.
     const node = newReroute({ x: position.x - 15, y: position.y - 15 })
     setNodes((ns) => [...ns.map((x) => ({ ...x, selected: false })), { ...node, selected: true }])
@@ -1119,6 +1412,7 @@ function FlowEditorInner() {
   }
 
   const removeNode = (nodeId: string) => {
+    snapshot()
     const target = nodes.find((n) => n.id === nodeId)
     if (target?.data.specType === 'editor.group') {
       setNodes((ns) =>
@@ -1148,6 +1442,7 @@ function FlowEditorInner() {
   const removeSelected = useCallback(() => {
     const ids = new Set(nodes.filter((n) => n.selected).map((n) => n.id))
     if (ids.size === 0) return
+    snapshot()
     setNodes((ns) => {
       let next = ns.filter((n) => !ids.has(n.id))
       for (const target of nodes) {
@@ -1170,11 +1465,12 @@ function FlowEditorInner() {
     setEdges((es) => es.filter((e) => !ids.has(e.source) && !ids.has(e.target)))
     setMenu(null)
     setDirty(true)
-  }, [nodes, setNodes, setEdges])
+  }, [nodes, setNodes, setEdges, snapshot])
 
   const groupSelection = useCallback(() => {
     const picked = nodes.filter((n) => n.selected && n.data.specType !== 'editor.group')
     if (picked.length < 2) return
+    snapshot()
     const bounds = getNodesBounds(picked)
     const padding = 24
     const titleH = 28
@@ -1215,7 +1511,7 @@ function FlowEditorInner() {
     ])
     setMenu(null)
     setDirty(true)
-  }, [nodes, setNodes])
+  }, [nodes, setNodes, snapshot])
 
   const copyNodes = useCallback(
     (nodeIds: string[]) => {
@@ -1241,6 +1537,7 @@ function FlowEditorInner() {
   const pasteClipboard = useCallback(() => {
     const clip = clipboardRef.current
     if (!clip) return
+    snapshot()
     const idMap = new Map<string, string>()
     for (const node of clip.nodes) {
       idMap.set(node.id, `n${Date.now().toString(36)}${addAt.current++}`)
@@ -1264,7 +1561,7 @@ function FlowEditorInner() {
     setEdges((es) => [...es, ...newEdges])
     setMenu(null)
     setDirty(true)
-  }, [setNodes, setEdges])
+  }, [setNodes, setEdges, snapshot])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1285,15 +1582,22 @@ function FlowEditorInner() {
       } else if (mod && e.key === 'g') {
         e.preventDefault()
         groupSelection()
+      } else if (mod && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undo()
+      } else if ((mod && e.key === 'y') || (mod && e.key === 'z' && e.shiftKey)) {
+        e.preventDefault()
+        redo()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [copySelection, pasteClipboard, groupSelection])
+  }, [copySelection, pasteClipboard, groupSelection, undo, redo])
 
   const duplicateNode = (nodeId: string) => {
     const src = nodes.find((n) => n.id === nodeId)
     if (!src) return
+    snapshot()
     const n = addAt.current++
     setNodes((ns) => [
       ...ns.map((node) => ({ ...node, selected: false })),
@@ -1312,6 +1616,7 @@ function FlowEditorInner() {
   }
 
   const removeEdge = (edgeId: string) => {
+    snapshot()
     setEdges((es) => es.filter((e) => e.id !== edgeId))
     setMenu(null)
     setDirty(true)
@@ -1360,6 +1665,19 @@ function FlowEditorInner() {
     }
   }
 
+  // Persists immediately, independent of unsaved graph edits — flipping
+  // automation off must not require (or wait for) a graph save.
+  const toggleEnabled = async () => {
+    const next = !enabled
+    setEnabled(next)
+    try {
+      await saveFlow(id, { enabled: next })
+    } catch (e) {
+      setEnabled(!next)
+      setError(e instanceof Error ? e.message : 'Failed to update automation')
+    }
+  }
+
   const run = async (dryRun: boolean, trigger?: RunTrigger, fromNodeId?: string) => {
     if (!dryRun && !window.confirm('Really run this flow live? It will write to the portal database.')) {
       return
@@ -1371,10 +1689,21 @@ function FlowEditorInner() {
     // the fired trigger. A whole-flow run (no fromNodeId) paints everything.
     const active = fromNodeId ? reachableFrom(fromNodeId, edges) : null
     const paint = (nodeId: string) => active === null || active.has(nodeId)
-    // Clear last run's per-node results so live progress paints from scratch.
+    // Keep prior per-node reports so cascaded/partial runs leave a full trail.
+    // Only clear running + edge pulses; the overall banner updates to this run.
     setReport(null)
     setNodes((ns) =>
-      ns.map((n) => ({ ...n, data: { ...n.data, report: undefined, running: false } })),
+      ns.map((n) => ({
+        ...n,
+        data: { ...n.data, running: false, flashUntil: undefined },
+      })),
+    )
+    setEdges((eds) =>
+      eds.map((e) => ({
+        ...e,
+        animated: false,
+        data: { ...e.data, pulse: undefined, pulseAt: undefined },
+      })),
     )
     try {
       if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
@@ -1383,16 +1712,49 @@ function FlowEditorInner() {
         id,
         dryRun,
         (ev) => {
-          if (ev.type === 'start' && paint(ev.id)) {
-            setNodes((ns) =>
-              ns.map((n) => (n.id === ev.id ? { ...n, data: { ...n.data, running: true } } : n)),
-            )
-          } else if (ev.type === 'node' && paint(ev.id)) {
+          if (ev.type === 'start') {
+            const idOnCanvas = canvasNodeId(ev.id)
+            if (!paint(idOnCanvas)) return
             setNodes((ns) =>
               ns.map((n) =>
-                n.id === ev.id ? { ...n, data: { ...n.data, report: ev.report, running: false } } : n,
+                n.id === idOnCanvas ? { ...n, data: { ...n.data, running: true } } : n,
               ),
             )
+            flashNode(idOnCanvas)
+          } else if (ev.type === 'node') {
+            const idOnCanvas = canvasNodeId(ev.id)
+            if (!paint(idOnCanvas)) return
+            const nested = ev.id.includes('/')
+            const skipped = ev.report.status === 'skipped'
+            setNodes((ns) =>
+              ns.map((n) => {
+                if (n.id !== idOnCanvas) return n
+                // Nested subflow steps keep the composite spinning until the
+                // outer node itself reports.
+                if (nested) return { ...n, data: { ...n.data, running: true } }
+                return {
+                  ...n,
+                  data: { ...n.data, report: ev.report, running: false },
+                }
+              }),
+            )
+            // Inactive switch arms are reported as skipped — don't flash them.
+            if (!skipped) flashNode(idOnCanvas)
+            if (!skipped && !nested && ev.report.counts) {
+              const nowMs = Date.now()
+              setEdges((eds) =>
+                eds.map((e) => {
+                  if (e.source !== idOnCanvas) return e
+                  const count = ev.report.counts[e.sourceHandle ?? '']
+                  if (count == null) return e
+                  return {
+                    ...e,
+                    animated: count > 0,
+                    data: { ...e.data, pulse: count, pulseAt: nowMs },
+                  }
+                }),
+              )
+            }
           }
         },
         trigger,
@@ -1400,17 +1762,41 @@ function FlowEditorInner() {
       setReport(report)
       if (report.error) setError(report.error)
       // Reconcile against the final report (covers validation errors that emit
-      // no per-node events, and any node that never streamed) — scoped to the
-      // fired trigger's branch.
+      // no per-node events, and any node that never streamed) — merge into the
+      // existing trail instead of wiping nodes outside this paint scope.
       setNodes((ns) =>
-        ns.map((n) => ({
-          ...n,
-          data: { ...n.data, report: paint(n.id) ? report.nodes[n.id] : undefined, running: false },
-        })),
+        ns.map((n) => {
+          const streamed = paint(n.id) ? report.nodes[n.id] : undefined
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              report: streamed ?? n.data.report,
+              running: false,
+            },
+          }
+        }),
       )
+      // Hold edge pulses briefly after the run so the path remains readable.
+      setTimeout(() => {
+        setEdges((eds) =>
+          eds.map((e) => ({
+            ...e,
+            animated: false,
+            data: { ...e.data, pulse: undefined, pulseAt: undefined },
+          })),
+        )
+      }, 2200)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Run failed')
       setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, running: false } })))
+      setEdges((eds) =>
+        eds.map((e) => ({
+          ...e,
+          animated: false,
+          data: { ...e.data, pulse: undefined, pulseAt: undefined },
+        })),
+      )
     } finally {
       setRunningKind(null)
     }
@@ -1467,6 +1853,26 @@ function FlowEditorInner() {
             {component?.published ? (
               <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden />
             ) : null}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
+            title="Undo (Ctrl+Z)"
+            disabled={!canUndo}
+            onClick={() => undo()}
+          >
+            <Undo2 className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
+            title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+            disabled={!canRedo}
+            onClick={() => redo()}
+          >
+            <Redo2 className="size-4" />
           </Button>
           <Button
             variant="outline"
@@ -1529,6 +1935,25 @@ function FlowEditorInner() {
               </>
             ) : null}
           </div>
+          {/* Automation on/off — whether schedules + event triggers fire this
+              flow. Independent of Dry/Live, which only shapes manual runs here. */}
+          <button
+            type="button"
+            className={`rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              enabled
+                ? 'border-input text-emerald-400 hover:bg-muted/60'
+                : 'border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+            }`}
+            title={
+              enabled
+                ? 'Automation on: schedules and event triggers fire this flow. Click to turn off.'
+                : 'Automation off: schedules skip this flow and event triggers ignore it. Manual runs still work. Click to turn on.'
+            }
+            onClick={() => void toggleEnabled()}
+          >
+            <span className="hidden sm:inline">Auto </span>
+            {enabled ? 'on' : 'off'}
+          </button>
           {/* Dry vs Live applies to every run — the per-trigger ▶ buttons and the
               whole-flow Run below. */}
           <div
@@ -1687,8 +2112,13 @@ function FlowEditorInner() {
           nodes={displayNodes}
           edges={styledEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           isValidConnection={isValidConnection}
+          deleteKeyCode={['Backspace', 'Delete']}
+          onNodeDragStart={() => snapshot()}
+          onSelectionDragStart={() => snapshot()}
           onNodesChange={(changes) => {
+            if (changes.some((c) => c.type === 'remove')) snapshotOnce()
             onNodesChange(changes)
             if (
               changes.some(
@@ -1703,6 +2133,7 @@ function FlowEditorInner() {
             }
           }}
           onEdgesChange={(changes) => {
+            if (changes.some((c) => c.type === 'remove')) snapshotOnce()
             onEdgesChange(changes)
             if (changes.some((c) => c.type === 'remove')) markDirty()
           }}
@@ -2046,24 +2477,180 @@ function FlowEditorInner() {
                       </div>
                     </>
                   ) : selected.data.specType === 'editor.arrow' ? (
-                    <>
-                      <EditorRotationField
-                        value={editorRotationFromConfig('editor.arrow', selected.data.config)}
-                        onChange={(rotation) => setConfigValue('rotation', rotation)}
-                      />
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium" htmlFor="ed-arrow-color">
-                          Color
-                        </label>
-                        <Input
-                          id="ed-arrow-color"
-                          className="h-8 font-mono"
-                          value={String(selected.data.config.color ?? '')}
-                          placeholder="CSS color"
-                          onChange={(e) => setConfigValue('color', e.target.value)}
-                        />
-                      </div>
-                    </>
+                    (() => {
+                      const arrow = normalizeArrowConfig(selected.data.config)
+                      const points = arrow.points ?? DEFAULT_ARROW_POINTS
+                      const patchArrow = (patch: Record<string, unknown>) => {
+                        const next = normalizeArrowConfig({ ...selected.data.config, ...patch })
+                        patchEditorConfig(selected.id, {
+                          ...next,
+                          rotation: undefined,
+                          direction: undefined,
+                        })
+                      }
+                      return (
+                        <>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium" htmlFor="ed-arrow-color">
+                              Color
+                            </label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                id="ed-arrow-color"
+                                type="color"
+                                className="h-8 w-10 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
+                                value={
+                                  /^#[0-9a-f]{6}$/i.test(String(arrow.color ?? ''))
+                                    ? String(arrow.color)
+                                    : '#a1a1aa'
+                                }
+                                onChange={(e) => patchArrow({ color: e.target.value })}
+                              />
+                              <Input
+                                className="h-8 font-mono"
+                                value={String(arrow.color ?? '#a1a1aa')}
+                                onChange={(e) => patchArrow({ color: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-stroke">
+                                Thickness
+                              </label>
+                              <Input
+                                id="ed-arrow-stroke"
+                                className="h-8"
+                                type="number"
+                                min={1}
+                                max={16}
+                                value={arrow.strokeWidth ?? 2}
+                                onChange={(e) =>
+                                  patchArrow({
+                                    strokeWidth: Math.min(16, Math.max(1, Number(e.target.value) || 2)),
+                                  })
+                                }
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-head-size">
+                                Head size
+                              </label>
+                              <Input
+                                id="ed-arrow-head-size"
+                                className="h-8"
+                                type="number"
+                                min={4}
+                                max={48}
+                                value={arrow.headSize ?? 10}
+                                onChange={(e) =>
+                                  patchArrow({
+                                    headSize: Math.min(48, Math.max(4, Number(e.target.value) || 10)),
+                                  })
+                                }
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-xs font-medium">Line style</span>
+                            <div className="flex gap-1">
+                              {ARROW_DASH_OPTIONS.map((opt) => (
+                                <Button
+                                  key={opt.value}
+                                  type="button"
+                                  variant={(arrow.dash ?? 'solid') === opt.value ? 'secondary' : 'outline'}
+                                  size="sm"
+                                  className="h-8 flex-1 px-2 text-xs"
+                                  onClick={() => patchArrow({ dash: opt.value })}
+                                >
+                                  {opt.label}
+                                </Button>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-start-head">
+                                Start head
+                              </label>
+                              <select
+                                id="ed-arrow-start-head"
+                                className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                                value={arrow.startHead ?? 'none'}
+                                onChange={(e) => patchArrow({ startHead: e.target.value as ArrowHead })}
+                              >
+                                {ARROW_HEAD_OPTIONS.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-end-head">
+                                End head
+                              </label>
+                              <select
+                                id="ed-arrow-end-head"
+                                className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                                value={arrow.endHead ?? 'arrow'}
+                                onChange={(e) => patchArrow({ endHead: e.target.value as ArrowHead })}
+                              >
+                                {ARROW_HEAD_OPTIONS.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-xs font-medium">Curve points</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">{points.length} points</span>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                disabled={points.length >= 8}
+                                onClick={() => {
+                                  const mid = Math.floor(points.length / 2)
+                                  const a = points[mid - 1] ?? points[0]
+                                  const b = points[mid] ?? points[points.length - 1]
+                                  const inserted = {
+                                    x: (a.x + b.x) / 2,
+                                    y: Math.min(1, Math.max(0, (a.y + b.y) / 2 - 0.12)),
+                                  }
+                                  const next = [...points.slice(0, mid), inserted, ...points.slice(mid)]
+                                  patchArrow({ points: next })
+                                }}
+                              >
+                                Add bend
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                disabled={points.length <= 2}
+                                onClick={() => {
+                                  if (points.length <= 2) return
+                                  const mid = Math.floor(points.length / 2)
+                                  const next = points.filter((_, i) => i !== mid)
+                                  patchArrow({ points: next.length >= 2 ? next : points })
+                                }}
+                              >
+                                Remove bend
+                              </Button>
+                            </div>
+                            <p className="text-[10px] text-muted-foreground">
+                              Select the arrow and drag the handles to reshape the curve.
+                            </p>
+                          </div>
+                        </>
+                      )
+                    })()
                   ) : (
                     <>
                       <div className="space-y-1">

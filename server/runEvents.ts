@@ -26,6 +26,9 @@ export type ActivityEvent =
       status: 'ok' | 'error' | 'skipped'
       notes: string[]
       error?: string
+      /** Per-output-port item counts — used by the Flow Map to animate edges. */
+      counts?: Record<string, number>
+      durationMs?: number
     }
   | { type: 'done'; runToken: string; run: FlowRunRow }
   | { type: 'aborted'; runToken: string; error: string }

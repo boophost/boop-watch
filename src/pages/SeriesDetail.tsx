@@ -9,6 +9,7 @@ import {
   ExternalLink,
   Loader2,
   Play,
+  Search,
   Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -19,6 +20,7 @@ import {
   adminChaseChipLabel,
   formatAirShort,
   formatCountdown,
+  formatRetry,
   type EpisodeChase,
 } from '@/lib/chase'
 
@@ -344,11 +346,20 @@ function chaseStepActive(
   return state === 'ready' ? 'done' : 'pending'
 }
 
-function EpisodeChasePanel({ chase }: { chase: EpisodeChase }) {
+function EpisodeChasePanel({
+  chase,
+  onWantAction,
+}: {
+  chase: EpisodeChase
+  onWantAction?: (wantId: number, action: 'retry-now' | 'abandon') => void
+}) {
   const timing =
     chase.state === 'waiting'
       ? [formatAirShort(chase.airsAt), formatCountdown(chase.airsAt)].filter(Boolean).join(' · ')
       : formatCountdown(chase.airsAt) ?? adminChaseChipLabel(chase)
+  // A want-backed search shows its retry bookkeeping and offers admin actions.
+  const searchingWant = chase.state === 'searching' && chase.wantId != null
+  const retryLabel = formatRetry(chase.nextAttemptAt)
 
   const steps: Array<{ key: 'waiting' | 'download' | 'library' | 'onsite'; label: string }> = [
     {
@@ -405,6 +416,37 @@ function EpisodeChasePanel({ chase }: { chase: EpisodeChase }) {
           )
         })}
       </div>
+      {searchingWant ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2 text-xs text-muted-foreground">
+          <span>
+            {chase.attempts ? `${chase.attempts} attempt${chase.attempts === 1 ? '' : 's'}` : 'not tried yet'}
+            {retryLabel ? ` · ${retryLabel}` : ''}
+          </span>
+          {chase.note ? <span className="truncate italic opacity-80">{chase.note}</span> : null}
+          {onWantAction ? (
+            <span className="ml-auto flex gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => onWantAction(chase.wantId!, 'retry-now')}
+              >
+                Retry now
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px] text-muted-foreground"
+                onClick={() => onWantAction(chase.wantId!, 'abandon')}
+              >
+                Abandon
+              </Button>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -430,6 +472,8 @@ export default function SeriesDetail() {
   const [dl, setDl] = useState<DownloadStatus | null>(null)
   const [busyHash, setBusyHash] = useState<string | null>(null)
   const [researchMsg, setResearchMsg] = useState('')
+  const [retriggerBusy, setRetriggerBusy] = useState(false)
+  const [retriggerMsg, setRetriggerMsg] = useState('')
 
   // Season-mapping editor (multi-season placement override).
   const [mapEdit, setMapEdit] = useState<{ tvdb_id: string; tvdb_season: string; episode_offset: string } | null>(null)
@@ -461,6 +505,39 @@ export default function SeriesDetail() {
       /* leave prior state */
     }
   }, [id])
+
+  const wantAction = async (wantId: number, action: 'retry-now' | 'abandon') => {
+    try {
+      await fetchAuth(`/api/series/${id}/wants/${wantId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      await loadDownloads()
+    } catch {
+      /* panel refresh shows the surviving state */
+    }
+  }
+
+  // Re-fire the "new title added" trigger for this series — re-runs the Show-
+  // added flow (mint wants for aired-but-missing episodes, chase them). Same
+  // event the scheduler emits on an add; fire-and-forget on the server.
+  const retriggerSearch = async () => {
+    setRetriggerBusy(true)
+    setRetriggerMsg('')
+    try {
+      const r = await fetchAuth(`/api/series/${id}/retrigger`, { method: 'POST' })
+      const raw = await parseAuthJson<{ ok?: boolean; error?: string }>(r)
+      if (!r.ok) throw new Error(raw.error ?? 'Could not start the search')
+      setRetriggerMsg('Search started — mints wants for missing episodes and chases them. Watch the Activity tab.')
+      // Give the chase a moment, then refresh the chase panel.
+      window.setTimeout(() => void loadDownloads(), 4000)
+    } catch (e) {
+      setRetriggerMsg(e instanceof Error ? e.message : 'Could not start the search')
+    } finally {
+      setRetriggerBusy(false)
+    }
+  }
 
   const removeDownload = async (hash: string, deleteFiles: boolean) => {
     setBusyHash(hash)
@@ -739,6 +816,20 @@ export default function SeriesDetail() {
             ) : null}
 
             <div className="flex flex-wrap gap-2 pt-1">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void retriggerSearch()}
+                disabled={retriggerBusy}
+                title="Re-run the Show-added flow: mint wants for aired-but-missing episodes and chase them"
+              >
+                {retriggerBusy ? (
+                  <Loader2 className="mr-1 size-3.5 animate-spin" />
+                ) : (
+                  <Search className="mr-1 size-3.5 opacity-70" />
+                )}
+                Search now
+              </Button>
               {(mal?.url ?? series.url) ? (
                 <Button variant="outline" size="sm" asChild>
                   <a href={mal?.url ?? series.url!} target="_blank" rel="noreferrer">
@@ -756,6 +847,10 @@ export default function SeriesDetail() {
                 </Button>
               ) : null}
             </div>
+
+            {retriggerMsg ? (
+              <p className="text-sm text-muted-foreground">{retriggerMsg}</p>
+            ) : null}
 
             {malError ? (
               <p className="text-sm text-amber-600 dark:text-amber-500">{malError}</p>
@@ -781,7 +876,7 @@ export default function SeriesDetail() {
             qbitConfigured={dl?.qbitConfigured ?? false}
           />
           {dl?.nextChase && dl.nextChase.state !== 'ready' ? (
-            <EpisodeChasePanel chase={dl.nextChase} />
+            <EpisodeChasePanel chase={dl.nextChase} onWantAction={wantAction} />
           ) : null}
         </div>
 
@@ -1004,7 +1099,7 @@ export default function SeriesDetail() {
           ) : null}
           {epSource === 'synthesized' || epSource === 'cache' ? (
             <p className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-500">
-              MyAnimeList is unreachable right now, so episode titles are{' '}
+              Episode metadata sources are unreachable right now, so episode titles are{' '}
               {epSource === 'cache' ? 'from our last cached copy' : 'placeholders'}. Library and
               download status below is still live.
             </p>
@@ -1185,8 +1280,7 @@ export default function SeriesDetail() {
 
           {!epLoading && episodes.length === 0 && !epError ? (
             <p className="text-sm text-muted-foreground">
-              No episode list from MyAnimeList for this entry (some formats omit
-              episodes).
+              No episode list for this entry yet (some formats omit episodes).
             </p>
           ) : null}
 
