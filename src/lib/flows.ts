@@ -114,7 +114,65 @@ export function resolveNodePorts(
   if (spec.type === 'transform.pick') {
     return { inputs: spec.inputs, outputs: [{ id: 'value', label: 'value', dataType: dt ?? 'json' }] }
   }
+  if (spec.type === 'filter.switch') {
+    return resolveSwitchPorts(config)
+  }
   return { inputs: spec.inputs, outputs: spec.outputs }
+}
+
+/** Keep in sync with parseSwitchCases / switchPorts in server/flowNodes.ts. */
+function resolveSwitchPorts(config: Record<string, unknown>): {
+  inputs: NodePort[]
+  outputs: NodePort[]
+} {
+  const raw = config.cases
+  let arr: unknown[] = []
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      arr = Array.isArray(parsed) ? parsed : []
+    } catch {
+      arr = []
+    }
+  } else if (Array.isArray(raw)) {
+    arr = raw
+  }
+  const used = new Set<string>(['else', 'in'])
+  const slug = (s: string): string => {
+    let base = s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+    if (!base || used.has(base)) {
+      if (!base) base = 'case'
+      let id = base
+      let n = 2
+      while (used.has(id)) id = `${base}_${n++}`
+      used.add(id)
+      return id
+    }
+    used.add(base)
+    return base
+  }
+  const outputs: NodePort[] = []
+  for (const entry of arr) {
+    if (typeof entry === 'string') {
+      const value = entry
+      const id = slug(value || 'case')
+      outputs.push({ id, label: value || id })
+      continue
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const o = entry as Record<string, unknown>
+    const value = String(o.value ?? o.match ?? '')
+    const labelRaw = o.label != null && String(o.label) !== '' ? String(o.label) : value
+    const label = labelRaw || 'case'
+    const id =
+      typeof o.id === 'string' && o.id.trim() ? slug(o.id.trim()) : slug(label || value || 'case')
+    outputs.push({ id, label: label || id })
+  }
+  outputs.push({ id: 'else', label: 'else' })
+  return { inputs: [{ id: 'in', label: 'in' }], outputs }
 }
 
 /** A port's declared record type is "fixed" (doesn't propagate) when it's a

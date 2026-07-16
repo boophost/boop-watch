@@ -155,9 +155,9 @@ interface MapNodeData extends Record<string, unknown> {
   flowName: string
   published: boolean
   active?: boolean
-  /** One-shot trigger flash (map group). */
-  flash?: boolean
   dimmed?: boolean
+  /** Epoch ms — remount flash burst overlay while Date.now() < this. */
+  flashUntil?: number
   specType?: string
   config?: Record<string, unknown>
   label?: string
@@ -199,7 +199,11 @@ interface LiveRun {
 interface NodeLive {
   running?: boolean
   report?: NodeReport
+  /** Epoch ms key for the flash burst overlay (also used as React key). */
+  flashUntil?: number
 }
+
+const NODE_FLASH_MS = 550
 
 // ---- layout helpers --------------------------------------------------------
 
@@ -586,7 +590,7 @@ const MapGroupNode = memo(function MapGroupNode({ data, selected }: NodeProps<Ma
         <div
           className={cn(
             'flex max-w-[min(70vw,520px)] items-center gap-2 rounded-md border bg-background/95 px-2.5 py-1 shadow-md backdrop-blur-sm',
-            data.active || data.flash ? 'border-violet-400' : selected ? 'border-ring' : 'border-border',
+            data.active ? 'border-violet-400' : selected ? 'border-ring' : 'border-border',
           )}
         >
           <span className="truncate text-sm font-semibold text-foreground">{data.flowName}</span>
@@ -595,7 +599,7 @@ const MapGroupNode = memo(function MapGroupNode({ data, selected }: NodeProps<Ma
               Component
             </span>
           ) : null}
-          {data.active || data.flash ? (
+          {data.active ? (
             <Loader2 className="size-3.5 shrink-0 animate-spin text-violet-400" />
           ) : (
             <Link
@@ -613,14 +617,12 @@ const MapGroupNode = memo(function MapGroupNode({ data, selected }: NodeProps<Ma
       <div
         className={cn(
           'h-full w-full rounded-xl bg-card/50 backdrop-blur-[1px]',
-          data.flash
-            ? 'flow-map-group-flash border-amber-300'
-            : data.active
-              ? 'flow-map-group-active border-violet-400'
-              : selected
-                ? 'border-ring'
-                : 'border-violet-400/55',
-          data.dimmed && !data.active && !data.flash ? 'opacity-45' : null,
+          data.active
+            ? 'flow-map-group-active border-violet-400'
+            : selected
+              ? 'border-ring'
+              : 'border-violet-400/55',
+          data.dimmed && !data.active ? 'opacity-45' : null,
         )}
         style={{ borderStyle: 'solid', borderWidth: borderPx }}
       />
@@ -635,11 +637,13 @@ const MapFlowNode = memo(function MapFlowNode({ data }: NodeProps<MapRFNode>) {
   const report = data.report
   const running = data.running === true
   const category = data.category ?? 'source'
+  const flashUntil = data.flashUntil
+  const flashing = typeof flashUntil === 'number' && flashUntil > Date.now()
 
   return (
     <div
       className={cn(
-        'min-w-40 max-w-52 rounded-md border bg-card text-card-foreground shadow-sm',
+        'relative min-w-40 max-w-52 rounded-md border bg-card text-card-foreground shadow-sm',
         running
           ? 'border-ring ring-2 ring-ring/30'
           : report?.status === 'error'
@@ -647,9 +651,15 @@ const MapFlowNode = memo(function MapFlowNode({ data }: NodeProps<MapRFNode>) {
             : report?.status === 'ok'
               ? 'border-emerald-500/50'
               : 'border-border',
-        data.dimmed ? 'opacity-40' : null,
+        data.dimmed && !flashing ? 'opacity-40' : null,
       )}
     >
+      {flashing ? (
+        <span
+          key={flashUntil}
+          className="flow-node-flash-burst pointer-events-none absolute inset-0 z-10 rounded-md"
+        />
+      ) : null}
       <div className="relative flex items-center gap-2 border-b border-border px-2.5 py-1.5">
         {whenPort ? (
           <Handle
@@ -984,10 +994,7 @@ function FlowMapInner() {
   const [live, setLive] = useState<LiveRun | null>(null)
   const [nodeLive, setNodeLive] = useState<Record<string, NodeLive>>({})
   const [fadeUntil, setFadeUntil] = useState(0)
-  /** Flow groups currently participating in the live run (parent + subflow targets). */
   const [liveFlowIds, setLiveFlowIds] = useState<number[]>([])
-  /** flowId → flash animation end timestamp */
-  const [flashUntil, setFlashUntil] = useState<Record<number, number>>({})
   const [queues, setQueues] = useState<Record<string, QueueStat>>({})
   const [gen, setGen] = useState(0)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
@@ -997,35 +1004,39 @@ function FlowMapInner() {
   const noteSeq = useRef(0)
   const flowsRef = useRef(flows)
   flowsRef.current = flows
-  const flashTimers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map())
+  const nodeFlashTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
-  const flashFlow = useCallback((flowId: number) => {
-    const until = Date.now() + 700
-    setFlashUntil((prev) => ({ ...prev, [flowId]: until }))
-    const prevTimer = flashTimers.current.get(flowId)
-    if (prevTimer) clearTimeout(prevTimer)
-    const t = setTimeout(() => {
-      setFlashUntil((prev) => {
-        if (prev[flowId] !== until) return prev
-        const next = { ...prev }
-        delete next[flowId]
-        return next
-      })
-      flashTimers.current.delete(flowId)
-    }, 720)
-    flashTimers.current.set(flowId, t)
+  const lightFlow = useCallback((flowId: number, opts?: { replace?: boolean }) => {
+    setLiveFlowIds((prev) => {
+      if (opts?.replace) return [flowId]
+      return prev.includes(flowId) ? prev : [...prev, flowId]
+    })
   }, [])
 
-  const lightFlow = useCallback(
-    (flowId: number, opts?: { flash?: boolean; replace?: boolean }) => {
-      setLiveFlowIds((prev) => {
-        if (opts?.replace) return [flowId]
-        return prev.includes(flowId) ? prev : [...prev, flowId]
-      })
-      if (opts?.flash !== false) flashFlow(flowId)
-    },
-    [flashFlow],
-  )
+  /** Flash canvas node(s) long enough to see instant completions. */
+  const flashCanvasNodes = useCallback((ids: string[]) => {
+    if (ids.length === 0) return
+    const until = Date.now() + NODE_FLASH_MS
+    setNodeLive((nl) => {
+      const next = { ...nl }
+      for (const id of ids) next[id] = { ...next[id], flashUntil: until }
+      return next
+    })
+    for (const id of ids) {
+      const prev = nodeFlashTimers.current.get(id)
+      if (prev) clearTimeout(prev)
+      const t = setTimeout(() => {
+        setNodeLive((nl) => {
+          const cur = nl[id]
+          if (!cur || cur.flashUntil !== until) return nl
+          const { flashUntil: _drop, ...rest } = cur
+          return { ...nl, [id]: rest }
+        })
+        nodeFlashTimers.current.delete(id)
+      }, NODE_FLASH_MS + 40)
+      nodeFlashTimers.current.set(id, t)
+    }
+  }, [])
 
   const [nodes, setNodes, onNodesChange] = useNodesState<MapRFNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MapRFEdge>([])
@@ -1330,7 +1341,7 @@ function FlowMapInner() {
           })
           setNodeLive({})
           setFadeUntil(0)
-          if (ev.flowId != null) lightFlow(ev.flowId, { replace: true, flash: true })
+          if (ev.flowId != null) lightFlow(ev.flowId, { replace: true })
           else setLiveFlowIds([])
           break
         case 'node-start': {
@@ -1344,8 +1355,9 @@ function FlowMapInner() {
             for (const mid of targets) next[mid] = { ...next[mid], running: true }
             return next
           })
+          flashCanvasNodes(targets)
           const child = subflowTargetId(flowsRef.current, parentId, ev.nodeId)
-          if (child != null) lightFlow(child, { flash: !ev.nodeId.includes('/') })
+          if (child != null) lightFlow(child)
           break
         }
         case 'node': {
@@ -1369,14 +1381,16 @@ function FlowMapInner() {
                 if (nested && mid === mapNodeId(parentId, ev.nodeId.slice(0, ev.nodeId.indexOf('/')))) {
                   next[mid] = { ...next[mid], running: true }
                 } else {
-                  next[mid] = { running: false, report }
+                  next[mid] = { ...next[mid], running: false, report }
                 }
               }
               return next
             })
+            // Flash on complete too — instant nodes often finish before start is painted.
+            flashCanvasNodes(targets)
             if (ev.nodeType === 'flow.subflow' || nested) {
               const child = subflowTargetId(flowsRef.current, parentId, ev.nodeId)
-              if (child != null) lightFlow(child, { flash: ev.nodeType === 'flow.subflow' && !nested })
+              if (child != null) lightFlow(child)
             }
             if (ev.counts) {
               const nowMs = Date.now()
@@ -1476,20 +1490,12 @@ function FlowMapInner() {
     return () => {
       cancelled = true
       ac.abort()
-      for (const t of flashTimers.current.values()) clearTimeout(t)
-      flashTimers.current.clear()
+      for (const t of nodeFlashTimers.current.values()) clearTimeout(t)
+      nodeFlashTimers.current.clear()
     }
-  }, [gen, setEdges, lightFlow])
+  }, [gen, setEdges, lightFlow, flashCanvasNodes])
 
-  const now = Date.now()
   const activeFlowIds = useMemo(() => new Set(liveFlowIds), [liveFlowIds])
-  const flashingIds = useMemo(() => {
-    const s = new Set<number>()
-    for (const [id, until] of Object.entries(flashUntil)) {
-      if (until > now) s.add(Number(id))
-    }
-    return s
-  }, [flashUntil, now])
   const dimOthers = activeFlowIds.size > 0 || (fadeUntil > Date.now() && live != null)
 
   const displayNodes = useMemo(
@@ -1497,14 +1503,12 @@ function FlowMapInner() {
       nodes.map((n) => {
         if (n.type === 'mapGroup') {
           const active = activeFlowIds.has(n.data.flowId)
-          const flash = flashingIds.has(n.data.flowId)
           return {
             ...n,
             data: {
               ...n.data,
               active,
-              flash,
-              dimmed: dimOthers && !active && !flash,
+              dimmed: dimOthers && !active,
             },
           }
         }
@@ -1519,12 +1523,13 @@ function FlowMapInner() {
             ...n.data,
             running: overlay?.running,
             report: overlay?.report,
+            flashUntil: overlay?.flashUntil,
             dimmed: dimOthers && !active,
           },
           draggable: false,
         }
       }),
-    [nodes, nodeLive, activeFlowIds, flashingIds, dimOthers],
+    [nodes, nodeLive, activeFlowIds, dimOthers],
   )
 
   const queueEntries = Object.entries(queues)
