@@ -1,7 +1,7 @@
 {
   "name": "boop-watch",
   "private": true,
-  "version": "2.72.9",
+  "version": "2.72.10",
   "description": "Public, no-login viewing portal for a curated Jellyfin collection + library manager",
   "type": "module",
   "scripts": {
