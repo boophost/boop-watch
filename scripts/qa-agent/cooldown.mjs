@@ -21,6 +21,38 @@ function saveLedger(ledger) {
   }
 }
 
+// Ordered list of Claude credentials to try. A subscription account that hits its
+// usage cap rotates to the next one, so QA keeps working across accounts. Sources
+// (in order): CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN_2..N, the
+// newline/comma-separated CLAUDE_CODE_OAUTH_TOKENS, then ANTHROPIC_API_KEY as a
+// last resort (per-token billing). QA_LOCAL_CLAUDE=1 uses the machine's existing
+// `claude` login instead.
+export function credentialPool() {
+  if (process.env.QA_LOCAL_CLAUDE) return [{ name: 'local login', kind: 'oauth', env: {} }]
+
+  const seen = new Set()
+  const creds = []
+  const addOauth = (token, name) => {
+    const t = token?.trim()
+    if (!t || seen.has(t)) return
+    seen.add(t)
+    // Pin this token and blank the others so the CLI can't silently reuse one.
+    creds.push({ name, kind: 'oauth', env: { CLAUDE_CODE_OAUTH_TOKEN: t, ANTHROPIC_API_KEY: '' } })
+  }
+
+  addOauth(process.env.CLAUDE_CODE_OAUTH_TOKEN, 'CLAUDE_CODE_OAUTH_TOKEN')
+  for (let i = 2; i <= 10; i++) addOauth(process.env[`CLAUDE_CODE_OAUTH_TOKEN_${i}`], `CLAUDE_CODE_OAUTH_TOKEN_${i}`)
+  ;(process.env.CLAUDE_CODE_OAUTH_TOKENS || '')
+    .split(/[\n,]/)
+    .forEach((t, i) => addOauth(t, `CLAUDE_CODE_OAUTH_TOKENS[${i}]`))
+
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim()
+  if (apiKey) {
+    creds.push({ name: 'ANTHROPIC_API_KEY', kind: 'api-key', env: { ANTHROPIC_API_KEY: apiKey, CLAUDE_CODE_OAUTH_TOKEN: '' } })
+  }
+  return creds
+}
+
 export function parseResetTime(raw) {
   if (!raw) return Date.now() + 3600 * 1000
   
