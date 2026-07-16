@@ -9,6 +9,7 @@ import {
   ExternalLink,
   Loader2,
   Play,
+  Search,
   Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -471,6 +472,8 @@ export default function SeriesDetail() {
   const [dl, setDl] = useState<DownloadStatus | null>(null)
   const [busyHash, setBusyHash] = useState<string | null>(null)
   const [researchMsg, setResearchMsg] = useState('')
+  const [retriggerBusy, setRetriggerBusy] = useState(false)
+  const [retriggerMsg, setRetriggerMsg] = useState('')
 
   // Season-mapping editor (multi-season placement override).
   const [mapEdit, setMapEdit] = useState<{ tvdb_id: string; tvdb_season: string; episode_offset: string } | null>(null)
@@ -513,6 +516,26 @@ export default function SeriesDetail() {
       await loadDownloads()
     } catch {
       /* panel refresh shows the surviving state */
+    }
+  }
+
+  // Re-fire the "new title added" trigger for this series — re-runs the Show-
+  // added flow (mint wants for aired-but-missing episodes, chase them). Same
+  // event the scheduler emits on an add; fire-and-forget on the server.
+  const retriggerSearch = async () => {
+    setRetriggerBusy(true)
+    setRetriggerMsg('')
+    try {
+      const r = await fetchAuth(`/api/series/${id}/retrigger`, { method: 'POST' })
+      const raw = await parseAuthJson<{ ok?: boolean; error?: string }>(r)
+      if (!r.ok) throw new Error(raw.error ?? 'Could not start the search')
+      setRetriggerMsg('Search started — mints wants for missing episodes and chases them. Watch the Activity tab.')
+      // Give the chase a moment, then refresh the chase panel.
+      window.setTimeout(() => void loadDownloads(), 4000)
+    } catch (e) {
+      setRetriggerMsg(e instanceof Error ? e.message : 'Could not start the search')
+    } finally {
+      setRetriggerBusy(false)
     }
   }
 
@@ -793,6 +816,20 @@ export default function SeriesDetail() {
             ) : null}
 
             <div className="flex flex-wrap gap-2 pt-1">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void retriggerSearch()}
+                disabled={retriggerBusy}
+                title="Re-run the Show-added flow: mint wants for aired-but-missing episodes and chase them"
+              >
+                {retriggerBusy ? (
+                  <Loader2 className="mr-1 size-3.5 animate-spin" />
+                ) : (
+                  <Search className="mr-1 size-3.5 opacity-70" />
+                )}
+                Search now
+              </Button>
               {(mal?.url ?? series.url) ? (
                 <Button variant="outline" size="sm" asChild>
                   <a href={mal?.url ?? series.url!} target="_blank" rel="noreferrer">
@@ -810,6 +847,10 @@ export default function SeriesDetail() {
                 </Button>
               ) : null}
             </div>
+
+            {retriggerMsg ? (
+              <p className="text-sm text-muted-foreground">{retriggerMsg}</p>
+            ) : null}
 
             {malError ? (
               <p className="text-sm text-amber-600 dark:text-amber-500">{malError}</p>
