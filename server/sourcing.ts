@@ -101,6 +101,9 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
     .filter(
       (r) =>
         r.status === 'completed' &&
+        // Foreign-category rows (other env / other tools on the shared qBit)
+        // are not ours to consume — same exclusion as ledgerOrphans above.
+        (r.category == null || r.category === cat) &&
         r.completed_at != null &&
         new Date(r.completed_at + 'Z').getTime() < dayAgo,
     )
