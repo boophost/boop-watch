@@ -989,9 +989,10 @@ export default function SeriesDetail() {
           ) : null}
         </div>
 
-        <ArtPicker seriesId={id} kind="banner" />
-
-        <ArtPicker seriesId={id} kind="poster" />
+        <div className="grid gap-6 lg:grid-cols-2">
+          <ArtPicker seriesId={id} kind="banner" />
+          <ArtPicker seriesId={id} kind="poster" />
+        </div>
 
         <section>
           <div className="mb-4">
