@@ -3,10 +3,13 @@
 // queue can silently drift out of tracking. Read report + two idempotent
 // fixers (backfill = adopt pre-ledger history; reconcile = safe corrections).
 
+import fs from 'node:fs'
+import path from 'node:path'
 import {
   listSeries,
   listWants,
   listLibraryFiles,
+  forgetLibraryFile,
   getTorrent,
   recordTorrentQueued,
   setTorrentStatus,
@@ -19,6 +22,17 @@ import {
   type WantRow,
 } from './db.js'
 import { qbitConfigured, qbitList, parseTorrentTags, type QbitTorrent } from './qbit.js'
+
+// qBittorrent is shared between prod and staging; each environment owns one
+// category (QBIT_CATEGORY: prod 'anime', staging 'anime-dev'). Reconciliation
+// must only look at THIS environment's slice, or prod's backfill would adopt
+// dev's torrents into prod's ledger (and each env would report the other's
+// torrents as orphans).
+const ourCategory = () => process.env.QBIT_CATEGORY || 'anime'
+async function qbitListOurs(): Promise<QbitTorrent[]> {
+  const cat = ourCategory()
+  return (await qbitList()).filter((t) => t.category === cat)
+}
 
 function allTorrentRows(): TorrentRow[] {
   return getDb().prepare('SELECT * FROM torrents').all() as TorrentRow[]
@@ -37,6 +51,10 @@ export interface SourcingLedgerReport {
   staleCompleted: { hash: string; name: string | null; completed_at: string | null }[]
   /** Sourced wants whose torrent is gone/cleaned/failed — they will never fulfil. */
   sourcedWantsDeadTorrent: { want_id: number; mal_id: number; episode: number | null; torrent_hash: string | null; torrent_status: string | null }[]
+  /** Fulfilled wants whose library file no longer exists on disk — the chase
+   * renders these as "importing" forever unless reopened (phantom rows from a
+   * DB clone, or a file deleted out-of-band). */
+  fulfilledWantsMissingFile: { want_id: number; mal_id: number; episode: number | null; library_path: string | null }[]
 }
 
 export async function sourcingLedger(): Promise<SourcingLedgerReport> {
@@ -44,7 +62,7 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
   const byHash = new Map(rows.map((r) => [r.hash, r]))
   const configured = qbitConfigured()
   let live: QbitTorrent[] = []
-  if (configured) live = await qbitList()
+  if (configured) live = await qbitListOurs()
   const liveByHash = new Map(live.map((t) => [t.hash.toLowerCase(), t]))
 
   const counts = (list: { status: string }[]) => {
@@ -63,9 +81,18 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
       tags: t.tags ?? '',
     }))
 
+  // Only judge rows that belong to our category (or predate the column):
+  // a row recorded under the other environment's category can never appear in
+  // our live slice, so "missing from qBit" would be meaningless for it.
+  const cat = ourCategory()
   const ledgerOrphans = configured
     ? rows
-        .filter((r) => LIVE_STATUSES.has(r.status) && !liveByHash.has(r.hash))
+        .filter(
+          (r) =>
+            LIVE_STATUSES.has(r.status) &&
+            (r.category == null || r.category === cat) &&
+            !liveByHash.has(r.hash),
+        )
         .map((r) => ({ hash: r.hash, name: r.name, status: r.status }))
     : []
 
@@ -74,6 +101,9 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
     .filter(
       (r) =>
         r.status === 'completed' &&
+        // Foreign-category rows (other env / other tools on the shared qBit)
+        // are not ours to consume — same exclusion as ledgerOrphans above.
+        (r.category == null || r.category === cat) &&
         r.completed_at != null &&
         new Date(r.completed_at + 'Z').getTime() < dayAgo,
     )
@@ -101,6 +131,38 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
 
+  // Fulfilled wants whose backing file is gone from disk. "Fulfilled" must
+  // mean a real on-disk file — when provenance and disk disagree, reconcile
+  // toward disk truth instead of rendering "importing" forever. Conservative:
+  // only flagged when we can point at a concrete missing path (the want's own
+  // library_path, or its episode's library_files row).
+  const root = process.env.LIBRARY_DIR ?? '/library'
+  const abs = (p: string) => (path.isAbsolute(p) ? p : path.join(root, p))
+  const libByEp = new Map<string, string>()
+  for (const f of listLibraryFiles()) {
+    if (f.mal_id != null && f.episode != null) libByEp.set(`${f.mal_id}:${f.episode}`, f.path)
+  }
+  const offsetByMal = new Map(listSeries().map((s) => [s.mal_id, s.episode_offset ?? 0]))
+  const fulfilledWantsMissingFile: SourcingLedgerReport['fulfilledWantsMissingFile'] = []
+  for (const w of wants) {
+    if (w.status !== 'fulfilled') continue
+    let candidate: string | null = null
+    if (w.library_path) {
+      candidate = abs(w.library_path)
+    } else if (w.kind === 'episode' && w.episode != null) {
+      const rel = libByEp.get(`${w.mal_id}:${w.episode + (offsetByMal.get(w.mal_id) ?? 0)}`)
+      if (rel) candidate = abs(rel)
+    }
+    if (candidate && !fs.existsSync(candidate)) {
+      fulfilledWantsMissingFile.push({
+        want_id: w.id,
+        mal_id: w.mal_id,
+        episode: w.episode,
+        library_path: candidate,
+      })
+    }
+  }
+
   return {
     qbitConfigured: configured,
     counts: { torrents: counts(rows), wants: counts(wants) },
@@ -108,6 +170,7 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
     ledgerOrphans,
     staleCompleted,
     sourcedWantsDeadTorrent,
+    fulfilledWantsMissingFile,
   }
 }
 
@@ -137,7 +200,7 @@ export async function sourcingBackfill(dryRun: boolean): Promise<BackfillResult>
   let wantsFulfilled = 0
 
   if (qbitConfigured()) {
-    for (const t of await qbitList()) {
+    for (const t of await qbitListOurs()) {
       const hash = t.hash.toLowerCase()
       if (getTorrent(hash)) continue
       adoptedFromQbit++
@@ -217,6 +280,8 @@ export interface ReconcileResult {
   orphanRowsClosed: number
   /** sourced wants pointing at dead torrents → reopened with an attempt recorded. */
   wantsReopened: number
+  /** fulfilled wants whose file vanished → reopened; dead library_files rows dropped. */
+  phantomFulfilledReopened: number
 }
 
 /** Apply the safe fixes for what `sourcingLedger` reports. */
@@ -224,6 +289,7 @@ export async function sourcingReconcile(dryRun: boolean): Promise<ReconcileResul
   const report = await sourcingLedger()
   let orphanRowsClosed = 0
   let wantsReopened = 0
+  let phantomFulfilledReopened = 0
 
   for (const o of report.ledgerOrphans) {
     orphanRowsClosed++
@@ -239,7 +305,39 @@ export async function sourcingReconcile(dryRun: boolean): Promise<ReconcileResul
     updateWantStatus(w.want_id, 'open', `reconcile: torrent ${w.torrent_hash ?? '?'} ${w.torrent_status ?? 'gone'}`)
   }
 
-  return { dryRun, orphanRowsClosed, wantsReopened }
+  // Phantom fulfilled: reopen the want, drop the dead library_files row, and
+  // demote its torrent if that row was the only thing calling it imported —
+  // otherwise the dup-guard would refuse the re-queue and the fulfil-on-skip
+  // path would just re-fulfil the want against the same phantom.
+  const db = getDb()
+  const root = process.env.LIBRARY_DIR ?? '/library'
+  for (const w of report.fulfilledWantsMissingFile) {
+    phantomFulfilledReopened++
+    if (dryRun) continue
+    const want = db.prepare('SELECT * FROM wants WHERE id = ?').get(w.want_id) as WantRow | undefined
+    const hash = want?.torrent_hash ?? null
+    if (w.library_path) {
+      const rel = path.isAbsolute(w.library_path) ? path.relative(root, w.library_path) : w.library_path
+      forgetLibraryFile(rel)
+      forgetLibraryFile(w.library_path) // rows written pre-normalisation stored absolute paths
+    }
+    db.prepare(
+      `UPDATE wants SET status = 'open', torrent_hash = NULL, library_path = NULL,
+         note = 'reconcile: fulfilled but file missing on disk', updated_at = datetime('now')
+       WHERE id = ?`,
+    ).run(w.want_id)
+    if (hash) {
+      const stillReferenced = db
+        .prepare(`SELECT 1 FROM library_files WHERE torrent_hash = ? LIMIT 1`)
+        .get(hash)
+      const t = getTorrent(hash)
+      if (!stillReferenced && t?.status === 'imported') {
+        setTorrentStatus(hash, 'failed', 'reconcile: imported but no library file survives')
+      }
+    }
+  }
+
+  return { dryRun, orphanRowsClosed, wantsReopened, phantomFulfilledReopened }
 }
 
 /** Admin action on a single want (SeriesDetail chase panel). */

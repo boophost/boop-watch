@@ -24,11 +24,24 @@ function tokens(s: string): string[] {
     .filter((t) => t.length >= 3 && !STOP.has(t) && !/^\d+$/.test(t))
 }
 
-/** Fraction of the series's distinctive tokens present in a candidate string. */
+/** Total character mass of a token set — the denominator for length-weighted
+ * overlap (long words are rarer, so they identify a series more strongly). */
+const weigh = (toks: string[]): number => toks.reduce((n, t) => n + t.length, 0)
+
+/** Fraction of the series's distinctive token *mass* present in a candidate,
+ * weighted by word length rather than word count. A plain word-count fraction
+ * lets a short filler token that happens to be a substring of an unrelated
+ * title carry a full point — e.g. "Lucky Star OVA" (tokens lucky/star) scores
+ * 1/2 = 0.5 against Re:Zero's "-Starting Life…-" because "star" ⊂ "starting",
+ * which is enough to steal every Re:Zero episode. Charging by length makes that
+ * lone short match worth only 4/9 ≈ 0.44, below the threshold, while a real
+ * name-only match ("Inuyashiki - 10") still clears it. Mirrors the fix in
+ * enrich.indexer-match's token matcher. */
 function overlap(candidate: string, seriesTokens: string[]): number {
   if (seriesTokens.length === 0) return 0
   const c = norm(candidate)
-  return seriesTokens.filter((t) => c.includes(t)).length / seriesTokens.length
+  const present = seriesTokens.filter((t) => c.includes(t))
+  return weigh(present) / weigh(seriesTokens)
 }
 
 /**
@@ -318,7 +331,7 @@ export interface EpisodeMedia {
 /** Resolve a Jellyfin Series id for a catalog row. Prefer portal (mal_id / title),
  * then fall back to a Jellyfin library search — needed when the show is in the
  * media library but not (yet) in the Public collection / portal cache. */
-async function resolveJfSeriesId(series: {
+export async function resolveJfSeriesId(series: {
   mal_id: number
   title: string
   title_english?: string | null

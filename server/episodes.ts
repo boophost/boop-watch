@@ -6,6 +6,8 @@
 import { limitedFetch } from './httpQueue.js'
 import { fetchAnimeEpisodesPage, episodeNumberFromUrl } from './jikan.js'
 import { fetchAniListMedia, type AniListMedia } from './anilist.js'
+import { jfJson, jellyfinConfigured, type JfItem } from './jellyfin.js'
+import { resolveJfSeriesId } from './downloads.js'
 import {
   getCachedEpisodes,
   upsertEpisodeAirDates,
@@ -13,6 +15,7 @@ import {
   episodesCacheInfo,
   lastFetchAttempt,
   recordFetchAttempt,
+  findByMalId,
 } from './db.js'
 
 /** One merged episode ready for display. */
@@ -96,6 +99,50 @@ async function fetchJikanEpisodeTitles(
   return out
 }
 
+/** Jellyfin/TheTVDB episode titles for a series, in MAL per-cour numbering.
+ * Jellyfin is the *earliest* source with real titles for a just-aired cour
+ * (Jikan/Kitsu/AniList lag by days), and it's the copy we actually imported.
+ * Numbers are mapped back from tvdb (IndexNumber) to MAL per-cour by subtracting
+ * `episode_offset`, and filtered to this cour's `tvdb_season`. Best-effort: [].*/
+async function fetchJellyfinEpisodeTitles(
+  series: {
+    mal_id: number
+    title: string
+    title_english?: string | null
+    title_japanese?: string | null
+    tvdb_season?: number | null
+    episode_offset?: number | null
+  },
+): Promise<{ number: number; title: string; title_japanese: string | null }[]> {
+  if (!jellyfinConfigured) return []
+  try {
+    const jfSeriesId = await resolveJfSeriesId(series)
+    if (!jfSeriesId) return []
+    const r = await jfJson<{ Items?: JfItem[] }>(`/Shows/${jfSeriesId}/Episodes`, {
+      Fields: 'OriginalTitle',
+    })
+    let items = r.Items ?? []
+    // A cour catalog row (tvdb_season set) only wants that season's episodes —
+    // IndexNumber alone collides across seasons (S1E1 vs S4E1).
+    if (series.tvdb_season != null) {
+      items = items.filter((ep) => ep.ParentIndexNumber === series.tvdb_season)
+    }
+    const offset = series.episode_offset ?? 0
+    const out: { number: number; title: string; title_japanese: string | null }[] = []
+    for (const ep of items) {
+      if (ep.IndexNumber == null) continue
+      const number = ep.IndexNumber - offset
+      const name = (ep.Name ?? '').trim()
+      // Jellyfin renders unnamed episodes as "Episode N" — not a real title.
+      if (!name || /^episode\s+\d+$/i.test(name)) continue
+      out.push({ number, title: name, title_japanese: ep.OriginalTitle?.trim() || null })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
 const firstNonEmpty = (...vals: (string | null | undefined)[]): string | null =>
   vals.find((v) => v && v.trim().length > 0)?.trim() ?? null
 
@@ -106,8 +153,20 @@ export interface FillTitlesOptions {
   finished?: boolean
   /** AniList streaming titles already fetched by the caller (avoids a re-fetch). */
   streamingTitles?: AniListMedia['streamingTitles']
-  /** Source order to try (default jikan → kitsu → anilist). */
-  sources?: ('jikan' | 'kitsu' | 'anilist')[]
+  /** Source order to try. Default jikan → kitsu → anilist → jellyfin: the MAL/
+   * Kitsu canonical titles win when present; Jellyfin/TVDB fills what they lack
+   * (the just-aired-cour case) without overriding them. */
+  sources?: ('jikan' | 'kitsu' | 'anilist' | 'jellyfin')[]
+  /** The catalog row, if already loaded — needed to resolve the Jellyfin series
+   * + its tvdb_season/episode_offset. Falls back to findByMalId. */
+  series?: {
+    mal_id: number
+    title: string
+    title_english?: string | null
+    title_japanese?: string | null
+    tvdb_season?: number | null
+    episode_offset?: number | null
+  }
 }
 
 /**
@@ -117,7 +176,7 @@ export interface FillTitlesOptions {
  * on cache freshness (cache-first).
  */
 export async function fillEpisodeTitles(malId: number, opts: FillTitlesOptions = {}): Promise<number> {
-  const sources = opts.sources ?? ['jikan', 'kitsu', 'anilist']
+  const sources = opts.sources ?? ['jikan', 'kitsu', 'anilist', 'jellyfin']
   const cached = getCachedEpisodes(malId)
   const existing = new Set(cached.map((e) => e.number))
 
@@ -128,11 +187,16 @@ export async function fillEpisodeTitles(malId: number, opts: FillTitlesOptions =
     streaming = (await fetchAniListMedia(malId))?.streamingTitles ?? []
   }
   streaming = streaming ?? []
+  const jellyfin =
+    sources.includes('jellyfin') && (opts.series ?? findByMalId(malId))
+      ? await fetchJellyfinEpisodeTitles(opts.series ?? findByMalId(malId)!)
+      : []
 
   const byNum = <T extends { number: number }>(rows: T[]) => new Map(rows.map((r) => [r.number, r]))
   const jMap = byNum(jikan)
   const kMap = byNum(kitsu)
   const sMap = byNum(streaming)
+  const fMap = byNum(jellyfin)
 
   // Airing shows: only fill numbers AniList already established. Finished shows:
   // let Jikan/Kitsu also establish existence (MAL is complete + stable there).
@@ -142,7 +206,7 @@ export async function fillEpisodeTitles(malId: number, opts: FillTitlesOptions =
     for (const n of kMap.keys()) numbers.add(n)
   }
 
-  const order = { jikan: jMap, kitsu: kMap, anilist: sMap }
+  const order = { jikan: jMap, kitsu: kMap, anilist: sMap, jellyfin: fMap }
   const rows: { number: number; title: string | null; title_japanese?: string | null; aired?: string | null }[] = []
   for (const n of numbers) {
     const title = firstNonEmpty(...sources.map((s) => order[s].get(n)?.title))

@@ -274,9 +274,9 @@ jobs:
           "
           if grep -q "cooling=true" "$GITHUB_OUTPUT"; then
             earliest=$(grep "earliest=" "$GITHUB_OUTPUT" | cut -d= -f2)
-            gh pr comment ${{ github.event.pull_request.number }} -b "<!-- qa-agent -->
+            node scripts/qa-agent/gh.mjs comment ${{ github.event.pull_request.number }} "<!-- qa-agent -->
             ### 🤖 QA agent — paused
-            
+
             QA paused — all credentials rate limited until $earliest (UTC)."
           fi
       - name: Debounce
@@ -289,8 +289,15 @@ jobs:
           sleep_time=$(( ${QA_DEBOUNCE_MS:-480000} / 1000 ))
           echo "Sleeping for $sleep_time seconds..."
           sleep $sleep_time
-          current_sha=$(gh api /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq .head.sha)
-          if [ "$current_sha" != "${{ github.sha }}" ]; then
+          # Compare against the head sha that triggered this run — NOT github.sha,
+          # which on pull_request is the *merge* commit and so never equals a head
+          # sha. That mismatch marked every run superseded, silently skipping QA
+          # while the job still reported success.
+          triggering_sha=${{ github.event.pull_request.head.sha }}
+          current_sha=$(node scripts/qa-agent/gh.mjs head-sha ${{ github.event.pull_request.number }})
+          echo "triggering head sha: $triggering_sha"
+          echo "current head sha:    $current_sha"
+          if [ "$current_sha" != "$triggering_sha" ]; then
             echo "Debounced — newer commits landed; the newer run will QA."
             echo "superseded=true" >> "$GITHUB_OUTPUT"
           fi

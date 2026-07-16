@@ -15,7 +15,8 @@ import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView } from './publicRoutes.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
-import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
+import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock, fireEvent } from './flowRoutes.js'
+import type { FlowItem } from './flowNodes.js'
 import { pruneWorkDir, assertScratchVolumeSafe } from './flowNodes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
@@ -38,6 +39,11 @@ const app = express()
 app.disable('x-powered-by')
 const PORT = parseInt(process.env.PORT ?? '3001')
 const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
+// The qBittorrent category the code-built research flow queues into. Saved flows
+// carry their own category; this is for the one graph we construct in code, so a
+// dev instance sharing qBit with prod doesn't queue into prod's category. Set
+// QBIT_CATEGORY=anime-dev on staging; default 'anime' is prod-correct.
+const QBIT_CATEGORY = process.env.QBIT_CATEGORY || 'anime'
 const AUTH_USERNAME = process.env.AUTH_USERNAME ?? 'admin'
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD ?? 'changeme'
 // .trim() guards against stray whitespace in the env value — untrimmed, a
@@ -791,7 +797,7 @@ function buildResearchGraph(seriesId: number, query: string): FlowGraph {
       { id: 'tpl', type: 'transform.template', position: { x: 520, y: 0 }, config: { field: 'torrent_query', template: query } },
       { id: 'st', type: 'enrich.anime-status', position: { x: 780, y: 0 }, config: { malField: 'mal_id', maxItems: 0 } },
       { id: 'tor', type: 'enrich.torrent-search', position: { x: 1040, y: 0 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
-      { id: 'qb', type: 'sink.qbittorrent', position: { x: 1300, y: 0 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
+      { id: 'qb', type: 'sink.qbittorrent', position: { x: 1300, y: 0 }, config: { urlField: 'torrent_magnet', category: QBIT_CATEGORY, savepath: '', paused: false } },
     ],
     edges: [
       { id: 'e1', source: 'idx', sourceHandle: 'items', target: 'pick', targetHandle: 'in' },
@@ -831,6 +837,25 @@ app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res)
   } finally {
     releaseFlowLock()
   }
+})
+
+// Re-fire the `new-item` trigger for one series — the same event the scheduler
+// emits when a title is first added. Re-runs the "Show added" flow on this
+// series (resolve airing status, mint wants for aired-but-missing episodes,
+// chain into chase-wants), using each flow's own qBit category — so unlike the
+// legacy /research route it stays env-isolated. Fire-and-forget: the flow chain
+// runs in the background and shows up in the Activity tab.
+app.post('/api/series/:id/retrigger', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) {
+    res.status(404).json({ error: 'Series not found' })
+    return
+  }
+  void fireEvent('new-item', [series as unknown as FlowItem]).catch((e) =>
+    console.error(`retrigger new-item for series ${id} failed —`, e),
+  )
+  res.json({ ok: true })
 })
 
 // ---- Season-banner candidates (admin picker + upload) ---------------------

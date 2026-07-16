@@ -1151,7 +1151,7 @@ const randomNumber: NodeImpl = {
     label: 'Random number',
     category: 'value',
     description:
-      'Emits one or more random numbers on a typed number port. Wire into "Set field from value" — one value broadcasts to every item; set Count to N to zip a distinct roll onto each item.',
+      'Emits one or more random numbers on a typed number port. Wire into "Set field from value" — one value broadcasts to every item; set Count to N to zip a distinct roll onto each item. Evaluated on demand when a live downstream node needs it (not at flow start), so a Random feeding only an untaken Switch arm stays idle.',
     inputs: [],
     outputs: [{ id: 'value', label: 'number', dataType: 'number' }],
     config: [
@@ -2071,9 +2071,9 @@ function switchPorts(config: Record<string, unknown>): { inputs: NodePort[]; out
 }
 
 /**
- * Multi-way branch: each item goes to exactly one output — the first matching
- * case, or "else". Unlike chaining Compare nodes (which can fan out), Switch
- * guarantees a single path per item.
+ * Multi-way exclusive branch: each item goes to exactly one output — the first
+ * matching case, or "else". Downstream of empty arms is not evaluated (unlike
+ * Compare, which still schedules both sides).
  */
 const switchNode: NodeImpl = {
   spec: {
@@ -2081,7 +2081,7 @@ const switchNode: NodeImpl = {
     label: 'Switch',
     category: 'filter',
     description:
-      'Routes each item to exactly one output by matching a field against an ordered list of cases (first match wins). Unmatched items go to "else". Add/remove cases in config to grow or shrink the output ports.',
+      'Exclusive multi-way branch: each item goes to exactly one output (first matching case, else "else"). Only arms that receive items run downstream — empty arms are skipped. Add/remove cases in config to grow or shrink the output ports.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
       { id: 'a', label: 'A' },
@@ -2898,9 +2898,15 @@ const torrentSearch: NodeImpl = {
       }
       queried++
 
-      // Resolve batch-vs-episode per item.
+      // Resolve batch-vs-episode per item. A pinned episode number is
+      // authoritative: whoever set it (a want) needs THAT episode, so batch
+      // mode — which ignores the pin and takes the best release for the whole
+      // title — is never a safe fallback for it.
+      const pinnedEpNum = episodeField ? asNumber(item[episodeField]) : null
       let mode = configMode
-      if (mode === 'auto') {
+      if (pinnedEpNum != null) {
+        mode = 'episode'
+      } else if (mode === 'auto') {
         const wm = String(item.want_mode ?? '')
         if (wm === 'episode' || wm === 'batch') mode = wm
         else mode = String(item.air_status ?? '') === 'airing' ? 'episode' : 'batch'
@@ -2953,6 +2959,24 @@ const torrentSearch: NodeImpl = {
                 ? raw.filter((c) => c.pinId === best.c!.pinId)
                 : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
               : []
+          // Without an id pin, title relevance can't tell seasons of a
+          // franchise apart ("Tensei shitara Slime Datta Ken" matches the
+          // "…4th Season" release). When the item knows its season, drop
+          // candidates whose own name declares a DIFFERENT one — a release
+          // with no season marker stays (S1 releases usually carry none).
+          const wantSeason = asNumber(item.tvdb_season)
+          if (wantSeason != null) {
+            const before = relevant.length
+            relevant = relevant.filter((c) => {
+              const rs = parseSeason(c.name)
+              return rs == null || rs === wantSeason
+            })
+            if (relevant.length < before) {
+              ctx.notes.push(
+                `dropped ${before - relevant.length} other-season release(s) for "${q}" (want season ${wantSeason}, no id pin)`,
+              )
+            }
+          }
         }
         const blocked = blacklistedHashes()
         const cands = relevant
@@ -2978,7 +3002,7 @@ const torrentSearch: NodeImpl = {
         } else if (mode === 'episode') {
           // A pinned episode (a want) narrows the grab to exactly that number;
           // otherwise: best release per episode, most recent first.
-          const pinnedEp = episodeField ? asNumber(item[episodeField]) : null
+          const pinnedEp = pinnedEpNum
           const byEp = new Map<number, Candidate>()
           for (const c of cands) {
             if (c.isBatch || c.episode == null) continue
@@ -3123,7 +3147,11 @@ const animeStatus: NodeImpl = {
         })
       } catch {
         // Unknown status → default to batch downstream, but route separately.
-        unknown.push({ ...item, air_status: 'unknown', want_mode: 'batch' })
+        // Never clobber an existing want_mode: an episode want must stay an
+        // episode search even when the status lookup fails (a batch fallback
+        // ignores the episode pin — that's how an S4 single got queued for an
+        // S1 episode want on prod).
+        unknown.push({ ...item, air_status: 'unknown', want_mode: item.want_mode ?? 'batch' })
       }
       // TsukiHime default limit is 120 req/min; 550ms spacing (~109/min) stays
       // under it with headroom.
@@ -4543,6 +4571,20 @@ const qbittorrentSink: NodeImpl = {
           if (wantId == null) continue
           const t = getTorrent(h)
           if (!t) continue
+          // The tracked torrent only satisfies the want when it's the same
+          // series. A cross-series hit (title relevance matched a sibling
+          // season's torrent — S4E11 for an S1 want, observed on prod) must
+          // NOT fulfil; it's a failed search, back off and retry elsewhere.
+          const wantMal = asNumber(it.mal_id)
+          const sameSeries = t.mal_id == null || wantMal == null || t.mal_id === wantMal
+          if (!sameSeries) {
+            recordWantAttempt(
+              wantId,
+              360,
+              `search matched torrent ${h.slice(0, 8)} of a different series (mal ${t.mal_id} ≠ ${wantMal}) — backing off`,
+            )
+            continue
+          }
           if (t.status === 'imported') {
             fulfilWantById(wantId, h, 'already imported by a tracked torrent')
           } else if (t.status === 'queued' || t.status === 'downloading' || t.status === 'completed') {

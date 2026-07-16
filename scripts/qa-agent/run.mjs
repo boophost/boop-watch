@@ -40,49 +40,16 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CHECKBOX_RE } from '../lib/promotion-checklist.mjs'
 import { filterCredentials, areAllCooling, getEarliestReset, recordCooldown, credentialPool } from './cooldown.mjs'
+import { ghApi } from './gh.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLAN_HEADING = '## test plan'
 const BODY_MARKER = '<!-- qa-agent -->'
 const NS = process.env.QA_NAMESPACE || 'link-apps'
 const REPO = process.env.GITHUB_REPOSITORY || process.env.QA_REPO
-const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
 
 // ---- GitHub REST ------------------------------------------------------------
-
-async function ghApi(method, path, body, attempt = 1) {
-  if (!REPO || !TOKEN) throw new Error('GITHUB_REPOSITORY and GITHUB_TOKEN are required')
-  let res
-  try {
-    res = await fetch(`https://api.github.com${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        ...(body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(30_000),
-    })
-  } catch (err) {
-    // Network-level failure (ECONNRESET/ETIMEDOUT/DNS). `fetch failed` hides the
-    // real reason in err.cause — surface it, and retry with backoff.
-    const cause = err?.cause?.code || err?.cause?.message || err?.message
-    if (attempt < 4) {
-      await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)))
-      return ghApi(method, path, body, attempt + 1)
-    }
-    throw new Error(`GitHub ${method} ${path} failed after ${attempt} attempts: ${cause}`)
-  }
-  // Retry transient server/rate-limit statuses too.
-  if ((res.status >= 500 || res.status === 429) && attempt < 4) {
-    await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)))
-    return ghApi(method, path, body, attempt + 1)
-  }
-  if (!res.ok) throw new Error(`GitHub ${method} ${path} → ${res.status} ${await res.text()}`)
-  return res.status === 204 ? null : res.json()
-}
+// Lives in gh.mjs so workflow steps on the gh-less self-hosted runner can share it.
 
 // ---- test-plan parsing ------------------------------------------------------
 

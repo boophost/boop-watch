@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ReactFlow,
@@ -117,6 +118,19 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
   sink: 'bg-rose-400',
   value: 'bg-pink-400',
   boundary: 'bg-slate-400',
+}
+
+/** Raw rgb of each category's dot — the dry-run flash glows this color, so a
+ *  firing trigger reads lime, a sink rose, etc. (matches the title dot). */
+const CATEGORY_FLASH: Record<NodeCategory, string> = {
+  trigger: '163, 230, 53',
+  source: '167, 139, 250',
+  filter: '56, 189, 248',
+  enrich: '251, 191, 36',
+  combine: '52, 211, 153',
+  sink: '251, 113, 133',
+  value: '244, 114, 182',
+  boundary: '148, 163, 184',
 }
 
 const CATEGORY_LABEL: Record<NodeCategory, string> = {
@@ -452,7 +466,8 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
   const whenPort = allInputs.find((p) => p.id === 'when')
   const inputs = allInputs.filter((p) => p.id !== 'when')
   // Trigger nodes emit an activation signal — their outputs read lime.
-  const isTrigger = (componentInfo?.component?.category ?? spec.category) === 'trigger'
+  const flashCategory: NodeCategory = componentInfo?.component?.category ?? spec.category
+  const isTrigger = flashCategory === 'trigger'
   // Effective (propagated) type per port — a generic 'items' port shows the
   // record subtype flowing through it; falls back to the declared type.
   const effIn = (p: NodePort): PortDataType => propTypes.get(`${id}:in:${p.id}`) ?? p.dataType ?? 'items'
@@ -493,11 +508,12 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
       {flashing ? (
         <span
           key={flashUntil}
-          className="flow-node-flash-burst pointer-events-none absolute inset-0 z-10 rounded-md"
+          className="flow-node-flash-burst pointer-events-none absolute"
+          style={{ '--flash-color': CATEGORY_FLASH[flashCategory] } as CSSProperties}
         />
       ) : null}
       <div
-        className="relative flex items-center gap-2 border-b border-border px-3 py-2"
+        className="relative z-[1] flex items-center gap-2 border-b border-border px-3 py-2"
         title={spec.description || undefined}
       >
         {whenPort ? (
@@ -540,7 +556,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
         </div>
       </div>
       {inputs.length > 0 ? (
-        <div className="border-b border-border py-1">
+        <div className="relative z-[1] border-b border-border py-1">
           {inputs.map((port) => (
             <div key={port.id} className="relative flex items-center gap-2 px-3 py-0.5">
               <Handle
@@ -559,7 +575,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
         </div>
       ) : null}
       {configLines.length > 0 ? (
-        <div className="space-y-0.5 border-b border-border px-3 py-1.5">
+        <div className="relative z-[1] space-y-0.5 border-b border-border px-3 py-1.5">
           {configLines.map((line) => (
             <p key={line} className="truncate text-[10px] text-muted-foreground">
               {line}
@@ -567,7 +583,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
           ))}
         </div>
       ) : null}
-      <div className="py-1">
+      <div className="relative z-[1] py-1">
         {outputs.map((port) => (
           <div key={port.id} className="relative flex items-center justify-end gap-2 px-3 py-0.5">
             {report ? (
@@ -691,7 +707,9 @@ function canvasNodeId(streamId: string): string {
   return slash >= 0 ? streamId.slice(0, slash) : streamId
 }
 
-const EDITOR_NODE_FLASH_MS = 550
+const EDITOR_NODE_FLASH_MS = 1250
+/** Minimum gap between successive node flashes (trail readability). */
+const EDITOR_FLASH_COOLDOWN_MS = 250
 
 function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
   const lockedGroups = new Map(
@@ -918,6 +936,72 @@ function FlowEditorInner() {
   const edgesRef = useRef(edges)
   nodesRef.current = nodes
   edgesRef.current = edges
+  const flashQueue = useRef<string[]>([])
+  const flashDrainTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flashNextAt = useRef(0)
+  const lastFlashAt = useRef(new Map<string, number>())
+  const flashClearTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+
+  const playFlash = useCallback((nodeId: string) => {
+    const now = Date.now()
+    lastFlashAt.current.set(nodeId, now)
+    const until = now + EDITOR_NODE_FLASH_MS
+    setNodes((ns) =>
+      ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, flashUntil: until } } : n)),
+    )
+    const prev = flashClearTimers.current.get(nodeId)
+    if (prev) clearTimeout(prev)
+    const t = setTimeout(() => {
+      flashClearTimers.current.delete(nodeId)
+      setNodes((ns) =>
+        ns.map((n) => {
+          if (n.id !== nodeId || n.data.flashUntil !== until) return n
+          return { ...n, data: { ...n.data, flashUntil: undefined } }
+        }),
+      )
+    }, EDITOR_NODE_FLASH_MS + 40)
+    flashClearTimers.current.set(nodeId, t)
+  }, [setNodes])
+
+  const drainFlashQueue = useCallback(() => {
+    if (flashDrainTimer.current != null) return
+    const tick = () => {
+      flashDrainTimer.current = null
+      const id = flashQueue.current.shift()
+      if (!id) return
+      playFlash(id)
+      flashNextAt.current = Date.now() + EDITOR_FLASH_COOLDOWN_MS
+      if (flashQueue.current.length > 0) {
+        flashDrainTimer.current = setTimeout(tick, EDITOR_FLASH_COOLDOWN_MS)
+      }
+    }
+    const wait = Math.max(0, flashNextAt.current - Date.now())
+    flashDrainTimer.current = setTimeout(tick, wait)
+  }, [playFlash])
+
+  const flashNode = useCallback(
+    (nodeId: string) => {
+      const now = Date.now()
+      if (flashQueue.current.includes(nodeId)) return
+      const last = lastFlashAt.current.get(nodeId) ?? 0
+      if (now - last < EDITOR_FLASH_COOLDOWN_MS) return
+      flashQueue.current.push(nodeId)
+      drainFlashQueue()
+    },
+    [drainFlashQueue],
+  )
+
+  useEffect(() => {
+    const clearTimers = flashClearTimers.current
+    return () => {
+      for (const t of clearTimers.values()) clearTimeout(t)
+      clearTimers.clear()
+      if (flashDrainTimer.current) clearTimeout(flashDrainTimer.current)
+      flashDrainTimer.current = null
+      flashQueue.current = []
+    }
+  }, [])
+
   const {
     takeSnapshot: pushHistory,
     undo: undoHistory,
@@ -1605,12 +1689,13 @@ function FlowEditorInner() {
     // the fired trigger. A whole-flow run (no fromNodeId) paints everything.
     const active = fromNodeId ? reachableFrom(fromNodeId, edges) : null
     const paint = (nodeId: string) => active === null || active.has(nodeId)
-    // Clear last run's per-node results so live progress paints from scratch.
+    // Keep prior per-node reports so cascaded/partial runs leave a full trail.
+    // Only clear running + edge pulses; the overall banner updates to this run.
     setReport(null)
     setNodes((ns) =>
       ns.map((n) => ({
         ...n,
-        data: { ...n.data, report: undefined, running: false, flashUntil: undefined },
+        data: { ...n.data, running: false, flashUntil: undefined },
       })),
     )
     setEdges((eds) =>
@@ -1620,22 +1705,6 @@ function FlowEditorInner() {
         data: { ...e.data, pulse: undefined, pulseAt: undefined },
       })),
     )
-    const flashNode = (nodeId: string) => {
-      const until = Date.now() + EDITOR_NODE_FLASH_MS
-      setNodes((ns) =>
-        ns.map((n) =>
-          n.id === nodeId ? { ...n, data: { ...n.data, flashUntil: until } } : n,
-        ),
-      )
-      setTimeout(() => {
-        setNodes((ns) =>
-          ns.map((n) => {
-            if (n.id !== nodeId || n.data.flashUntil !== until) return n
-            return { ...n, data: { ...n.data, flashUntil: undefined } }
-          }),
-        )
-      }, EDITOR_NODE_FLASH_MS + 40)
-    }
     try {
       if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
       setDirty(false)
@@ -1656,6 +1725,7 @@ function FlowEditorInner() {
             const idOnCanvas = canvasNodeId(ev.id)
             if (!paint(idOnCanvas)) return
             const nested = ev.id.includes('/')
+            const skipped = ev.report.status === 'skipped'
             setNodes((ns) =>
               ns.map((n) => {
                 if (n.id !== idOnCanvas) return n
@@ -1668,8 +1738,9 @@ function FlowEditorInner() {
                 }
               }),
             )
-            flashNode(idOnCanvas)
-            if (!nested && ev.report.counts) {
+            // Inactive switch arms are reported as skipped — don't flash them.
+            if (!skipped) flashNode(idOnCanvas)
+            if (!skipped && !nested && ev.report.counts) {
               const nowMs = Date.now()
               setEdges((eds) =>
                 eds.map((e) => {
@@ -1691,13 +1762,20 @@ function FlowEditorInner() {
       setReport(report)
       if (report.error) setError(report.error)
       // Reconcile against the final report (covers validation errors that emit
-      // no per-node events, and any node that never streamed) — scoped to the
-      // fired trigger's branch.
+      // no per-node events, and any node that never streamed) — merge into the
+      // existing trail instead of wiping nodes outside this paint scope.
       setNodes((ns) =>
-        ns.map((n) => ({
-          ...n,
-          data: { ...n.data, report: paint(n.id) ? report.nodes[n.id] : undefined, running: false },
-        })),
+        ns.map((n) => {
+          const streamed = paint(n.id) ? report.nodes[n.id] : undefined
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              report: streamed ?? n.data.report,
+              running: false,
+            },
+          }
+        }),
       )
       // Hold edge pulses briefly after the run so the path remains readable.
       setTimeout(() => {
