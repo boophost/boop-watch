@@ -177,6 +177,14 @@ function topoOrder(graph: FlowGraph): FlowNode[] | null {
   return order.length === graph.nodes.length ? order : null
 }
 
+/**
+ * Exclusive routers (Switch): only non-empty output arms activate downstream.
+ * Splitters like Compare still schedule both branches even when one side is empty.
+ */
+function isExclusiveRouter(type: string): boolean {
+  return type === 'filter.switch'
+}
+
 /** Live per-node progress callbacks, fired as the executor walks the graph. */
 export interface RunHooks {
   /** A node is about to run (after its inputs are gathered). */
@@ -247,36 +255,75 @@ export async function runFlow(
     return { ok: false, dryRun, startedAt, durationMs: Date.now() - t0, nodes: {}, error: invalid }
   }
 
-  const order = topoOrder(executableGraph(graph))!
+  const runnable = executableGraph(graph)
+  const order = topoOrder(runnable)!
+  const nodeById = new Map(runnable.nodes.map((n) => [n.id, n]))
   // node id -> output handle -> items
   const buffers = new Map<string, Record<string, FlowItem[]>>()
   const failed = new Set<string>()
+  /** Nodes that actually ran (or were roots). Used for exclusive-router gating. */
+  const active = new Set<string>()
+
+  /** An incoming edge activates its target when the source ran and — for
+   * exclusive routers like Switch — the specific output arm carried items. */
+  const edgeActivates = (e: FlowEdge): boolean => {
+    if (failed.has(e.source) || !active.has(e.source)) return false
+    const src = nodeById.get(e.source)
+    if (!src) return false
+    if (isExclusiveRouter(src.type)) {
+      return (buffers.get(e.source)?.[e.sourceHandle]?.length ?? 0) > 0
+    }
+    return true
+  }
 
   for (const node of order) {
     if (isEditorNode(node.type)) continue
     const impl = NODE_REGISTRY.get(node.type)!
     const reportKey = qid(node.id)
     const incoming = graph.edges.filter((e) => e.target === node.id)
+    const outPorts = () => impl.resolvePorts?.(node.config ?? {}).outputs ?? impl.spec.outputs
+    const emitEmpty = (status: NodeReport['status'], notes: string[], error?: string) => {
+      const ports = outPorts()
+      const emptyOutputs: Record<string, FlowItem[]> = {}
+      for (const p of ports) emptyOutputs[p.id] = []
+      buffers.set(node.id, emptyOutputs)
+      reports[reportKey] = {
+        status,
+        durationMs: 0,
+        counts: Object.fromEntries(ports.map((p) => [p.id, 0])),
+        samples: {},
+        notes,
+        ...(error ? { error } : {}),
+      }
+      hooks?.onNodeDone?.(reportKey, reports[reportKey])
+    }
 
     // Skip nodes downstream of a failure so one broken source doesn't cascade
     // into misleading per-node errors.
     if (incoming.some((e) => failed.has(e.source))) {
       failed.add(node.id)
-      reports[reportKey] = {
-        status: 'skipped',
-        durationMs: 0,
-        counts: {},
-        samples: {},
-        notes: ['skipped: upstream node failed'],
-      }
-      hooks?.onNodeDone?.(reportKey, reports[reportKey])
+      emitEmpty('skipped', ['skipped: upstream node failed'])
+      continue
+    }
+
+    // Exclusive Switch: only arms that emitted items schedule downstream. A node
+    // fed solely by empty/inactive switch arms (or by nodes skipped for that
+    // reason) must not run — otherwise every wired branch would still evaluate.
+    // Silent: no report/hooks, so the live UI doesn't flash or overwrite a prior
+    // trail on the untaken arms.
+    if (incoming.length > 0 && !incoming.some(edgeActivates)) {
+      const ports = outPorts()
+      const emptyOutputs: Record<string, FlowItem[]> = {}
+      for (const p of ports) emptyOutputs[p.id] = []
+      buffers.set(node.id, emptyOutputs)
       continue
     }
 
     hooks?.onNodeStart?.(reportKey)
 
     const inputs: Record<string, FlowItem[]> = {}
-    for (const port of impl.spec.inputs) inputs[port.id] = []
+    const inPorts = impl.resolvePorts?.(node.config ?? {}).inputs ?? impl.spec.inputs
+    for (const port of inPorts) inputs[port.id] = []
     for (const e of incoming) {
       const produced = buffers.get(e.source)?.[e.sourceHandle] ?? []
       inputs[e.targetHandle] = [...(inputs[e.targetHandle] ?? []), ...produced]
@@ -289,18 +336,10 @@ export async function runFlow(
     // normally, so existing flows are unaffected.
     const whenWired = incoming.some((e) => e.targetHandle === 'when')
     if (whenWired && (inputs.when?.length ?? 0) === 0) {
-      const outPorts = impl.resolvePorts?.(node.config ?? {}).outputs ?? impl.spec.outputs
-      const emptyOutputs: Record<string, FlowItem[]> = {}
-      for (const p of outPorts) emptyOutputs[p.id] = []
-      buffers.set(node.id, emptyOutputs)
-      reports[reportKey] = {
-        status: 'ok',
-        durationMs: 0,
-        counts: Object.fromEntries(outPorts.map((p) => [p.id, 0])),
-        samples: {},
-        notes: ['gated: not triggered'],
-      }
-      hooks?.onNodeDone?.(reportKey, reports[reportKey])
+      emitEmpty('ok', ['gated: not triggered'])
+      // Gated sources still count as active so non-when edges from them could
+      // matter; they emitted empty, so exclusive consumers stay inactive.
+      active.add(node.id)
       continue
     }
 
@@ -320,6 +359,7 @@ export async function runFlow(
       const injected = node.type === 'boundary.input' ? injectOutput?.(node) ?? null : null
       const outputs = injected !== null ? { items: injected } : await impl.run(inputs, node.config ?? {}, ctx)
       buffers.set(node.id, outputs)
+      active.add(node.id)
       reports[reportKey] = {
         status: 'ok',
         durationMs: Date.now() - nodeT0,
@@ -343,6 +383,6 @@ export async function runFlow(
     hooks?.onNodeDone?.(reportKey, reports[reportKey])
   }
 
-  const ok = Object.values(reports).every((r) => r.status === 'ok')
+  const ok = Object.values(reports).every((r) => r.status !== 'error')
   return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports, finalInputs, fires: fireQueue }
 }
