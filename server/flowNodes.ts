@@ -2008,6 +2008,170 @@ const compare: NodeImpl = {
   },
 }
 
+/** Parse switch cases from config (`cases` JSON array or string[]). */
+function parseSwitchCases(config: Record<string, unknown>): { id: string; label: string; value: string }[] {
+  const raw = config.cases
+  let arr: unknown[] = []
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      arr = Array.isArray(parsed) ? parsed : []
+    } catch {
+      arr = []
+    }
+  } else if (Array.isArray(raw)) {
+    arr = raw
+  }
+  const used = new Set<string>(['else', 'in'])
+  const slug = (s: string): string => {
+    let base = s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+    if (!base || used.has(base)) {
+      if (!base) base = 'case'
+      let id = base
+      let n = 2
+      while (used.has(id)) id = `${base}_${n++}`
+      used.add(id)
+      return id
+    }
+    used.add(base)
+    return base
+  }
+  const out: { id: string; label: string; value: string }[] = []
+  for (const entry of arr) {
+    if (typeof entry === 'string') {
+      const value = entry
+      const id = slug(value || 'case')
+      out.push({ id, label: value || id, value })
+      continue
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const o = entry as Record<string, unknown>
+    const value = String(o.value ?? o.match ?? '')
+    const labelRaw = o.label != null && String(o.label) !== '' ? String(o.label) : value
+    const label = labelRaw || 'case'
+    const id =
+      typeof o.id === 'string' && o.id.trim() ? slug(o.id.trim()) : slug(label || value || 'case')
+    out.push({ id, label: label || id, value })
+  }
+  return out
+}
+
+function switchPorts(config: Record<string, unknown>): { inputs: NodePort[]; outputs: NodePort[] } {
+  const cases = parseSwitchCases(config)
+  return {
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      ...cases.map((c) => ({ id: c.id, label: c.label })),
+      { id: 'else', label: 'else' },
+    ],
+  }
+}
+
+/**
+ * Multi-way branch: each item goes to exactly one output — the first matching
+ * case, or "else". Unlike chaining Compare nodes (which can fan out), Switch
+ * guarantees a single path per item.
+ */
+const switchNode: NodeImpl = {
+  spec: {
+    type: 'filter.switch',
+    label: 'Switch',
+    category: 'filter',
+    description:
+      'Routes each item to exactly one output by matching a field against an ordered list of cases (first match wins). Unmatched items go to "else". Add/remove cases in config to grow or shrink the output ports.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' },
+      { id: 'else', label: 'else' },
+    ],
+    config: [
+      {
+        key: 'field',
+        label: 'Field',
+        kind: 'text',
+        default: 'value',
+        help: 'Item field to match on (dot paths work).',
+      },
+      {
+        key: 'match',
+        label: 'Match',
+        kind: 'select',
+        options: [
+          { value: 'eq', label: '= equals' },
+          { value: 'contains', label: 'contains' },
+          { value: 'matches', label: 'matches regex' },
+        ],
+        default: 'eq',
+      },
+      {
+        key: 'caseSensitive',
+        label: 'Case sensitive',
+        kind: 'boolean',
+        default: false,
+      },
+      {
+        key: 'cases',
+        label: 'Cases',
+        kind: 'json',
+        default: '[\n  { "value": "a", "label": "A" },\n  { "value": "b", "label": "B" }\n]',
+        help: 'JSON array of cases, in priority order. Each entry is a string, or { "value", "label?", "id?" }. Port handles use id (or a slug of label/value). First matching case wins; no match → else.',
+      },
+    ],
+  },
+  resolvePorts: switchPorts,
+  async run(inputs, config, ctx) {
+    const field = str(config, 'field', 'value')
+    const match = str(config, 'match', 'eq')
+    const caseSensitive = bool(config, 'caseSensitive', false)
+    const cases = parseSwitchCases(config)
+    const buckets: Record<string, FlowItem[]> = { else: [] }
+    for (const c of cases) buckets[c.id] = []
+
+    const matches = (left: unknown, value: string): boolean => {
+      if (match === 'matches') {
+        try {
+          return new RegExp(value, caseSensitive ? '' : 'i').test(String(left ?? ''))
+        } catch {
+          return false
+        }
+      }
+      const L = caseSensitive ? String(left ?? '') : String(left ?? '').toLowerCase()
+      const R = caseSensitive ? value : value.toLowerCase()
+      if (match === 'contains') return L.includes(R)
+      return L === R
+    }
+
+    let routed = 0
+    for (const item of allInputs(inputs)) {
+      const left = fieldValue(item, field)
+      let hit: string | null = null
+      for (const c of cases) {
+        if (matches(left, c.value)) {
+          hit = c.id
+          break
+        }
+      }
+      const dest = hit ?? 'else'
+      buckets[dest]!.push(item)
+      routed += 1
+    }
+    const summary = Object.entries(buckets)
+      .filter(([, items]) => items.length > 0)
+      .map(([id, items]) => `${id}:${items.length}`)
+      .join(', ')
+    ctx.notes.push(
+      cases.length === 0
+        ? `no cases configured — ${routed} item(s) → else`
+        : `routed ${routed} item(s) [${summary || 'none'}]`,
+    )
+    return buckets
+  },
+}
+
 /** Per-item coin flip: each item independently rolls into pass or fail. */
 const chance: NodeImpl = {
   spec: {
@@ -5696,6 +5860,7 @@ const IMPLS: NodeImpl[] = [
   qbittorrentSource,
   fieldFilter,
   compare,
+  switchNode,
   chance,
   sortNode,
   compute,
