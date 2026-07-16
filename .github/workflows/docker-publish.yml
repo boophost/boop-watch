@@ -274,16 +274,10 @@ jobs:
           "
           if grep -q "cooling=true" "$GITHUB_OUTPUT"; then
             earliest=$(grep "earliest=" "$GITHUB_OUTPUT" | cut -d= -f2)
-            # Self-hosted runner has no `gh` — post via the REST API.
-            body=$(node -e 'const e=process.argv[1]; console.log(JSON.stringify({body:`<!-- qa-agent -->\n### 🤖 QA agent — paused\n\nQA paused — all credentials rate limited until ${e} (UTC).`}))' "$earliest")
-            curl -fsS -X POST \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              -H "Content-Type: application/json" \
-              -d "$body" \
-              "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
-              >/dev/null
+            node scripts/qa-agent/gh.mjs comment ${{ github.event.pull_request.number }} "<!-- qa-agent -->
+            ### 🤖 QA agent — paused
+
+            QA paused — all credentials rate limited until $earliest (UTC)."
           fi
       - name: Debounce
         id: debounce
@@ -309,18 +303,12 @@ jobs:
           MAX_MS="${QA_DEBOUNCE_MS:-180000}"
           QUIET_MS="${QA_DEBOUNCE_QUIET_MS:-30000}"
           POLL_MS="${QA_DEBOUNCE_POLL_MS:-15000}"
-          REPO='${{ github.repository }}'
           PR='${{ github.event.pull_request.number }}'
           START_MS=$(($(date +%s%3N)))
           QUIET_SINCE_MS="$START_MS"
 
           head_sha() {
-            curl -fsS \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${REPO}/pulls/${PR}" \
-              | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const s=JSON.parse(d).head?.sha; if(!s) process.exit(2); process.stdout.write(s)})"
+            node scripts/qa-agent/gh.mjs head-sha "$PR"
           }
 
           echo "Debounce: trigger=${TRIGGER_SHA:0:7} quiet=${QUIET_MS}ms poll=${POLL_MS}ms cap=${MAX_MS}ms"
