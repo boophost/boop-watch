@@ -203,7 +203,9 @@ interface NodeLive {
   flashUntil?: number
 }
 
-const NODE_FLASH_MS = 550
+const NODE_FLASH_MS = 1250
+/** Minimum gap between successive node flashes (trail readability). */
+const FLASH_COOLDOWN_MS = 250
 
 // ---- layout helpers --------------------------------------------------------
 
@@ -657,10 +659,10 @@ const MapFlowNode = memo(function MapFlowNode({ data }: NodeProps<MapRFNode>) {
       {flashing ? (
         <span
           key={flashUntil}
-          className="flow-node-flash-burst pointer-events-none absolute inset-0 z-10 rounded-md"
+          className="flow-node-flash-burst pointer-events-none absolute rounded-md"
         />
       ) : null}
-      <div className="relative flex items-center gap-2 border-b border-border px-2.5 py-1.5">
+      <div className="relative z-[1] flex items-center gap-2 border-b border-border px-2.5 py-1.5">
         {whenPort ? (
           <Handle
             id={whenPort.id}
@@ -683,7 +685,7 @@ const MapFlowNode = memo(function MapFlowNode({ data }: NodeProps<MapRFNode>) {
         </div>
       </div>
       {inputs.length > 0 ? (
-        <div className="border-b border-border py-0.5">
+        <div className="relative z-[1] border-b border-border py-0.5">
           {inputs.map((port) => (
             <div key={port.id} className="relative flex items-center gap-1.5 px-2.5 py-0.5">
               <Handle
@@ -699,7 +701,7 @@ const MapFlowNode = memo(function MapFlowNode({ data }: NodeProps<MapRFNode>) {
           ))}
         </div>
       ) : null}
-      <div className="py-0.5">
+      <div className="relative z-[1] py-0.5">
         {outputs.map((port) => (
           <div key={port.id} className="relative flex items-center justify-end gap-1.5 px-2.5 py-0.5">
             {report ? (
@@ -1004,7 +1006,11 @@ function FlowMapInner() {
   const noteSeq = useRef(0)
   const flowsRef = useRef(flows)
   flowsRef.current = flows
-  const nodeFlashTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const flashQueue = useRef<string[]>([])
+  const flashDrainTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flashNextAt = useRef(0)
+  const lastFlashAt = useRef<Map<string, number>>(new Map())
+  const flashClearTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const lightFlow = useCallback((flowId: number, opts?: { replace?: boolean }) => {
     setLiveFlowIds((prev) => {
@@ -1013,30 +1019,56 @@ function FlowMapInner() {
     })
   }, [])
 
-  /** Flash canvas node(s) long enough to see instant completions. */
-  const flashCanvasNodes = useCallback((ids: string[]) => {
-    if (ids.length === 0) return
-    const until = Date.now() + NODE_FLASH_MS
-    setNodeLive((nl) => {
-      const next = { ...nl }
-      for (const id of ids) next[id] = { ...next[id], flashUntil: until }
-      return next
-    })
-    for (const id of ids) {
-      const prev = nodeFlashTimers.current.get(id)
-      if (prev) clearTimeout(prev)
-      const t = setTimeout(() => {
-        setNodeLive((nl) => {
-          const cur = nl[id]
-          if (!cur || cur.flashUntil !== until) return nl
-          const { flashUntil: _drop, ...rest } = cur
-          return { ...nl, [id]: rest }
-        })
-        nodeFlashTimers.current.delete(id)
-      }, NODE_FLASH_MS + 40)
-      nodeFlashTimers.current.set(id, t)
-    }
+  const playFlash = useCallback((id: string) => {
+    const now = Date.now()
+    lastFlashAt.current.set(id, now)
+    const until = now + NODE_FLASH_MS
+    setNodeLive((nl) => ({ ...nl, [id]: { ...nl[id], flashUntil: until } }))
+    const prevClear = flashClearTimers.current.get(id)
+    if (prevClear) clearTimeout(prevClear)
+    const t = setTimeout(() => {
+      setNodeLive((nl) => {
+        const cur = nl[id]
+        if (!cur || cur.flashUntil !== until) return nl
+        return { ...nl, [id]: { ...cur, flashUntil: undefined } }
+      })
+      flashClearTimers.current.delete(id)
+    }, NODE_FLASH_MS + 40)
+    flashClearTimers.current.set(id, t)
   }, [])
+
+  const drainFlashQueue = useCallback(() => {
+    if (flashDrainTimer.current != null) return
+    const tick = () => {
+      flashDrainTimer.current = null
+      const id = flashQueue.current.shift()
+      if (!id) return
+      playFlash(id)
+      flashNextAt.current = Date.now() + FLASH_COOLDOWN_MS
+      if (flashQueue.current.length > 0) {
+        flashDrainTimer.current = setTimeout(tick, FLASH_COOLDOWN_MS)
+      }
+    }
+    const wait = Math.max(0, flashNextAt.current - Date.now())
+    flashDrainTimer.current = setTimeout(tick, wait)
+  }, [playFlash])
+
+  /** Queue flashes with a 250ms gap so a fast run still reads as a trail. */
+  const flashCanvasNodes = useCallback(
+    (ids: string[]) => {
+      const now = Date.now()
+      let added = false
+      for (const id of ids) {
+        if (flashQueue.current.includes(id)) continue
+        const last = lastFlashAt.current.get(id) ?? 0
+        if (now - last < FLASH_COOLDOWN_MS) continue
+        flashQueue.current.push(id)
+        added = true
+      }
+      if (added) drainFlashQueue()
+    },
+    [drainFlashQueue],
+  )
 
   const [nodes, setNodes, onNodesChange] = useNodesState<MapRFNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MapRFEdge>([])
@@ -1189,7 +1221,7 @@ function FlowMapInner() {
         style: { stroke: 'rgba(167,139,250,0.45)', strokeWidth: 1.5 },
       })),
     )
-    setNodeLive({})
+    // Keep nodeLive paint — canvas node ids are stable across rebuilds.
   }, [hideComponents, flows, specs, setNodes, setEdges, attachStickies])
 
   const onNodeDragStart = useCallback(
@@ -1339,7 +1371,14 @@ function FlowMapInner() {
             startedAt: ev.startedAt,
             nodes: [],
           })
-          setNodeLive({})
+          // Keep prior node reports so cascaded/subflow runs don't erase the trail.
+          setNodeLive((nl) => {
+            const next: Record<string, NodeLive> = {}
+            for (const [id, cur] of Object.entries(nl)) {
+              next[id] = { ...cur, running: false }
+            }
+            return next
+          })
           setFadeUntil(0)
           if (ev.flowId != null) lightFlow(ev.flowId, { replace: true })
           else setLiveFlowIds([])
@@ -1386,7 +1425,7 @@ function FlowMapInner() {
               }
               return next
             })
-            // Flash on complete too — instant nodes often finish before start is painted.
+            // Flash on complete only if start was skipped (instant nodes).
             flashCanvasNodes(targets)
             if (ev.nodeType === 'flow.subflow' || nested) {
               const child = subflowTargetId(flowsRef.current, parentId, ev.nodeId)
@@ -1490,8 +1529,11 @@ function FlowMapInner() {
     return () => {
       cancelled = true
       ac.abort()
-      for (const t of nodeFlashTimers.current.values()) clearTimeout(t)
-      nodeFlashTimers.current.clear()
+      if (flashDrainTimer.current) clearTimeout(flashDrainTimer.current)
+      flashDrainTimer.current = null
+      flashQueue.current = []
+      for (const t of flashClearTimers.current.values()) clearTimeout(t)
+      flashClearTimers.current.clear()
     }
   }, [gen, setEdges, lightFlow, flashCanvasNodes])
 
