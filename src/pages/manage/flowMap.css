@@ -24,27 +24,37 @@
   }
 }
 
-/* Per-node burst when a step runs (incl. instant finishes). Remount via key to replay. */
+/* Slow expanding burst behind the node (remount via key to replay). */
 .flow-node-flash-burst {
-  border: 2px solid rgba(250, 204, 21, 0.95);
+  z-index: 0;
+  inset: -14px;
+  border-radius: 12px;
+  border: 2px solid rgba(250, 204, 21, 0.85);
+  background: rgba(167, 139, 250, 0.12);
   box-shadow:
-    0 0 0 2px rgba(167, 139, 250, 0.45),
-    0 0 18px 2px rgba(167, 139, 250, 0.4);
-  animation: flow-node-flash-burst 0.55s ease-out 1 forwards;
+    0 0 0 2px rgba(167, 139, 250, 0.35),
+    0 0 28px 6px rgba(167, 139, 250, 0.35);
+  animation: flow-node-flash-burst 1.25s ease-out 1 forwards;
+  transform-origin: center center;
 }
 
 @keyframes flow-node-flash-burst {
   0% {
-    opacity: 1;
+    opacity: 0.95;
+    transform: scale(0.88);
     border-color: rgba(250, 204, 21, 1);
-    box-shadow:
-      0 0 0 3px rgba(250, 204, 21, 0.7),
-      0 0 22px 4px rgba(167, 139, 250, 0.55);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1.06);
+    border-color: rgba(250, 204, 21, 0.9);
   }
   100% {
     opacity: 0;
-    border-color: rgba(167, 139, 250, 0.2);
+    transform: scale(1.38);
+    border-color: rgba(167, 139, 250, 0.15);
     box-shadow: 0 0 0 0 rgba(167, 139, 250, 0);
+    background: rgba(167, 139, 250, 0);
   }
 }
 
