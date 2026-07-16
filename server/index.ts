@@ -10,7 +10,7 @@ import {
   fetchAnimeFull,
 } from './jikan.js'
 import * as seriesDb from './db.js'
-import { getEpisodesForDisplay } from './episodes.js'
+import { getEpisodesForDisplay, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView } from './publicRoutes.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
@@ -426,7 +426,9 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
       mal_id: series.mal_id,
       url: malUrl,
       title: e.title ?? `Episode ${e.number}`,
-      title_japanese: e.title_japanese,
+      // No source has published a real title yet — the `title` above is the
+      // placeholder, not a name anyone wrote.
+      title_pending: e.titlePending,
       aired: e.aired,
       filler: false,
       recap: false,
@@ -445,22 +447,25 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
     const cached = seriesDb.getCachedEpisodes(series.mal_id)
     const rows =
       cached.length > 0
-        ? cached.map((c) => ({
-            mal_id: series.mal_id,
-            url: malUrl,
-            title: c.title ?? `Episode ${c.number}`,
-            title_japanese: c.title_japanese ?? null,
-            aired: c.aired ?? null,
-            filler: false,
-            recap: false,
-            episode: c.number,
-          }))
+        ? cached.map((c) => {
+            const proper = isProperTitle(c.title, c.title_source)
+            return {
+              mal_id: series.mal_id,
+              url: malUrl,
+              title: proper ? (c.title as string) : `Episode ${c.number}`,
+              title_pending: !proper,
+              aired: c.aired ?? null,
+              filler: false,
+              recap: false,
+              episode: c.number,
+            }
+          })
         : total && total > 0
           ? Array.from({ length: total }, (_, i) => ({
               mal_id: series.mal_id,
               url: malUrl,
               title: `Episode ${i + 1}`,
-              title_japanese: null,
+              title_pending: true,
               aired: null,
               filler: false,
               recap: false,
