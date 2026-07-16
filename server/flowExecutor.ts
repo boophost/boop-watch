@@ -185,6 +185,16 @@ function isExclusiveRouter(type: string): boolean {
   return type === 'filter.switch'
 }
 
+/**
+ * Pure value producers (Random, Text, Number, …) have no inputs so topo-order
+ * would run them at the start of every flow. They are demand-driven instead:
+ * only evaluated when an active downstream consumer pulls them (e.g. once the
+ * path reaches the Switch / Set-field that needs the value).
+ */
+function isLazyProducer(type: string): boolean {
+  return type.startsWith('value.')
+}
+
 /** Live per-node progress callbacks, fired as the executor walks the graph. */
 export interface RunHooks {
   /** A node is about to run (after its inputs are gathered). */
@@ -256,13 +266,30 @@ export async function runFlow(
   }
 
   const runnable = executableGraph(graph)
-  const order = topoOrder(runnable)!
+  // Cycle check (also used by validateGraph); execution is demand-driven below.
+  if (topoOrder(runnable) === null) {
+    return { ok: false, dryRun, startedAt, durationMs: Date.now() - t0, nodes: {}, error: 'Graph has a cycle' }
+  }
   const nodeById = new Map(runnable.nodes.map((n) => [n.id, n]))
+  const outgoing = new Map<string, FlowEdge[]>()
+  const incoming = new Map<string, FlowEdge[]>()
+  for (const n of runnable.nodes) {
+    outgoing.set(n.id, [])
+    incoming.set(n.id, [])
+  }
+  for (const e of runnable.edges) {
+    outgoing.get(e.source)?.push(e)
+    incoming.get(e.target)?.push(e)
+  }
+
   // node id -> output handle -> items
   const buffers = new Map<string, Record<string, FlowItem[]>>()
   const failed = new Set<string>()
-  /** Nodes that actually ran (or were roots). Used for exclusive-router gating. */
+  /** Nodes that produced outputs (including gated empties). Exclusive-router gating. */
   const active = new Set<string>()
+  /** Finished ensureRan (ran, gated, failed, or silent-skipped). */
+  const settled = new Set<string>()
+  const ensuring = new Set<string>()
 
   /** An incoming edge activates its target when the source ran and — for
    * exclusive routers like Switch — the specific output arm carried items. */
@@ -276,17 +303,45 @@ export async function runFlow(
     return true
   }
 
-  for (const node of order) {
-    if (isEditorNode(node.type)) continue
+  const emptyBuffers = (node: FlowNode) => {
     const impl = NODE_REGISTRY.get(node.type)!
+    const ports = impl.resolvePorts?.(node.config ?? {}).outputs ?? impl.spec.outputs
+    const out: Record<string, FlowItem[]> = {}
+    for (const p of ports) out[p.id] = []
+    return { ports, out }
+  }
+
+  const scheduleActivated = (nodeId: string, pending: Set<string>) => {
+    for (const e of outgoing.get(nodeId) ?? []) {
+      if (edgeActivates(e)) pending.add(e.target)
+    }
+  }
+
+  async function ensureRan(nodeId: string, pending: Set<string>): Promise<void> {
+    if (settled.has(nodeId)) return
+    if (ensuring.has(nodeId)) return // cycle already rejected by validate; re-entry no-op
+    const node = nodeById.get(nodeId)
+    if (!node || isEditorNode(node.type)) {
+      settled.add(nodeId)
+      return
+    }
+    const impl = NODE_REGISTRY.get(node.type)
+    if (!impl) {
+      settled.add(nodeId)
+      return
+    }
+    ensuring.add(nodeId)
+
+    const ins = incoming.get(nodeId) ?? []
+    // Pull upstream first (lazy value.* nodes, deferred branches, …).
+    for (const e of ins) {
+      await ensureRan(e.source, pending)
+    }
+
     const reportKey = qid(node.id)
-    const incoming = graph.edges.filter((e) => e.target === node.id)
-    const outPorts = () => impl.resolvePorts?.(node.config ?? {}).outputs ?? impl.spec.outputs
     const emitEmpty = (status: NodeReport['status'], notes: string[], error?: string) => {
-      const ports = outPorts()
-      const emptyOutputs: Record<string, FlowItem[]> = {}
-      for (const p of ports) emptyOutputs[p.id] = []
-      buffers.set(node.id, emptyOutputs)
+      const { ports, out } = emptyBuffers(node)
+      buffers.set(node.id, out)
       reports[reportKey] = {
         status,
         durationMs: 0,
@@ -298,25 +353,22 @@ export async function runFlow(
       hooks?.onNodeDone?.(reportKey, reports[reportKey])
     }
 
-    // Skip nodes downstream of a failure so one broken source doesn't cascade
-    // into misleading per-node errors.
-    if (incoming.some((e) => failed.has(e.source))) {
+    if (ins.some((e) => failed.has(e.source))) {
       failed.add(node.id)
       emitEmpty('skipped', ['skipped: upstream node failed'])
-      continue
+      settled.add(node.id)
+      ensuring.delete(node.id)
+      return
     }
 
-    // Exclusive Switch: only arms that emitted items schedule downstream. A node
-    // fed solely by empty/inactive switch arms (or by nodes skipped for that
-    // reason) must not run — otherwise every wired branch would still evaluate.
-    // Silent: no report/hooks, so the live UI doesn't flash or overwrite a prior
-    // trail on the untaken arms.
-    if (incoming.length > 0 && !incoming.some(edgeActivates)) {
-      const ports = outPorts()
-      const emptyOutputs: Record<string, FlowItem[]> = {}
-      for (const p of ports) emptyOutputs[p.id] = []
-      buffers.set(node.id, emptyOutputs)
-      continue
+    // Exclusive Switch: only arms that emitted items schedule downstream.
+    // Silent skip — no report/hooks — so untaken arms don't flash or wipe trails.
+    if (ins.length > 0 && !ins.some(edgeActivates)) {
+      const { out } = emptyBuffers(node)
+      buffers.set(node.id, out)
+      settled.add(node.id)
+      ensuring.delete(node.id)
+      return
     }
 
     hooks?.onNodeStart?.(reportKey)
@@ -324,23 +376,20 @@ export async function runFlow(
     const inputs: Record<string, FlowItem[]> = {}
     const inPorts = impl.resolvePorts?.(node.config ?? {}).inputs ?? impl.spec.inputs
     for (const port of inPorts) inputs[port.id] = []
-    for (const e of incoming) {
+    for (const e of ins) {
       const produced = buffers.get(e.source)?.[e.sourceHandle] ?? []
       inputs[e.targetHandle] = [...(inputs[e.targetHandle] ?? []), ...produced]
     }
     finalInputs.set(node.id, inputs)
 
-    // Trigger gate: a node whose `when` port is wired but received nothing did
-    // not fire this run — skip it (emit empty), so a trigger can drive an
-    // otherwise self-starting source. Unwired `when` (or wired-with-items) runs
-    // normally, so existing flows are unaffected.
-    const whenWired = incoming.some((e) => e.targetHandle === 'when')
+    const whenWired = ins.some((e) => e.targetHandle === 'when')
     if (whenWired && (inputs.when?.length ?? 0) === 0) {
       emitEmpty('ok', ['gated: not triggered'])
-      // Gated sources still count as active so non-when edges from them could
-      // matter; they emitted empty, so exclusive consumers stay inactive.
       active.add(node.id)
-      continue
+      settled.add(node.id)
+      ensuring.delete(node.id)
+      scheduleActivated(node.id, pending)
+      return
     }
 
     const ctx: RunContext = {
@@ -381,6 +430,30 @@ export async function runFlow(
       }
     }
     hooks?.onNodeDone?.(reportKey, reports[reportKey])
+    settled.add(node.id)
+    ensuring.delete(node.id)
+    if (active.has(node.id)) scheduleActivated(node.id, pending)
+  }
+
+  // Starters: indegree-0 nodes that aren't lazy value producers. Lazy producers
+  // (value.random, value.text, …) are pulled only when an active consumer needs
+  // them — so a Random → Values-to-items chain feeding one Switch arm stays idle
+  // until that arm is taken (or until a pre-switch consumer on the live path pulls it).
+  let starters = runnable.nodes.filter(
+    (n) => !isEditorNode(n.type) && (incoming.get(n.id)?.length ?? 0) === 0 && !isLazyProducer(n.type),
+  )
+  if (starters.length === 0) {
+    // Pure value graphs (e.g. random → log) still need to run.
+    starters = runnable.nodes.filter(
+      (n) => !isEditorNode(n.type) && (incoming.get(n.id)?.length ?? 0) === 0,
+    )
+  }
+
+  const pending = new Set(starters.map((n) => n.id))
+  while (pending.size > 0) {
+    const id = pending.values().next().value!
+    pending.delete(id)
+    await ensureRan(id, pending)
   }
 
   const ok = Object.values(reports).every((r) => r.status !== 'error')
