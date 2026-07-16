@@ -2898,9 +2898,15 @@ const torrentSearch: NodeImpl = {
       }
       queried++
 
-      // Resolve batch-vs-episode per item.
+      // Resolve batch-vs-episode per item. A pinned episode number is
+      // authoritative: whoever set it (a want) needs THAT episode, so batch
+      // mode — which ignores the pin and takes the best release for the whole
+      // title — is never a safe fallback for it.
+      const pinnedEpNum = episodeField ? asNumber(item[episodeField]) : null
       let mode = configMode
-      if (mode === 'auto') {
+      if (pinnedEpNum != null) {
+        mode = 'episode'
+      } else if (mode === 'auto') {
         const wm = String(item.want_mode ?? '')
         if (wm === 'episode' || wm === 'batch') mode = wm
         else mode = String(item.air_status ?? '') === 'airing' ? 'episode' : 'batch'
@@ -2978,7 +2984,7 @@ const torrentSearch: NodeImpl = {
         } else if (mode === 'episode') {
           // A pinned episode (a want) narrows the grab to exactly that number;
           // otherwise: best release per episode, most recent first.
-          const pinnedEp = episodeField ? asNumber(item[episodeField]) : null
+          const pinnedEp = pinnedEpNum
           const byEp = new Map<number, Candidate>()
           for (const c of cands) {
             if (c.isBatch || c.episode == null) continue
@@ -3123,7 +3129,11 @@ const animeStatus: NodeImpl = {
         })
       } catch {
         // Unknown status → default to batch downstream, but route separately.
-        unknown.push({ ...item, air_status: 'unknown', want_mode: 'batch' })
+        // Never clobber an existing want_mode: an episode want must stay an
+        // episode search even when the status lookup fails (a batch fallback
+        // ignores the episode pin — that's how an S4 single got queued for an
+        // S1 episode want on prod).
+        unknown.push({ ...item, air_status: 'unknown', want_mode: item.want_mode ?? 'batch' })
       }
       // TsukiHime default limit is 120 req/min; 550ms spacing (~109/min) stays
       // under it with headroom.
