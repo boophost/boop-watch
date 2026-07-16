@@ -7,6 +7,9 @@ import {
   Controls,
   Handle,
   Position,
+  BaseEdge,
+  EdgeLabelRenderer,
+  getBezierPath,
   useNodesState,
   useEdgesState,
   useReactFlow,
@@ -15,6 +18,7 @@ import {
   getNodesBounds,
   type Node,
   type Edge,
+  type EdgeProps,
   type NodeProps,
   type Connection,
 } from '@xyflow/react'
@@ -95,10 +99,12 @@ interface FlowNodeData extends Record<string, unknown> {
   onRunTrigger?: () => void
   /** True while any run is in progress (disables the per-node ▶). */
   runDisabled?: boolean
+  /** Soft-dim nodes not yet touched during a live/dry run. */
+  dimmed?: boolean
 }
 
 type RFNode = Node<FlowNodeData, 'flow' | 'reroute' | 'sticky' | 'arrow' | 'group'>
-type RFEdge = Edge
+type RFEdge = Edge<{ pulse?: number; pulseAt?: number }>
 
 const CATEGORY_DOT: Record<NodeCategory, string> = {
   trigger: 'bg-lime-400',
@@ -475,8 +481,10 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
             ? 'border-ring ring-2 ring-ring/30'
             : report?.status === 'error'
               ? 'border-destructive'
-              : 'border-border'
-      }`}
+              : report?.status === 'ok'
+                ? 'border-emerald-500/50'
+                : 'border-border'
+      } ${data.dimmed ? 'opacity-40' : ''}`}
     >
       <div
         className="relative flex items-center gap-2 border-b border-border px-3 py-2"
@@ -616,6 +624,62 @@ function RerouteNode({ id, selected }: NodeProps<RFNode>) {
 }
 
 const nodeTypes = { flow: FlowNodeView, reroute: RerouteNode, ...editorNodeTypes }
+
+function RunThroughputEdge({
+  id,
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  style,
+  markerEnd,
+  data,
+}: EdgeProps<RFEdge>) {
+  const [path, labelX, labelY] = getBezierPath({
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourcePosition,
+    targetPosition,
+  })
+  const pulse = data?.pulse
+  const pulsing =
+    typeof pulse === 'number' && pulse > 0 && data?.pulseAt != null && Date.now() - data.pulseAt < 2200
+  return (
+    <>
+      <BaseEdge
+        id={id}
+        path={path}
+        markerEnd={markerEnd}
+        style={style}
+        className={pulsing ? 'flow-run-edge-pulse' : undefined}
+      />
+      {pulsing ? (
+        <EdgeLabelRenderer>
+          <div
+            className="nodrag nopan pointer-events-none absolute rounded bg-violet-500/90 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white shadow"
+            style={{
+              transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+            }}
+          >
+            {pulse}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
+  )
+}
+
+const edgeTypes = { throughput: RunThroughputEdge }
+
+/** Map nested stream ids (`sub/inner`) onto the canvas parent node id. */
+function canvasNodeId(streamId: string): string {
+  const slash = streamId.indexOf('/')
+  return slash >= 0 ? streamId.slice(0, slash) : streamId
+}
 
 function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
   const lockedGroups = new Map(
@@ -980,6 +1044,7 @@ function FlowEditorInner() {
     () =>
       nodes.map((n) => {
         const trigger = runTriggerFor(n.data.specType, n.data.config)
+        const touched = Boolean(n.data.running || n.data.report)
         return {
           ...n,
           data: {
@@ -989,6 +1054,7 @@ function FlowEditorInner() {
               : undefined,
             onRunTrigger: trigger ? () => runRef.current(!liveRef.current, trigger, n.id) : undefined,
             runDisabled: runningKind !== null,
+            dimmed: runningKind !== null && !touched && !isEditorNode(n.data.specType),
           },
         }
       }),
@@ -1112,23 +1178,47 @@ function FlowEditorInner() {
     [findPort, nodes, propagatedTypes],
   )
 
-  // Wires take the color of the (propagated) type they carry; base items edges
-  // keep the default stroke.
+  // Wires take the color of the (propagated) type they carry; during a run,
+  // recently completed nodes also get a pulsing throughput overlay.
   const styledEdges = useMemo(
     () =>
       edges.map((e) => {
-        // The activation path — a wire into a `when` gate, or any wire out of a
-        // trigger node — reads lime, matching the sockets it connects.
+        const pulse = e.data?.pulse
+        const pulsing =
+          typeof pulse === 'number' &&
+          pulse > 0 &&
+          e.data?.pulseAt != null &&
+          Date.now() - e.data.pulseAt < 2200
         const sourceCat = specLookup.get(
           nodes.find((n) => n.id === e.source)?.data.specType ?? '',
         )?.category
-        if (e.targetHandle === 'when' || sourceCat === 'trigger')
-          return { ...e, style: { ...e.style, stroke: TRIGGER_LIME, strokeWidth: 1.5 } }
+        const strokeWidth = pulsing ? 2.5 : 1.5
+        if (e.targetHandle === 'when' || sourceCat === 'trigger') {
+          return {
+            ...e,
+            type: 'throughput' as const,
+            animated: pulsing,
+            style: { ...e.style, stroke: TRIGGER_LIME, strokeWidth },
+          }
+        }
         const dataType =
           propagatedTypes.get(`${e.source}:out:${e.sourceHandle}`) ??
           findPort(e.source, e.sourceHandle, 'out')?.dataType
-        if (!dataType || dataType === 'items') return e
-        return { ...e, style: { ...e.style, stroke: portColor(dataType), strokeWidth: 1.5 } }
+        const stroke = pulsing
+          ? '#a78bfa'
+          : dataType && dataType !== 'items'
+            ? portColor(dataType)
+            : undefined
+        return {
+          ...e,
+          type: 'throughput' as const,
+          animated: pulsing,
+          style: {
+            ...e.style,
+            ...(stroke ? { stroke } : null),
+            ...(pulsing || (dataType && dataType !== 'items') ? { strokeWidth } : null),
+          },
+        }
       }),
     [edges, findPort, propagatedTypes, nodes],
   )
@@ -1508,6 +1598,13 @@ function FlowEditorInner() {
     setNodes((ns) =>
       ns.map((n) => ({ ...n, data: { ...n.data, report: undefined, running: false } })),
     )
+    setEdges((eds) =>
+      eds.map((e) => ({
+        ...e,
+        animated: false,
+        data: { ...e.data, pulse: undefined, pulseAt: undefined },
+      })),
+    )
     try {
       if (dirty) await saveFlow(id, { name, graph: fromRF(nodes, edges), component })
       setDirty(false)
@@ -1515,16 +1612,45 @@ function FlowEditorInner() {
         id,
         dryRun,
         (ev) => {
-          if (ev.type === 'start' && paint(ev.id)) {
-            setNodes((ns) =>
-              ns.map((n) => (n.id === ev.id ? { ...n, data: { ...n.data, running: true } } : n)),
-            )
-          } else if (ev.type === 'node' && paint(ev.id)) {
+          if (ev.type === 'start') {
+            const idOnCanvas = canvasNodeId(ev.id)
+            if (!paint(idOnCanvas)) return
             setNodes((ns) =>
               ns.map((n) =>
-                n.id === ev.id ? { ...n, data: { ...n.data, report: ev.report, running: false } } : n,
+                n.id === idOnCanvas ? { ...n, data: { ...n.data, running: true } } : n,
               ),
             )
+          } else if (ev.type === 'node') {
+            const idOnCanvas = canvasNodeId(ev.id)
+            if (!paint(idOnCanvas)) return
+            const nested = ev.id.includes('/')
+            setNodes((ns) =>
+              ns.map((n) => {
+                if (n.id !== idOnCanvas) return n
+                // Nested subflow steps keep the composite spinning until the
+                // outer node itself reports.
+                if (nested) return { ...n, data: { ...n.data, running: true } }
+                return {
+                  ...n,
+                  data: { ...n.data, report: ev.report, running: false },
+                }
+              }),
+            )
+            if (!nested && ev.report.counts) {
+              const nowMs = Date.now()
+              setEdges((eds) =>
+                eds.map((e) => {
+                  if (e.source !== idOnCanvas) return e
+                  const count = ev.report.counts[e.sourceHandle ?? '']
+                  if (count == null) return e
+                  return {
+                    ...e,
+                    animated: count > 0,
+                    data: { ...e.data, pulse: count, pulseAt: nowMs },
+                  }
+                }),
+              )
+            }
           }
         },
         trigger,
@@ -1540,9 +1666,26 @@ function FlowEditorInner() {
           data: { ...n.data, report: paint(n.id) ? report.nodes[n.id] : undefined, running: false },
         })),
       )
+      // Hold edge pulses briefly after the run so the path remains readable.
+      setTimeout(() => {
+        setEdges((eds) =>
+          eds.map((e) => ({
+            ...e,
+            animated: false,
+            data: { ...e.data, pulse: undefined, pulseAt: undefined },
+          })),
+        )
+      }, 2200)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Run failed')
       setNodes((ns) => ns.map((n) => ({ ...n, data: { ...n.data, running: false } })))
+      setEdges((eds) =>
+        eds.map((e) => ({
+          ...e,
+          animated: false,
+          data: { ...e.data, pulse: undefined, pulseAt: undefined },
+        })),
+      )
     } finally {
       setRunningKind(null)
     }
@@ -1858,6 +2001,7 @@ function FlowEditorInner() {
           nodes={displayNodes}
           edges={styledEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           isValidConnection={isValidConnection}
           deleteKeyCode={['Backspace', 'Delete']}
           onNodeDragStart={() => snapshot()}

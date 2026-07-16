@@ -3,3 +3,14 @@
 .flow-editor-canvas .react-flow__resize-control.bottom.right {
   cursor: nesw-resize;
 }
+
+.flow-run-edge-pulse {
+  stroke-dasharray: 6 4;
+  animation: flow-run-dash 0.6s linear infinite;
+}
+
+@keyframes flow-run-dash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
