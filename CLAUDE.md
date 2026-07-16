@@ -21,7 +21,7 @@ It is a **React (Vite) + TypeScript SPA** served by an **Express + better-sqlite
 
 ```
 index.html              # Vite entry; <html class="dark">, loads Geist fonts
-vite.config.ts          # React + Tailwind v4; dev proxies /api and /img -> :3001
+vite.config.ts          # React + Tailwind v4; dev proxies /api+/img -> BACKEND_PORT (default 3001)
 src/                    # React SPA
   main.tsx              # imports index.css (shadcn) + kagura.css (portal)
   App.tsx               # routes: public portal at root, admin under /manage + /login
@@ -123,6 +123,38 @@ IngressRoutes + pod exec/cp in `link-apps`; a `CLAUDE_CODE_OAUTH_TOKEN` repo sec
 `claude setup-token` — uses your Claude subscription, not per-token API billing; `ANTHROPIC_API_KEY`
 also works); and wildcard `*-watch.boopurno.es` DNS. `preview-env.mjs` reads the *live* dev
 Deployment as its template, so it tracks dev's drift automatically.
+
+### Local agent environments (parallel agents on one machine)
+
+When several coding agents run on the same laptop, **do not share one checkout** — that's how
+agent A's edits get committed into agent B's branch. Use the same lifecycle shape as PR previews,
+but for *workspace* isolation:
+
+```bash
+npm run agent-env -- up   fix-subs              # worktree + branch + ports + DATA_DIR
+npm run agent-env -- ls
+npm run agent-env -- card fix-subs              # reprint the env card
+npm run agent-env -- run  fix-subs -- npm run server:dev
+npm run agent-env -- down fix-subs              # remove worktree (+ delete agent/<slug> branch)
+```
+
+**Key = kebab-case slug** (e.g. `fix-subs`). It becomes:
+
+| | |
+|---|---|
+| branch | `agent/<slug>` (from `origin/dev` by default; override with `--base`) |
+| worktree | `.agent-envs/<slug>/` (gitignored; registry at `.agent-envs/registry.json`) |
+| ports | unique `PORT`/`BACKEND_PORT` + Vite port (defaults start at 3101 / 5174) |
+| data | `<worktree>/data` (`DATA_DIR`); seeds from primary `data/series.sqlite` when present |
+
+`up` also blanks sink env (`QBIT_*`, `LIBRARY_DIR`) and `POSTHOG_KEY` — same parallel-safety idea
+as `preview-env` — and writes `.agent-env/{card.md,env,slot.json}` inside the worktree. Point the
+agent at that directory and have it `source .agent-env/env` (or use `agent-env run`). Cap:
+`MAX_AGENT_ENVS` (default 5). Fast boot: `--link-modules` symlinks the primary `node_modules`;
+`--no-install` skips deps entirely.
+
+This is the **pre-PR** isolation layer. Once the agent opens a feature → `dev` PR, CI's
+`preview-env` + `qa-agent` still handle the remote preview/QA path unchanged.
 
 ### Library-import flow (custom indexer → library)
 

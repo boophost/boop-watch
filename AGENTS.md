@@ -27,3 +27,6 @@ Quick rules:
   with a `dev` → `main` PR. **Never commit directly to `main`, and never push feature work straight
   to `dev`.** Bump `package.json` `version` with every shipped change (use patch bumps for follow-up
   commits in the same feature session).
+- **Multiple local agents:** use `npm run agent-env -- up <slug>` so each agent gets its own
+  worktree, branch, ports, and `DATA_DIR` (see CLAUDE.md → "Local agent environments"). Don't
+  share one checkout across concurrent agents — that's how commits get mixed.
