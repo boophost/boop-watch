@@ -133,7 +133,6 @@ interface MalDetail {
   url: string
   title: string
   title_english?: string | null
-  title_japanese?: string | null
   type?: string
   source?: string
   episodes?: number | null
@@ -154,7 +153,8 @@ interface EpisodeRow {
   mal_id: number
   url: string
   title: string
-  title_japanese: string | null
+  /** `title` is a synthesized "Episode N" — no source has named it yet. */
+  title_pending?: boolean
   aired: string | null
   filler: boolean
   recap: boolean
@@ -768,10 +768,6 @@ export default function SeriesDetail() {
             mal.title_english !== mal.title ? (
               <p className="text-sm text-muted-foreground">{mal.title_english}</p>
             ) : null}
-            {mal?.title_japanese ? (
-              <p className="text-sm text-muted-foreground">{mal.title_japanese}</p>
-            ) : null}
-
             {metaLine ? (
               <p className="text-sm text-muted-foreground">{metaLine}</p>
             ) : null}
@@ -1128,10 +1124,15 @@ export default function SeriesDetail() {
                       {ep.episode ?? '—'}
                     </td>
                     <td className="px-3 py-2 align-top">
-                      <span className="font-medium">{ep.title}</span>
-                      {ep.title_japanese ? (
-                        <span className="mt-0.5 block text-xs text-muted-foreground">
-                          {ep.title_japanese}
+                      <span className={ep.title_pending ? 'text-muted-foreground' : 'font-medium'}>
+                        {ep.title}
+                      </span>
+                      {ep.title_pending ? (
+                        <span
+                          className="mt-1 block w-fit rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground"
+                          title="No source has published a title for this episode yet"
+                        >
+                          Untitled
                         </span>
                       ) : null}
                       {ep.filler || ep.recap ? (
@@ -1229,9 +1230,13 @@ export default function SeriesDetail() {
                     MAL ↗
                   </a>
                 </div>
-                <p className="mt-1 font-medium">{ep.title}</p>
-                {ep.title_japanese ? (
-                  <p className="text-xs text-muted-foreground">{ep.title_japanese}</p>
+                <p className={`mt-1 ${ep.title_pending ? 'text-muted-foreground' : 'font-medium'}`}>
+                  {ep.title}
+                </p>
+                {ep.title_pending ? (
+                  <span className="mt-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
+                    Untitled
+                  </span>
                 ) : null}
                 <p className="mt-1 text-xs text-muted-foreground">
                   {formatAired(ep.aired)}
