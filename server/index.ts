@@ -12,7 +12,10 @@ import {
 import * as seriesDb from './db.js'
 import { getEpisodesForDisplay } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { publicRouter, commentView } from './publicRoutes.js'
+import { publicRouter, commentView, portalSeriesForCatalog } from './publicRoutes.js'
+import {
+  getPortalSeasonCounts, getPortalSeasonTitles, getPortalSeasonYears, setPortalSeasonTitle,
+} from './portalDb.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock, fireEvent } from './flowRoutes.js'
@@ -877,6 +880,61 @@ function bannerView(b: seriesDb.BannerRow) {
 /** `?kind=poster` picks the portrait art; anything else means the wide banner. */
 const artKind = (req: express.Request): seriesDb.ArtKind =>
   seriesDb.isArtKind(req.query.kind) ? req.query.kind : 'banner'
+
+// ---------------------------------------------------------------------------
+// Season titles — the admin-authored season line on the portal title page
+// ("Season 1 Part 2", "Diamond is Unbreakable"). Stored per (JF series id, JF
+// season); these routes are keyed by catalog id to match the rest of /manage,
+// and resolve the JF series through the portal's own franchise anchoring.
+// ---------------------------------------------------------------------------
+
+/** The season rows for a catalog series' JF show, override included. */
+function seasonTitleView(malId: number) {
+  const pItem = portalSeriesForCatalog(malId)
+  if (!pItem) return { seriesId: null, seriesName: null, seasons: [] }
+  const years = getPortalSeasonYears(pItem.id)
+  const titles = getPortalSeasonTitles(pItem.id)
+  return {
+    seriesId: pItem.id,
+    seriesName: pItem.name,
+    seasons: getPortalSeasonCounts(pItem.id).map((c) => ({
+      season: c.season,
+      episodes: c.episodes,
+      year: years.get(c.season) ?? null,
+      displayTitle: titles.get(c.season) ?? null,
+    })),
+  }
+}
+
+app.get('/api/series/:id/season-titles', requireAuth, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  res.json(seasonTitleView(series.mal_id))
+})
+
+// Set or clear one season's override. A blank/absent displayTitle clears it —
+// the portal then falls back to its own generic default.
+app.put('/api/series/:id/season-titles/:season', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const season = Number(req.params.season)
+  if (!Number.isInteger(season)) { res.status(400).json({ error: 'Invalid season' }); return }
+  const pItem = portalSeriesForCatalog(series.mal_id)
+  if (!pItem) { res.status(404).json({ error: 'No Public series for this catalog entry' }); return }
+  if (!getPortalSeasonCounts(pItem.id).some((c) => c.season === season)) {
+    res.status(400).json({ error: 'Unknown season for this series' })
+    return
+  }
+  const raw = (req.body as { displayTitle?: unknown })?.displayTitle
+  if (raw != null && typeof raw !== 'string') {
+    res.status(400).json({ error: 'displayTitle must be a string or null' })
+    return
+  }
+  setPortalSeasonTitle(pItem.id, season, raw ?? null)
+  res.json(seasonTitleView(series.mal_id))
+})
 
 // List candidates of one kind (gathering them from remote sources on first view).
 app.get('/api/series/:id/banners', requireAuth, async (req, res) => {
