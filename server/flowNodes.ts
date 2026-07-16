@@ -2008,6 +2008,41 @@ const compare: NodeImpl = {
   },
 }
 
+/** Per-item coin flip: each item independently rolls into pass or fail. */
+const chance: NodeImpl = {
+  spec: {
+    type: 'filter.chance',
+    label: 'Chance',
+    category: 'filter',
+    description:
+      'Splits items at random: each item independently rolls into "pass" with the configured probability (else "fail"). Use it for coin-flip branching without stamping a random field first.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'pass', label: 'pass' },
+      { id: 'fail', label: 'fail' },
+    ],
+    config: [
+      {
+        key: 'probability',
+        label: 'Pass probability',
+        kind: 'number',
+        default: 0.5,
+        help: '0–1. Each item passes when Math.random() < this value (0 = all fail, 1 = all pass, 0.5 ≈ coin flip).',
+      },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const p = Math.min(1, Math.max(0, num(config, 'probability', 0.5)))
+    const pass: FlowItem[] = []
+    const fail: FlowItem[] = []
+    for (const item of allInputs(inputs)) {
+      ;(Math.random() < p ? pass : fail).push(item)
+    }
+    ctx.notes.push(`${pass.length} of ${pass.length + fail.length} item(s) passed (p=${p})`)
+    return { pass, fail }
+  },
+}
+
 const sortNode: NodeImpl = {
   spec: {
     type: 'filter.sort',
@@ -5255,22 +5290,39 @@ const delay: NodeImpl = {
     label: 'Delay',
     category: 'enrich',
     description:
-      'Waits the configured time, then passes its input straight through unchanged. Waits once (not per item). A dry run skips the wait unless "Run on dry runs" is on. Capped at 10 minutes — the run holds the flow lock while waiting.',
+      'Waits the configured time, then passes its input straight through unchanged. Waits once (not per item). Set Max seconds above Delay for a uniform random wait in that range (jitter). A dry run skips the wait unless "Run on dry runs" is on. Capped at 10 minutes — the run holds the flow lock while waiting.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [{ id: 'out', label: 'out' }],
     config: [
       { key: 'seconds', label: 'Delay (seconds)', kind: 'number', default: 5 },
+      {
+        key: 'maxSeconds',
+        label: 'Max seconds (optional)',
+        kind: 'number',
+        default: 0,
+        help: '0 = fixed delay. When greater than Delay, wait a random duration in [Delay, Max]. Both ends are capped at 10 minutes.',
+      },
       runOnDryField(false),
     ],
   },
   async run(inputs, config, ctx) {
     const items = allInputs(inputs)
-    const seconds = Math.min(Math.max(0, num(config, 'seconds', 5)), MAX_DELAY_S)
+    const lo = Math.min(Math.max(0, num(config, 'seconds', 5)), MAX_DELAY_S)
+    const rawMax = num(config, 'maxSeconds', 0)
+    const hi = Math.min(Math.max(0, rawMax), MAX_DELAY_S)
+    const jitter = hi > lo
+    const seconds = jitter ? sampleRandom(lo, hi, false) : lo
+    const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.?0+$/, ''))
+    const rangeNote = jitter ? ` (jitter [${fmt(lo)}, ${fmt(hi)}))` : ''
     if (runsLive(config, ctx, false)) {
       if (seconds > 0) await new Promise((resolve) => setTimeout(resolve, seconds * 1000))
-      ctx.notes.push(`waited ${seconds}s, passed ${items.length} item(s)`)
+      ctx.notes.push(`waited ${fmt(seconds)}s${rangeNote}, passed ${items.length} item(s)`)
     } else {
-      ctx.notes.push(`would wait ${seconds}s, then pass ${items.length} item(s)`)
+      ctx.notes.push(
+        jitter
+          ? `would wait ${fmt(lo)}–${fmt(hi)}s (jitter), then pass ${items.length} item(s)`
+          : `would wait ${fmt(seconds)}s, then pass ${items.length} item(s)`,
+      )
     }
     return { out: items }
   },
@@ -5644,6 +5696,7 @@ const IMPLS: NodeImpl[] = [
   qbittorrentSource,
   fieldFilter,
   compare,
+  chance,
   sortNode,
   compute,
   groupPick,
