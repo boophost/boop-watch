@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ReactFlow,
@@ -117,6 +118,19 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
   sink: 'bg-rose-400',
   value: 'bg-pink-400',
   boundary: 'bg-slate-400',
+}
+
+/** Raw rgb of each category's dot — the dry-run flash glows this color, so a
+ *  firing trigger reads lime, a sink rose, etc. (matches the title dot). */
+const CATEGORY_FLASH: Record<NodeCategory, string> = {
+  trigger: '163, 230, 53',
+  source: '167, 139, 250',
+  filter: '56, 189, 248',
+  enrich: '251, 191, 36',
+  combine: '52, 211, 153',
+  sink: '251, 113, 133',
+  value: '244, 114, 182',
+  boundary: '148, 163, 184',
 }
 
 const CATEGORY_LABEL: Record<NodeCategory, string> = {
@@ -452,7 +466,8 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
   const whenPort = allInputs.find((p) => p.id === 'when')
   const inputs = allInputs.filter((p) => p.id !== 'when')
   // Trigger nodes emit an activation signal — their outputs read lime.
-  const isTrigger = (componentInfo?.component?.category ?? spec.category) === 'trigger'
+  const flashCategory: NodeCategory = componentInfo?.component?.category ?? spec.category
+  const isTrigger = flashCategory === 'trigger'
   // Effective (propagated) type per port — a generic 'items' port shows the
   // record subtype flowing through it; falls back to the declared type.
   const effIn = (p: NodePort): PortDataType => propTypes.get(`${id}:in:${p.id}`) ?? p.dataType ?? 'items'
@@ -494,6 +509,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
         <span
           key={flashUntil}
           className="flow-node-flash-burst pointer-events-none absolute"
+          style={{ '--flash-color': CATEGORY_FLASH[flashCategory] } as CSSProperties}
         />
       ) : null}
       <div

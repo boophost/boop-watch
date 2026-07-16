@@ -3,6 +3,7 @@
 // Inner flow nodes stay fixed (read-only); live activity paints running nodes.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Background,
@@ -116,6 +117,19 @@ const CATEGORY_DOT: Record<NodeCategory, string> = {
   sink: 'bg-rose-400',
   value: 'bg-pink-400',
   boundary: 'bg-slate-400',
+}
+
+/** Raw rgb of each category's dot — the live-run flash glows this color, so a
+ *  firing trigger reads lime, a sink rose, etc. (matches the title dot). */
+const CATEGORY_FLASH: Record<NodeCategory, string> = {
+  trigger: '163, 230, 53',
+  source: '167, 139, 250',
+  filter: '56, 189, 248',
+  enrich: '251, 191, 36',
+  combine: '52, 211, 153',
+  sink: '251, 113, 133',
+  value: '244, 114, 182',
+  boundary: '148, 163, 184',
 }
 
 const PORT_COLOR: Record<PortDataType, string> = {
@@ -660,6 +674,7 @@ const MapFlowNode = memo(function MapFlowNode({ data }: NodeProps<MapRFNode>) {
         <span
           key={flashUntil}
           className="flow-node-flash-burst pointer-events-none absolute"
+          style={{ '--flash-color': CATEGORY_FLASH[category] } as CSSProperties}
         />
       ) : null}
       <div className="relative z-[1] flex items-center gap-2 border-b border-border px-2.5 py-1.5">
