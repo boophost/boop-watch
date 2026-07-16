@@ -250,6 +250,8 @@ export interface Flow {
   description: string | null
   graph: FlowGraph
   component: FlowComponentMeta | null
+  /** 0/1 from SQLite: automation (schedules + event triggers) on/off. */
+  enabled: number
   created_at: string
   updated_at: string
 }
@@ -260,6 +262,7 @@ export interface FlowSummary {
   description: string | null
   node_count: number
   published: boolean
+  enabled: boolean
   updated_at: string
 }
 
@@ -317,6 +320,51 @@ async function json<T>(r: Response): Promise<T> {
 export const listFlows = () =>
   fetchAuth('/api/flows').then((r) => json<{ flows: FlowSummary[] }>(r))
 
+/** One flow with its full graph — payload for the read-only Flow Map. */
+export interface FlowMapEntry {
+  id: number
+  name: string
+  description: string | null
+  published: boolean
+  updated_at: string
+  graph: FlowGraph
+}
+
+export interface FlowMapNote {
+  id: string
+  /** Defaults to sticky for pre-arrow map notes. */
+  kind?: 'sticky' | 'arrow'
+  x: number
+  y: number
+  width: number
+  height: number
+  text?: string
+  color?: string
+  /** Arrow-only styling (ignored for stickies). */
+  strokeWidth?: number
+  headSize?: number
+  dash?: 'solid' | 'dashed' | 'dotted'
+  startHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  endHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  points?: { x: number; y: number }[]
+}
+
+export interface FlowMapLayout {
+  [flowId: string]: { x: number; y: number }
+}
+
+export const getFlowMap = () =>
+  fetchAuth('/api/flows/map').then((r) =>
+    json<{ flows: FlowMapEntry[]; layout: FlowMapLayout; notes: FlowMapNote[] }>(r),
+  )
+
+export const saveFlowMapState = (state: { layout: FlowMapLayout; notes: FlowMapNote[] }) =>
+  fetchAuth('/api/flows/map/state', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(state),
+  }).then((r) => json<{ layout: FlowMapLayout; notes: FlowMapNote[] }>(r))
+
 export const getNodeTypes = () =>
   fetchAuth('/api/flows/node-types').then((r) => json<{ nodeTypes: NodeSpec[] }>(r))
 
@@ -342,7 +390,13 @@ export const createFlow = (name: string, description?: string) =>
 
 export const saveFlow = (
   id: number,
-  patch: { name?: string; description?: string | null; graph?: FlowGraph; component?: FlowComponentMeta | null },
+  patch: {
+    name?: string
+    description?: string | null
+    graph?: FlowGraph
+    component?: FlowComponentMeta | null
+    enabled?: boolean
+  },
 ) =>
   fetchAuth(`/api/flows/${id}`, {
     method: 'PUT',
@@ -479,6 +533,9 @@ export type ActivityStreamEvent =
       status: 'ok' | 'error' | 'skipped'
       notes: string[]
       error?: string
+      /** Per-output-port item counts (Flow Map edge animation). */
+      counts?: Record<string, number>
+      durationMs?: number
     }
   | { type: 'done'; runToken: string; run: FlowRun }
   | { type: 'aborted'; runToken: string; error: string }

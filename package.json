@@ -1,7 +1,7 @@
 {
   "name": "boop-watch",
   "private": true,
-  "version": "2.70.1",
+  "version": "2.70.0",
   "description": "Public, no-login viewing portal for a curated Jellyfin collection + library manager",
   "type": "module",
   "scripts": {
@@ -14,6 +14,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.19",
     "@radix-ui/react-label": "^2.1.1",
     "@radix-ui/react-slot": "^1.1.2",
     "@supabase/supabase-js": "^2.110.0",

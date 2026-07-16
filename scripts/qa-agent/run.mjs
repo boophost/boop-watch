@@ -39,6 +39,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CHECKBOX_RE } from '../lib/promotion-checklist.mjs'
+import { filterCredentials, areAllCooling, getEarliestReset, recordCooldown, credentialPool } from './cooldown.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLAN_HEADING = '## test plan'
@@ -129,38 +130,6 @@ function mintToken() {
   return `${head}.${payload}.${sig}`
 }
 
-// Ordered list of Claude credentials to try. A subscription account that hits its
-// usage cap rotates to the next one, so QA keeps working across accounts. Sources
-// (in order): CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN_2..N, the
-// newline/comma-separated CLAUDE_CODE_OAUTH_TOKENS, then ANTHROPIC_API_KEY as a
-// last resort (per-token billing). QA_LOCAL_CLAUDE=1 uses the machine's existing
-// `claude` login instead.
-function credentialPool() {
-  if (process.env.QA_LOCAL_CLAUDE) return [{ name: 'local login', kind: 'oauth', env: {} }]
-
-  const seen = new Set()
-  const creds = []
-  const addOauth = (token, name) => {
-    const t = token?.trim()
-    if (!t || seen.has(t)) return
-    seen.add(t)
-    // Pin this token and blank the others so the CLI can't silently reuse one.
-    creds.push({ name, kind: 'oauth', env: { CLAUDE_CODE_OAUTH_TOKEN: t, ANTHROPIC_API_KEY: '' } })
-  }
-
-  addOauth(process.env.CLAUDE_CODE_OAUTH_TOKEN, 'CLAUDE_CODE_OAUTH_TOKEN')
-  for (let i = 2; i <= 10; i++) addOauth(process.env[`CLAUDE_CODE_OAUTH_TOKEN_${i}`], `CLAUDE_CODE_OAUTH_TOKEN_${i}`)
-  ;(process.env.CLAUDE_CODE_OAUTH_TOKENS || '')
-    .split(/[\n,]/)
-    .forEach((t, i) => addOauth(t, `CLAUDE_CODE_OAUTH_TOKENS[${i}]`))
-
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim()
-  if (apiKey) {
-    creds.push({ name: 'ANTHROPIC_API_KEY', kind: 'api-key', env: { ANTHROPIC_API_KEY: apiKey, CLAUDE_CODE_OAUTH_TOKEN: '' } })
-  }
-  return creds
-}
-
 // Try each credential in turn; a usage/rate limit rotates to the next account.
 // Only when every credential is capped do we report the run as deferred.
 function runAgentWithFailover(prompt, creds) {
@@ -171,11 +140,15 @@ function runAgentWithFailover(prompt, creds) {
       return runAgent(prompt, cred)
     } catch (err) {
       if (!(err instanceof RateLimitError) || i === creds.length - 1) {
-        if (err instanceof RateLimitError) limits.push(`${cred.name}: ${err.message}`)
-        if (err instanceof RateLimitError) throw new RateLimitError(limits.join(' | '))
+        if (err instanceof RateLimitError) {
+          recordCooldown(cred.name, err.rawReason || err.message)
+          limits.push(`${cred.name}: ${err.message}`)
+        }
+        if (err instanceof RateLimitError) throw new RateLimitError(limits.join(' | '), limits.join(' | '))
         throw err
       }
       console.warn(`Credential ${cred.name} is rate limited (${err.message}) — trying the next one.`)
+      recordCooldown(cred.name, err.rawReason || err.message)
       limits.push(`${cred.name}: ${err.message}`)
     }
   }
@@ -338,7 +311,7 @@ function runAgent(prompt, cred) {
     // A usage/rate limit is not a QA failure — the CLI exits non-zero, but
     // nothing was verified either way. Signal it so the caller can defer.
     const limited = detectRateLimit(err?.stdout, partial, dbg)
-    if (limited) throw new RateLimitError(limited)
+    if (limited) throw new RateLimitError(limited.msg, limited.raw)
     if (dbg) console.error(`--- claude debug tail ---\n${dbg}\n--- end debug ---`)
     if (partial) console.error(`--- claude partial output ---\n${partial}\n--- end ---`)
     if (err?.code === 'ETIMEDOUT') throw new Error(`agent timed out after ${timeoutMs / 1000}s — see debug tail above`)
@@ -348,7 +321,7 @@ function runAgent(prompt, cred) {
   try {
     const out = JSON.parse(raw)
     const limited = detectRateLimit(raw)
-    if (limited) throw new RateLimitError(limited)
+    if (limited) throw new RateLimitError(limited.msg, limited.raw)
     result = out.result ?? ''
   } catch (err) {
     if (err instanceof RateLimitError) throw err
@@ -397,7 +370,12 @@ function parseVerdicts(result) {
   return verdicts.length ? { verdicts, unreadable: null } : { verdicts: [], unreadable: tail }
 }
 
-class RateLimitError extends Error {}
+class RateLimitError extends Error {
+  constructor(message, rawReason) {
+    super(message)
+    this.rawReason = rawReason
+  }
+}
 
 // The CLI reports a usage cap as api_error_status 429 / a "session limit"
 // result. Pull out a human-readable reason (incl. the reset time when present).
@@ -406,7 +384,10 @@ function detectRateLimit(...texts) {
   if (!blob) return null
   if (!/rate[_ ]limit|"api_error_status"\s*:\s*429|session limit|usage limit/i.test(blob)) return null
   const reset = blob.match(/resets?[^"\n]*/i)?.[0]?.trim()
-  return reset ? `Claude usage limit reached (${reset}).` : 'Claude usage/rate limit reached.'
+  return {
+    msg: reset ? `Claude usage limit reached (${reset}).` : 'Claude usage/rate limit reached.',
+    raw: reset || 'Claude usage/rate limit reached.'
+  }
 }
 
 // ---- reporting --------------------------------------------------------------
@@ -482,7 +463,17 @@ async function main() {
 
   const prData = await ghApi('GET', `/repos/${REPO}/pulls/${pr}`)
   const files = await ghApi('GET', `/repos/${REPO}/pulls/${pr}/files?per_page=100`)
-  const { lines, items } = testPlanItems(prData.body)
+  let { lines, items } = testPlanItems(prData.body)
+  
+  if (args.includes('--catch-up')) {
+    // Only test the unchecked items
+    items = items.filter(it => !it.checked)
+    if (items.length === 0) {
+      console.log('No unchecked items in test plan to catch up.')
+      return
+    }
+  }
+
   if (!items.length) {
     console.log('No `## Test plan` checklist items found — nothing to QA.')
     await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent\n\nNo \`## Test plan\` checklist found in this PR, so there was nothing to verify.`)
@@ -492,8 +483,9 @@ async function main() {
 
   // Fail fast on a missing credential rather than letting the CLI hang until the
   // timeout — surface the config gap on the PR so a human can fix it.
-  const creds = credentialPool()
-  if (!dryRun && !creds.length) {
+  const allCreds = credentialPool()
+  const creds = filterCredentials(allCreds)
+  if (!dryRun && !allCreds.length) {
     await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — not run\n\nNo Claude credential on the runner. Set the \`CLAUDE_CODE_OAUTH_TOKEN\` repo secret (from \`claude setup-token\`, uses your subscription) — or \`ANTHROPIC_API_KEY\` — and re-run this job.`)
     throw new Error('No Claude credential (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY) — cannot run the QA agent')
   }
@@ -513,8 +505,8 @@ async function main() {
       // failure either. Say so on the PR, tick nothing, and exit clean so the
       // check isn't a misleading red X. Re-run once usage resets.
       if (err instanceof RateLimitError) {
-        await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — deferred\n\nAll ${creds.length} Claude credential(s) are rate limited, so nothing was verified and no items were checked off. Re-run this job once usage resets.\n\n<details><summary>Details</summary>\n\n${err.message}\n\n</details>`)
-        console.log(`QA deferred (all ${creds.length} credential(s) rate limited): ${err.message}`)
+        await upsertComment(pr, `${BODY_MARKER}\n### 🤖 QA agent — deferred\n\nAll Claude credential(s) are rate limited, so nothing was verified and no items were checked off. Re-run this job once usage resets.\n\n<details><summary>Details</summary>\n\n${err.message}\n\n</details>`)
+        console.log(`QA deferred (all credential(s) rate limited): ${err.message}`)
         return
       }
       throw err

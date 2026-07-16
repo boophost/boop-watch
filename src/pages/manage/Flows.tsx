@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Plus, Trash2, Workflow } from 'lucide-react'
+import { Map as MapIcon, Plus, Trash2, Workflow } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { listFlows, createFlow, deleteFlow, type FlowSummary } from '@/lib/flows'
+import { listFlows, createFlow, deleteFlow, saveFlow, type FlowSummary } from '@/lib/flows'
 
 export default function Flows() {
   const [flows, setFlows] = useState<FlowSummary[]>([])
@@ -51,10 +51,27 @@ export default function Flows() {
     }
   }
 
+  const toggleEnabled = async (f: FlowSummary) => {
+    // Optimistic flip; reload reconciles on failure.
+    setFlows((fs) => fs.map((x) => (x.id === f.id ? { ...x, enabled: !f.enabled } : x)))
+    try {
+      await saveFlow(f.id, { enabled: !f.enabled })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update flow')
+      void load()
+    }
+  }
+
   return (
     <div className="min-h-screen">
       <header className="flex items-center gap-4 border-b px-4 py-3 md:px-6">
         <h1 className="min-w-0 flex-1 truncate text-lg font-semibold md:text-xl">Flows</h1>
+        <Button size="sm" variant="outline" className="gap-1" asChild>
+          <Link to="/manage/flows/map">
+            <MapIcon className="size-4" />
+            Map
+          </Link>
+        </Button>
         {creating ? (
           <form
             className="flex items-center gap-2"
@@ -115,7 +132,7 @@ export default function Flows() {
               <li key={f.id}>
                 <Link
                   to={`/manage/flows/${f.id}`}
-                  className="flex h-full flex-col gap-2 rounded-lg border border-border bg-card p-4 shadow-sm transition-colors hover:bg-muted/40"
+                  className={`flex h-full flex-col gap-2 rounded-lg border border-border bg-card p-4 shadow-sm transition-colors hover:bg-muted/40 ${f.enabled ? '' : 'opacity-60'}`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <span className="flex items-center gap-2 font-medium">
@@ -127,20 +144,42 @@ export default function Flows() {
                         </span>
                       ) : null}
                     </span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="relative z-10 h-7 shrink-0 px-2"
-                      aria-label={`Delete ${f.name}`}
-                      onClick={(e) => {
-                        e.preventDefault()
-                        e.stopPropagation()
-                        void remove(f.id)
-                      }}
-                    >
-                      <Trash2 className="size-3.5" />
-                    </Button>
+                    <span className="relative z-10 flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                          f.enabled
+                            ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                            : 'bg-muted text-muted-foreground hover:bg-muted/70'
+                        }`}
+                        title={
+                          f.enabled
+                            ? 'Automation on — schedules and event triggers fire this flow. Click to turn off.'
+                            : 'Automation off — schedules skip it and event triggers ignore it (manual runs still work). Click to turn on.'
+                        }
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          void toggleEnabled(f)
+                        }}
+                      >
+                        {f.enabled ? 'On' : 'Off'}
+                      </button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2"
+                        aria-label={`Delete ${f.name}`}
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          void remove(f.id)
+                        }}
+                      >
+                        <Trash2 className="size-3.5" />
+                      </Button>
+                    </span>
                   </div>
                   {f.description ? (
                     <p className="line-clamp-2 text-xs text-muted-foreground">{f.description}</p>

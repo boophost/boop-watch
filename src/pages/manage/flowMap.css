@@ -1,0 +1,34 @@
+/* Flow Map canvas chrome — stronger grid + thicker group strokes when zoomed out. */
+.flow-map-edge-pulse {
+  stroke-dasharray: 6 4;
+  animation: flow-map-dash 0.6s linear infinite;
+}
+
+@keyframes flow-map-dash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.flow-map-group-active {
+  animation: flow-map-group-glow 1.6s ease-in-out infinite;
+}
+
+@keyframes flow-map-group-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.65);
+  }
+}
+
+.flow-map-canvas .react-flow__background {
+  background-color: #0b0a10;
+}
+
+.flow-map-label {
+  pointer-events: none;
+  white-space: nowrap;
+}

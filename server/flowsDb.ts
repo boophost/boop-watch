@@ -12,6 +12,7 @@ export interface FlowRow {
   description: string | null
   graph: string // JSON FlowGraph
   component: string | null
+  enabled: number // 0 = automation off (schedules + event triggers skip it)
   created_at: string
   updated_at: string
 }
@@ -22,6 +23,7 @@ export interface FlowSummary {
   description: string | null
   node_count: number
   published: boolean
+  enabled: boolean
   updated_at: string
 }
 
@@ -85,10 +87,23 @@ function db() {
         kind TEXT PRIMARY KEY,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      -- Singleton Flow Map layout: group positions + freeform sticky notes.
+      -- Shared across admins (unlike localStorage). id is always 1.
+      CREATE TABLE IF NOT EXISTS flow_map (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        state TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `)
     const cols = instance.prepare(`PRAGMA table_info(flows)`).all() as { name: string }[]
     if (!cols.some((c) => c.name === 'component')) {
       instance.exec(`ALTER TABLE flows ADD COLUMN component TEXT`)
+    }
+    // enabled = 0 turns a flow's automation off: its schedules roll forward
+    // without running and event triggers (trigger.new-item / trigger.release /
+    // …) no longer treat it as a subscriber. Manual runs stay allowed.
+    if (!cols.some((c) => c.name === 'enabled')) {
+      instance.exec(`ALTER TABLE flows ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`)
     }
     // A schedule can target a trigger name (fires every flow with that trigger)
     // instead of a single flow_id; legacy flow_id rows keep working.
@@ -354,6 +369,7 @@ export function listFlows(): FlowSummary[] {
       description: r.description,
       node_count: nodeCount,
       published: !!meta?.published,
+      enabled: !!r.enabled,
       updated_at: r.updated_at,
     }
   })
@@ -361,6 +377,170 @@ export function listFlows(): FlowSummary[] {
 
 export function listFlowGraphs(): { id: number; name: string; graph: string }[] {
   return db().prepare('SELECT id, name, graph FROM flows').all() as {
+    id: number
+    name: string
+    graph: string
+  }[]
+}
+
+/** Full graphs for the read-only Flow Map (sorted by name). */
+export function listFlowsForMap(): {
+  id: number
+  name: string
+  description: string | null
+  published: boolean
+  updated_at: string
+  graph: FlowGraph
+}[] {
+  const rows = db().prepare('SELECT * FROM flows ORDER BY name COLLATE NOCASE ASC').all() as FlowRow[]
+  return rows.map((r) => {
+    let graph: FlowGraph = { nodes: [], edges: [] }
+    try {
+      graph = JSON.parse(r.graph) as FlowGraph
+    } catch {
+      /* corrupt — empty */
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      published: !!parseComponent(r.component)?.published,
+      updated_at: r.updated_at,
+      graph,
+    }
+  })
+}
+
+/** Shared Flow Map layout + sticky notes / arrows (singleton row). */
+export interface FlowMapNote {
+  id: string
+  /** Defaults to sticky for pre-arrow map notes. */
+  kind?: 'sticky' | 'arrow'
+  x: number
+  y: number
+  width: number
+  height: number
+  text?: string
+  color?: string
+  strokeWidth?: number
+  headSize?: number
+  dash?: 'solid' | 'dashed' | 'dotted'
+  startHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  endHead?: 'none' | 'arrow' | 'triangle' | 'open' | 'diamond' | 'dot'
+  points?: { x: number; y: number }[]
+}
+
+export interface FlowMapState {
+  /** flowId string → absolute group position on the map canvas. */
+  layout: Record<string, { x: number; y: number }>
+  notes: FlowMapNote[]
+}
+
+const EMPTY_MAP_STATE: FlowMapState = { layout: {}, notes: [] }
+
+function parseMapState(raw: string | undefined | null): FlowMapState {
+  if (!raw) return { ...EMPTY_MAP_STATE, layout: {}, notes: [] }
+  try {
+    const parsed = JSON.parse(raw) as Partial<FlowMapState>
+    const layout =
+      parsed.layout && typeof parsed.layout === 'object' && !Array.isArray(parsed.layout)
+        ? (parsed.layout as FlowMapState['layout'])
+        : {}
+    const notes = Array.isArray(parsed.notes)
+      ? parsed.notes.filter(
+          (n): n is FlowMapNote =>
+            !!n &&
+            typeof n === 'object' &&
+            typeof (n as FlowMapNote).id === 'string' &&
+            typeof (n as FlowMapNote).x === 'number' &&
+            typeof (n as FlowMapNote).y === 'number',
+        )
+      : []
+    return { layout, notes }
+  } catch {
+    return { ...EMPTY_MAP_STATE, layout: {}, notes: [] }
+  }
+}
+
+export function getFlowMapState(): FlowMapState {
+  const row = db().prepare('SELECT state FROM flow_map WHERE id = 1').get() as
+    | { state: string }
+    | undefined
+  return parseMapState(row?.state)
+}
+
+export function saveFlowMapState(state: FlowMapState): FlowMapState {
+  const cleaned: FlowMapState = {
+    layout: state.layout ?? {},
+    notes: (state.notes ?? []).map((n): FlowMapNote => {
+      const kind: 'sticky' | 'arrow' = n.kind === 'arrow' ? 'arrow' : 'sticky'
+      if (kind === 'arrow') {
+        const dash =
+          n.dash === 'dashed' || n.dash === 'dotted' || n.dash === 'solid' ? n.dash : undefined
+        const headOk = (v: unknown): v is NonNullable<FlowMapNote['startHead']> =>
+          v === 'none' ||
+          v === 'arrow' ||
+          v === 'triangle' ||
+          v === 'open' ||
+          v === 'diamond' ||
+          v === 'dot'
+        const points = Array.isArray(n.points)
+          ? n.points
+              .filter(
+                (p): p is { x: number; y: number } =>
+                  !!p && typeof p === 'object' && typeof p.x === 'number' && typeof p.y === 'number',
+              )
+              .map((p) => ({
+                x: Math.min(1, Math.max(0, p.x)),
+                y: Math.min(1, Math.max(0, p.y)),
+              }))
+          : undefined
+        return {
+          id: String(n.id),
+          kind: 'arrow',
+          x: Math.round(n.x),
+          y: Math.round(n.y),
+          width: Math.max(64, Math.round(n.width || 200)),
+          height: Math.max(48, Math.round(n.height || 120)),
+          ...(n.color ? { color: String(n.color) } : {}),
+          ...(typeof n.strokeWidth === 'number'
+            ? { strokeWidth: Math.min(16, Math.max(1, n.strokeWidth)) }
+            : {}),
+          ...(typeof n.headSize === 'number'
+            ? { headSize: Math.min(48, Math.max(4, n.headSize)) }
+            : {}),
+          ...(dash ? { dash } : {}),
+          ...(headOk(n.startHead) ? { startHead: n.startHead } : {}),
+          ...(headOk(n.endHead) ? { endHead: n.endHead } : {}),
+          ...(points && points.length >= 2 ? { points } : {}),
+        }
+      }
+      return {
+        id: String(n.id),
+        kind: 'sticky',
+        x: Math.round(n.x),
+        y: Math.round(n.y),
+        width: Math.max(80, Math.round(n.width || 180)),
+        height: Math.max(60, Math.round(n.height || 120)),
+        text: String(n.text ?? ''),
+        ...(n.color ? { color: String(n.color) } : {}),
+      }
+    }),
+  }
+  db()
+    .prepare(
+      `INSERT INTO flow_map (id, state, updated_at) VALUES (1, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at`,
+    )
+    .run(JSON.stringify(cleaned))
+  return cleaned
+}
+
+// Only flows whose automation is on — what schedules and event triggers fan
+// out over. Structural consumers (component references, the editor) keep using
+// listFlowGraphs: a disabled flow still exists, it just doesn't fire.
+function listActiveFlowGraphs(): { id: number; name: string; graph: string }[] {
+  return db().prepare('SELECT id, name, graph FROM flows WHERE enabled = 1').all() as {
     id: number
     name: string
     graph: string
@@ -385,10 +565,10 @@ function triggerNamesOf(graphJson: string): string[] {
   }
 }
 
-// Flows whose graph contains a trigger.start with the given name — the
+// Enabled flows whose graph contains a trigger.start with the given name — the
 // subscribers a fireTrigger(name) publish fans out to (server/flowRoutes.ts).
 export function flowsWithTrigger(name: string): { id: number; name: string; graph: string }[] {
-  return listFlowGraphs().filter((f) => triggerNamesOf(f.graph).includes(name))
+  return listActiveFlowGraphs().filter((f) => triggerNamesOf(f.graph).includes(name))
 }
 
 // Distinct trigger names across all flows, sorted — for the schedule target
@@ -409,10 +589,12 @@ function graphHasNodeType(graphJson: string, type: string): boolean {
   }
 }
 
-// Flows whose graph contains a node of the given type — the subscribers an event
-// trigger (trigger.new-item / trigger.release) fires (server/flowRoutes.ts).
+// Enabled flows whose graph contains a node of the given type — the subscribers
+// an event trigger (trigger.new-item / trigger.release) fires
+// (server/flowRoutes.ts). Disabled flows also stop their watcher from polling
+// (server/scheduler.ts gates each watcher on this being non-empty).
 export function flowsWithTriggerType(type: string): { id: number; name: string; graph: string }[] {
-  return listFlowGraphs().filter((f) => graphHasNodeType(f.graph, type))
+  return listActiveFlowGraphs().filter((f) => graphHasNodeType(f.graph, type))
 }
 
 // --- Event-trigger watermark state ---------------------------------------
@@ -482,13 +664,19 @@ export function createFlow(name: string, description: string | null): FlowRow {
 
 export function updateFlow(
   id: number,
-  patch: { name?: string; description?: string | null; graph?: FlowGraph; component?: FlowComponentMeta | null },
+  patch: {
+    name?: string
+    description?: string | null
+    graph?: FlowGraph
+    component?: FlowComponentMeta | null
+    enabled?: boolean
+  },
 ): FlowRow | undefined {
   const existing = getFlow(id)
   if (!existing) return undefined
   db()
     .prepare(
-      `UPDATE flows SET name = ?, description = ?, graph = ?, component = ?, updated_at = datetime('now') WHERE id = ?`,
+      `UPDATE flows SET name = ?, description = ?, graph = ?, component = ?, enabled = ?, updated_at = datetime('now') WHERE id = ?`,
     )
     .run(
       patch.name ?? existing.name,
@@ -499,6 +687,7 @@ export function updateFlow(
         : patch.component
           ? JSON.stringify(patch.component)
           : null,
+      patch.enabled === undefined ? existing.enabled : patch.enabled ? 1 : 0,
       id,
     )
   return getFlow(id)
@@ -545,7 +734,9 @@ export interface FlowRunRow {
   activity: RunActivity[]
 }
 
-const RUN_LOG_LIMIT = 200
+// Sized for the wants era: an hourly chase + event fires churn history faster
+// than the old 3h schedules did.
+const RUN_LOG_LIMIT = 400
 
 // Returns the id of the inserted flow_runs row (so a scheduled fire can record
 // which run it produced in flow_schedules.last_run_id).
