@@ -155,6 +155,8 @@ interface MapNodeData extends Record<string, unknown> {
   flowName: string
   published: boolean
   active?: boolean
+  /** One-shot trigger flash (map group). */
+  flash?: boolean
   dimmed?: boolean
   specType?: string
   config?: Record<string, unknown>
@@ -584,7 +586,7 @@ const MapGroupNode = memo(function MapGroupNode({ data, selected }: NodeProps<Ma
         <div
           className={cn(
             'flex max-w-[min(70vw,520px)] items-center gap-2 rounded-md border bg-background/95 px-2.5 py-1 shadow-md backdrop-blur-sm',
-            data.active ? 'border-violet-400' : selected ? 'border-ring' : 'border-border',
+            data.active || data.flash ? 'border-violet-400' : selected ? 'border-ring' : 'border-border',
           )}
         >
           <span className="truncate text-sm font-semibold text-foreground">{data.flowName}</span>
@@ -593,7 +595,7 @@ const MapGroupNode = memo(function MapGroupNode({ data, selected }: NodeProps<Ma
               Component
             </span>
           ) : null}
-          {data.active ? (
+          {data.active || data.flash ? (
             <Loader2 className="size-3.5 shrink-0 animate-spin text-violet-400" />
           ) : (
             <Link
@@ -611,12 +613,14 @@ const MapGroupNode = memo(function MapGroupNode({ data, selected }: NodeProps<Ma
       <div
         className={cn(
           'h-full w-full rounded-xl bg-card/50 backdrop-blur-[1px]',
-          data.active
-            ? 'flow-map-group-active border-violet-400'
-            : selected
-              ? 'border-ring'
-              : 'border-violet-400/55',
-          data.dimmed && !data.active ? 'opacity-45' : null,
+          data.flash
+            ? 'flow-map-group-flash border-amber-300'
+            : data.active
+              ? 'flow-map-group-active border-violet-400'
+              : selected
+                ? 'border-ring'
+                : 'border-violet-400/55',
+          data.dimmed && !data.active && !data.flash ? 'opacity-45' : null,
         )}
         style={{ borderStyle: 'solid', borderWidth: borderPx }}
       />
@@ -932,6 +936,44 @@ function applyNotePatch(node: MapRFNode, patch: NotePatch): MapRFNode {
 
 // ---- page ------------------------------------------------------------------
 
+/** Resolve a flow.subflow node's target flow id from the parent graph. */
+function subflowTargetId(
+  flows: FlowMapEntry[],
+  parentFlowId: number,
+  nodeId: string,
+): number | null {
+  const rootId = nodeId.includes('/') ? nodeId.slice(0, nodeId.indexOf('/')) : nodeId
+  const flow = flows.find((f) => f.id === parentFlowId)
+  const node = flow?.graph.nodes.find((n) => n.id === rootId)
+  if (!node || node.type !== 'flow.subflow') return null
+  const fid = Number(node.config.flowId)
+  return Number.isFinite(fid) ? fid : null
+}
+
+/** Canvas node ids that should light up for an activity nodeId (parent + nested). */
+function activityCanvasIds(
+  flows: FlowMapEntry[],
+  parentFlowId: number,
+  nodeId: string,
+): string[] {
+  const rootId = nodeId.includes('/') ? nodeId.slice(0, nodeId.indexOf('/')) : nodeId
+  const ids = new Set<string>([mapNodeId(parentFlowId, rootId)])
+  if (nodeId.includes('/')) {
+    ids.add(mapNodeId(parentFlowId, nodeId))
+    const childFid = subflowTargetId(flows, parentFlowId, rootId)
+    if (childFid != null) {
+      const inner = nodeId.slice(rootId.length + 1)
+      if (inner) ids.add(mapNodeId(childFid, inner))
+    }
+  } else {
+    const childFid = subflowTargetId(flows, parentFlowId, rootId)
+    if (childFid != null) {
+      // Composite entered — light the child group via liveFlowIds, not a fake node.
+    }
+  }
+  return [...ids]
+}
+
 function FlowMapInner() {
   const [flows, setFlows] = useState<FlowMapEntry[]>([])
   const [specs, setSpecs] = useState<Map<string, NodeSpec>>(new Map())
@@ -942,6 +984,10 @@ function FlowMapInner() {
   const [live, setLive] = useState<LiveRun | null>(null)
   const [nodeLive, setNodeLive] = useState<Record<string, NodeLive>>({})
   const [fadeUntil, setFadeUntil] = useState(0)
+  /** Flow groups currently participating in the live run (parent + subflow targets). */
+  const [liveFlowIds, setLiveFlowIds] = useState<number[]>([])
+  /** flowId → flash animation end timestamp */
+  const [flashUntil, setFlashUntil] = useState<Record<number, number>>({})
   const [queues, setQueues] = useState<Record<string, QueueStat>>({})
   const [gen, setGen] = useState(0)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
@@ -949,13 +995,46 @@ function FlowMapInner() {
   const notesRef = useRef<FlowMapNote[]>([])
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const noteSeq = useRef(0)
+  const flowsRef = useRef(flows)
+  flowsRef.current = flows
+  const flashTimers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map())
+
+  const flashFlow = useCallback((flowId: number) => {
+    const until = Date.now() + 700
+    setFlashUntil((prev) => ({ ...prev, [flowId]: until }))
+    const prevTimer = flashTimers.current.get(flowId)
+    if (prevTimer) clearTimeout(prevTimer)
+    const t = setTimeout(() => {
+      setFlashUntil((prev) => {
+        if (prev[flowId] !== until) return prev
+        const next = { ...prev }
+        delete next[flowId]
+        return next
+      })
+      flashTimers.current.delete(flowId)
+    }, 720)
+    flashTimers.current.set(flowId, t)
+  }, [])
+
+  const lightFlow = useCallback(
+    (flowId: number, opts?: { flash?: boolean; replace?: boolean }) => {
+      setLiveFlowIds((prev) => {
+        if (opts?.replace) return [flowId]
+        return prev.includes(flowId) ? prev : [...prev, flowId]
+      })
+      if (opts?.flash !== false) flashFlow(flowId)
+    },
+    [flashFlow],
+  )
 
   const [nodes, setNodes, onNodesChange] = useNodesState<MapRFNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<MapRFEdge>([])
   const nodesRef = useRef(nodes)
   const edgesRef = useRef(edges)
+  const liveRef = useRef(live)
   nodesRef.current = nodes
   edgesRef.current = edges
+  liveRef.current = live
 
   const { screenToFlowPosition } = useReactFlow()
   const {
@@ -1251,56 +1330,94 @@ function FlowMapInner() {
           })
           setNodeLive({})
           setFadeUntil(0)
+          if (ev.flowId != null) lightFlow(ev.flowId, { replace: true, flash: true })
+          else setLiveFlowIds([])
           break
-        case 'node-start':
-          setLive((p) => {
-            if (!p || p.runToken !== ev.runToken) return p
-            const mid = p.flowId != null ? mapNodeId(p.flowId, ev.nodeId) : ev.nodeId
-            setNodeLive((nl) => ({ ...nl, [mid]: { ...nl[mid], running: true } }))
-            return p
+        case 'node-start': {
+          const p = liveRef.current
+          if (!p || p.runToken !== ev.runToken) break
+          const parentId = p.flowId
+          if (parentId == null) break
+          const targets = activityCanvasIds(flowsRef.current, parentId, ev.nodeId)
+          setNodeLive((nl) => {
+            const next = { ...nl }
+            for (const mid of targets) next[mid] = { ...next[mid], running: true }
+            return next
           })
+          const child = subflowTargetId(flowsRef.current, parentId, ev.nodeId)
+          if (child != null) lightFlow(child, { flash: !ev.nodeId.includes('/') })
           break
-        case 'node':
-          setLive((p) => {
-            if (!p || p.runToken !== ev.runToken) return p
-            const mid = p.flowId != null ? mapNodeId(p.flowId, ev.nodeId) : ev.nodeId
-            const report: NodeReport = {
-              status: ev.status,
-              durationMs: ev.durationMs ?? 0,
-              counts: ev.counts ?? {},
-              samples: {},
-              notes: ev.notes,
-              ...(ev.error ? { error: ev.error } : {}),
+        }
+        case 'node': {
+          const p = liveRef.current
+          if (!p || p.runToken !== ev.runToken) break
+          const parentId = p.flowId
+          const report: NodeReport = {
+            status: ev.status,
+            durationMs: ev.durationMs ?? 0,
+            counts: ev.counts ?? {},
+            samples: {},
+            notes: ev.notes,
+            ...(ev.error ? { error: ev.error } : {}),
+          }
+          if (parentId != null) {
+            const targets = activityCanvasIds(flowsRef.current, parentId, ev.nodeId)
+            const nested = ev.nodeId.includes('/')
+            setNodeLive((nl) => {
+              const next = { ...nl }
+              for (const mid of targets) {
+                if (nested && mid === mapNodeId(parentId, ev.nodeId.slice(0, ev.nodeId.indexOf('/')))) {
+                  next[mid] = { ...next[mid], running: true }
+                } else {
+                  next[mid] = { running: false, report }
+                }
+              }
+              return next
+            })
+            if (ev.nodeType === 'flow.subflow' || nested) {
+              const child = subflowTargetId(flowsRef.current, parentId, ev.nodeId)
+              if (child != null) lightFlow(child, { flash: ev.nodeType === 'flow.subflow' && !nested })
             }
-            setNodeLive((nl) => ({
-              ...nl,
-              [mid]: { running: false, report },
-            }))
             if (ev.counts) {
-              const now = Date.now()
-              setEdges((eds) =>
-                eds.map((e) => {
-                  if (e.source !== mid) return e
-                  const handle = e.sourceHandle ?? ''
-                  const count = ev.counts?.[handle]
-                  if (count == null) return e
-                  return {
-                    ...e,
-                    animated: count > 0,
-                    data: { ...e.data, pulse: count, pulseAt: now },
-                    style: {
-                      ...e.style,
-                      stroke: count > 0 ? '#a78bfa' : 'rgba(167,139,250,0.45)',
-                      strokeWidth: count > 0 ? 2.5 : 1.5,
-                    },
-                  }
-                }),
-              )
+              const nowMs = Date.now()
+              let sourceMid: string | null = null
+              if (!nested) {
+                sourceMid = mapNodeId(parentId, ev.nodeId)
+              } else {
+                const child = subflowTargetId(flowsRef.current, parentId, ev.nodeId)
+                const rootId = ev.nodeId.slice(0, ev.nodeId.indexOf('/'))
+                const inner = ev.nodeId.slice(rootId.length + 1)
+                if (child != null && inner) sourceMid = mapNodeId(child, inner)
+              }
+              if (sourceMid) {
+                const mid = sourceMid
+                setEdges((eds) =>
+                  eds.map((e) => {
+                    if (e.source !== mid) return e
+                    const handle = e.sourceHandle ?? ''
+                    const count = ev.counts?.[handle]
+                    if (count == null) return e
+                    return {
+                      ...e,
+                      animated: count > 0,
+                      data: { ...e.data, pulse: count, pulseAt: nowMs },
+                      style: {
+                        ...e.style,
+                        stroke: count > 0 ? '#a78bfa' : 'rgba(167,139,250,0.45)',
+                        strokeWidth: count > 0 ? 2.5 : 1.5,
+                      },
+                    }
+                  }),
+                )
+              }
             }
+          }
+          setLive((prev) => {
+            if (!prev || prev.runToken !== ev.runToken) return prev
             return {
-              ...p,
+              ...prev,
               nodes: [
-                ...p.nodes,
+                ...prev.nodes,
                 {
                   node: ev.node,
                   type: ev.nodeType,
@@ -1312,6 +1429,7 @@ function FlowMapInner() {
             }
           })
           break
+        }
         case 'done':
         case 'aborted': {
           const token = ev.runToken
@@ -1323,6 +1441,7 @@ function FlowMapInner() {
           setTimeout(() => {
             if (cancelled) return
             setLive((p) => (p && p.runToken === token ? null : p))
+            setLiveFlowIds([])
             setEdges((eds) =>
               eds.map((e) => ({
                 ...e,
@@ -1357,23 +1476,35 @@ function FlowMapInner() {
     return () => {
       cancelled = true
       ac.abort()
+      for (const t of flashTimers.current.values()) clearTimeout(t)
+      flashTimers.current.clear()
     }
-  }, [gen, setEdges])
+  }, [gen, setEdges, lightFlow])
 
-  const activeFlowId = live?.flowId ?? null
-  const dimOthers = activeFlowId != null || (fadeUntil > Date.now() && live != null)
+  const now = Date.now()
+  const activeFlowIds = useMemo(() => new Set(liveFlowIds), [liveFlowIds])
+  const flashingIds = useMemo(() => {
+    const s = new Set<number>()
+    for (const [id, until] of Object.entries(flashUntil)) {
+      if (until > now) s.add(Number(id))
+    }
+    return s
+  }, [flashUntil, now])
+  const dimOthers = activeFlowIds.size > 0 || (fadeUntil > Date.now() && live != null)
 
   const displayNodes = useMemo(
     () =>
       nodes.map((n) => {
         if (n.type === 'mapGroup') {
-          const active = activeFlowId != null && n.data.flowId === activeFlowId
+          const active = activeFlowIds.has(n.data.flowId)
+          const flash = flashingIds.has(n.data.flowId)
           return {
             ...n,
             data: {
               ...n.data,
               active,
-              dimmed: dimOthers && !active,
+              flash,
+              dimmed: dimOthers && !active && !flash,
             },
           }
         }
@@ -1381,7 +1512,7 @@ function FlowMapInner() {
           return { ...n, draggable: true }
         }
         const overlay = nodeLive[n.id]
-        const active = activeFlowId != null && n.data.flowId === activeFlowId
+        const active = activeFlowIds.has(n.data.flowId)
         return {
           ...n,
           data: {
@@ -1393,7 +1524,7 @@ function FlowMapInner() {
           draggable: false,
         }
       }),
-    [nodes, nodeLive, activeFlowId, dimOthers],
+    [nodes, nodeLive, activeFlowIds, flashingIds, dimOthers],
   )
 
   const queueEntries = Object.entries(queues)
