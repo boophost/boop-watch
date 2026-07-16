@@ -39,6 +39,8 @@ import {
   StickyNote,
   Waypoints,
   Trash2,
+  Undo2,
+  Redo2,
   Unlink,
   X,
 } from 'lucide-react'
@@ -66,11 +68,20 @@ import {
   type NodeReport,
   type ComponentInterface,
 } from '@/lib/flows'
-import { isEditorNode, editorRotationFromConfig, normalizeRotation } from '@/lib/flowEditorMeta'
+import {
+  DEFAULT_ARROW_POINTS,
+  isEditorNode,
+  editorRotationFromConfig,
+  normalizeArrowConfig,
+  normalizeRotation,
+  type ArrowDash,
+  type ArrowHead,
+} from '@/lib/flowEditorMeta'
 import {
   editorNodeTypes,
   editorRfType,
 } from './flowEditorAnnotations'
+import { useFlowHistory } from './useFlowHistory'
 
 // ---- graph <-> React Flow conversion ---------------------------------------
 
@@ -617,16 +628,32 @@ function toRF(graph: FlowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
       const rfType = n.type === 'transform.reroute' ? 'reroute' : editorRfType(n.type)
       const groupId = typeof n.config.groupId === 'string' ? n.config.groupId : undefined
       const parentLocked = groupId ? lockedGroups.get(groupId) : false
-      const width = typeof n.config.width === 'number' ? n.config.width : undefined
-      const height = typeof n.config.height === 'number' ? n.config.height : undefined
       const config = { ...n.config }
       delete config.groupId
+      if (n.type === 'editor.arrow') {
+        const hadPoints = Array.isArray(n.config.points) && (n.config.points as unknown[]).length >= 2
+        const normalized = normalizeArrowConfig(config)
+        Object.assign(config, normalized)
+        delete config.rotation
+        delete config.direction
+        // Legacy short boxes were for straight shafts — give curves room when migrating.
+        if (!hadPoints && (typeof config.height !== 'number' || config.height < 80)) {
+          config.height = 120
+        }
+        if (!hadPoints && (typeof config.width !== 'number' || config.width < 120)) {
+          config.width = 200
+        }
+      }
+      const width = typeof config.width === 'number' ? config.width : undefined
+      const height = typeof config.height === 'number' ? config.height : undefined
       const style =
         width && height
           ? { width, height }
           : rfType === 'group'
             ? { width: width ?? 280, height: height ?? 180 }
-            : undefined
+            : rfType === 'arrow'
+              ? { width: width ?? 200, height: height ?? 120 }
+              : undefined
       return {
         id: n.id,
         type: rfType,
@@ -698,9 +725,34 @@ const EDITOR_DEFAULTS: Record<string, Record<string, unknown>> = {
     verticalAlign: 'top',
     rotation: 0,
   },
-  'editor.arrow': { width: 160, height: 48, rotation: 0 },
+  'editor.arrow': {
+    width: 200,
+    height: 120,
+    color: '#a1a1aa',
+    strokeWidth: 2,
+    headSize: 10,
+    dash: 'solid',
+    startHead: 'none',
+    endHead: 'arrow',
+    points: DEFAULT_ARROW_POINTS.map((p) => ({ ...p })),
+  },
   'editor.group': { title: 'Group', color: 'rgba(124, 92, 255, 0.12)', width: 280, height: 180, locked: false },
 }
+
+const ARROW_DASH_OPTIONS: { value: ArrowDash; label: string }[] = [
+  { value: 'solid', label: 'Solid' },
+  { value: 'dashed', label: 'Dashed' },
+  { value: 'dotted', label: 'Dotted' },
+]
+
+const ARROW_HEAD_OPTIONS: { value: ArrowHead; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'arrow', label: 'Arrow' },
+  { value: 'triangle', label: 'Triangle' },
+  { value: 'open', label: 'Open' },
+  { value: 'diamond', label: 'Diamond' },
+  { value: 'dot', label: 'Dot' },
+]
 
 function EditorRotationField({
   value,
@@ -765,6 +817,7 @@ function FlowEditorInner() {
   const [components, setComponents] = useState<NodeSpec[]>([])
   const [name, setName] = useState('')
   const [component, setComponent] = useState<FlowComponentMeta | null>(null)
+  const [enabled, setEnabled] = useState(true)
   const [componentPanelOpen, setComponentPanelOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [dirty, setDirty] = useState(false)
@@ -785,6 +838,51 @@ function FlowEditorInner() {
   const addAt = useRef(0)
   const clipboardRef = useRef<{ nodes: RFNode[]; edges: RFEdge[] } | null>(null)
   const { screenToFlowPosition } = useReactFlow()
+  const nodesRef = useRef(nodes)
+  const edgesRef = useRef(edges)
+  nodesRef.current = nodes
+  edgesRef.current = edges
+  const {
+    takeSnapshot: pushHistory,
+    undo: undoHistory,
+    redo: redoHistory,
+    clear: clearHistory,
+    canUndo,
+    canRedo,
+  } = useFlowHistory<RFNode, RFEdge>()
+
+  const snapshot = useCallback(() => {
+    pushHistory(nodesRef.current, edgesRef.current)
+  }, [pushHistory])
+
+  // Delete often emits node removes then edge removes in the same turn — one
+  // snapshot for the whole gesture, not one per handler.
+  const snapLock = useRef(false)
+  const snapshotOnce = useCallback(() => {
+    if (snapLock.current) return
+    snapLock.current = true
+    snapshot()
+    queueMicrotask(() => {
+      snapLock.current = false
+    })
+  }, [snapshot])
+
+  const restoreSnapshot = useCallback(
+    (snap: { nodes: RFNode[]; edges: RFEdge[] }) => {
+      setNodes(snap.nodes)
+      setEdges(snap.edges)
+      setDirty(true)
+    },
+    [setNodes, setEdges],
+  )
+
+  const undo = useCallback(() => {
+    undoHistory(nodesRef.current, edgesRef.current, restoreSnapshot)
+  }, [undoHistory, restoreSnapshot])
+
+  const redo = useCallback(() => {
+    redoHistory(nodesRef.current, edgesRef.current, restoreSnapshot)
+  }, [redoHistory, restoreSnapshot])
 
   useEffect(() => {
     if (!Number.isFinite(id)) {
@@ -806,9 +904,12 @@ function FlowEditorInner() {
         setComponents(comps)
         setName(flow.flow.name)
         setComponent(flow.flow.component)
+        setEnabled(!!flow.flow.enabled)
         const rf = toRF(flow.flow.graph)
         setNodes(rf.nodes)
         setEdges(rf.edges)
+        clearHistory()
+        setDirty(false)
       } catch {
         if (!cancelled) navigate('/manage/flows', { replace: true })
       } finally {
@@ -818,7 +919,7 @@ function FlowEditorInner() {
     return () => {
       cancelled = true
     }
-  }, [id, navigate, setNodes, setEdges])
+  }, [id, navigate, setNodes, setEdges, clearHistory])
 
   const selected = nodes.find((n) => n.selected)
   const selectedSpec = selected && !isEditorNode(selected.data.specType)
@@ -924,18 +1025,20 @@ function FlowEditorInner() {
 
   const onConnect = useCallback(
     (conn: Connection) => {
+      snapshot()
       setEdges((eds) => addEdge(conn, eds))
       setDirty(true)
     },
-    [setEdges],
+    [setEdges, snapshot],
   )
 
   const onReconnect = useCallback(
     (oldEdge: RFEdge, newConnection: Connection) => {
+      snapshot()
       setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds))
       setDirty(true)
     },
-    [setEdges],
+    [setEdges, snapshot],
   )
 
   /** Resolves the NodePort behind one end of a connection: subflow nodes via
@@ -1034,6 +1137,7 @@ function FlowEditorInner() {
     specType: 'editor.sticky' | 'editor.arrow' | 'editor.group',
     position?: { x: number; y: number },
   ) => {
+    snapshot()
     const n = addAt.current++
     const config = { ...EDITOR_DEFAULTS[specType] }
     const rfType = editorRfType(specType)
@@ -1058,6 +1162,7 @@ function FlowEditorInner() {
   }
 
   const addNode = (spec: NodeSpec, position?: { x: number; y: number }) => {
+    snapshot()
     const n = addAt.current++
     const config =
       spec.type === 'flow.subflow'
@@ -1096,6 +1201,7 @@ function FlowEditorInner() {
   }
 
   const addReroute = (position?: { x: number; y: number }) => {
+    snapshot()
     const n = addAt.current
     const node = newReroute(position ?? { x: 120 + n * 24, y: 120 + n * 24 })
     setNodes((ns) => [...ns.map((x) => ({ ...x, selected: false })), { ...node, selected: true }])
@@ -1107,6 +1213,7 @@ function FlowEditorInner() {
   // Double-clicking a wire drops an anchor onto it, splitting source→target into
   // source→reroute→target at the click point.
   const insertReroute = (edge: RFEdge, position: { x: number; y: number }) => {
+    snapshot()
     // Center the box (and thus the visible dot) on the click point.
     const node = newReroute({ x: position.x - 15, y: position.y - 15 })
     setNodes((ns) => [...ns.map((x) => ({ ...x, selected: false })), { ...node, selected: true }])
@@ -1119,6 +1226,7 @@ function FlowEditorInner() {
   }
 
   const removeNode = (nodeId: string) => {
+    snapshot()
     const target = nodes.find((n) => n.id === nodeId)
     if (target?.data.specType === 'editor.group') {
       setNodes((ns) =>
@@ -1148,6 +1256,7 @@ function FlowEditorInner() {
   const removeSelected = useCallback(() => {
     const ids = new Set(nodes.filter((n) => n.selected).map((n) => n.id))
     if (ids.size === 0) return
+    snapshot()
     setNodes((ns) => {
       let next = ns.filter((n) => !ids.has(n.id))
       for (const target of nodes) {
@@ -1170,11 +1279,12 @@ function FlowEditorInner() {
     setEdges((es) => es.filter((e) => !ids.has(e.source) && !ids.has(e.target)))
     setMenu(null)
     setDirty(true)
-  }, [nodes, setNodes, setEdges])
+  }, [nodes, setNodes, setEdges, snapshot])
 
   const groupSelection = useCallback(() => {
     const picked = nodes.filter((n) => n.selected && n.data.specType !== 'editor.group')
     if (picked.length < 2) return
+    snapshot()
     const bounds = getNodesBounds(picked)
     const padding = 24
     const titleH = 28
@@ -1215,7 +1325,7 @@ function FlowEditorInner() {
     ])
     setMenu(null)
     setDirty(true)
-  }, [nodes, setNodes])
+  }, [nodes, setNodes, snapshot])
 
   const copyNodes = useCallback(
     (nodeIds: string[]) => {
@@ -1241,6 +1351,7 @@ function FlowEditorInner() {
   const pasteClipboard = useCallback(() => {
     const clip = clipboardRef.current
     if (!clip) return
+    snapshot()
     const idMap = new Map<string, string>()
     for (const node of clip.nodes) {
       idMap.set(node.id, `n${Date.now().toString(36)}${addAt.current++}`)
@@ -1264,7 +1375,7 @@ function FlowEditorInner() {
     setEdges((es) => [...es, ...newEdges])
     setMenu(null)
     setDirty(true)
-  }, [setNodes, setEdges])
+  }, [setNodes, setEdges, snapshot])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1285,15 +1396,22 @@ function FlowEditorInner() {
       } else if (mod && e.key === 'g') {
         e.preventDefault()
         groupSelection()
+      } else if (mod && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undo()
+      } else if ((mod && e.key === 'y') || (mod && e.key === 'z' && e.shiftKey)) {
+        e.preventDefault()
+        redo()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [copySelection, pasteClipboard, groupSelection])
+  }, [copySelection, pasteClipboard, groupSelection, undo, redo])
 
   const duplicateNode = (nodeId: string) => {
     const src = nodes.find((n) => n.id === nodeId)
     if (!src) return
+    snapshot()
     const n = addAt.current++
     setNodes((ns) => [
       ...ns.map((node) => ({ ...node, selected: false })),
@@ -1312,6 +1430,7 @@ function FlowEditorInner() {
   }
 
   const removeEdge = (edgeId: string) => {
+    snapshot()
     setEdges((es) => es.filter((e) => e.id !== edgeId))
     setMenu(null)
     setDirty(true)
@@ -1357,6 +1476,19 @@ function FlowEditorInner() {
       setError(e instanceof Error ? e.message : 'Save failed')
     } finally {
       setSaving(false)
+    }
+  }
+
+  // Persists immediately, independent of unsaved graph edits — flipping
+  // automation off must not require (or wait for) a graph save.
+  const toggleEnabled = async () => {
+    const next = !enabled
+    setEnabled(next)
+    try {
+      await saveFlow(id, { enabled: next })
+    } catch (e) {
+      setEnabled(!next)
+      setError(e instanceof Error ? e.message : 'Failed to update automation')
     }
   }
 
@@ -1472,6 +1604,26 @@ function FlowEditorInner() {
             variant="outline"
             size="sm"
             className="gap-1 px-2"
+            title="Undo (Ctrl+Z)"
+            disabled={!canUndo}
+            onClick={() => undo()}
+          >
+            <Undo2 className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
+            title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+            disabled={!canRedo}
+            onClick={() => redo()}
+          >
+            <Redo2 className="size-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1 px-2"
             title="Notes"
             onClick={() => addEditorNode('editor.sticky')}
           >
@@ -1529,6 +1681,25 @@ function FlowEditorInner() {
               </>
             ) : null}
           </div>
+          {/* Automation on/off — whether schedules + event triggers fire this
+              flow. Independent of Dry/Live, which only shapes manual runs here. */}
+          <button
+            type="button"
+            className={`rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              enabled
+                ? 'border-input text-emerald-400 hover:bg-muted/60'
+                : 'border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+            }`}
+            title={
+              enabled
+                ? 'Automation on: schedules and event triggers fire this flow. Click to turn off.'
+                : 'Automation off: schedules skip this flow and event triggers ignore it. Manual runs still work. Click to turn on.'
+            }
+            onClick={() => void toggleEnabled()}
+          >
+            <span className="hidden sm:inline">Auto </span>
+            {enabled ? 'on' : 'off'}
+          </button>
           {/* Dry vs Live applies to every run — the per-trigger ▶ buttons and the
               whole-flow Run below. */}
           <div
@@ -1688,7 +1859,11 @@ function FlowEditorInner() {
           edges={styledEdges}
           nodeTypes={nodeTypes}
           isValidConnection={isValidConnection}
+          deleteKeyCode={['Backspace', 'Delete']}
+          onNodeDragStart={() => snapshot()}
+          onSelectionDragStart={() => snapshot()}
           onNodesChange={(changes) => {
+            if (changes.some((c) => c.type === 'remove')) snapshotOnce()
             onNodesChange(changes)
             if (
               changes.some(
@@ -1703,6 +1878,7 @@ function FlowEditorInner() {
             }
           }}
           onEdgesChange={(changes) => {
+            if (changes.some((c) => c.type === 'remove')) snapshotOnce()
             onEdgesChange(changes)
             if (changes.some((c) => c.type === 'remove')) markDirty()
           }}
@@ -2046,24 +2222,180 @@ function FlowEditorInner() {
                       </div>
                     </>
                   ) : selected.data.specType === 'editor.arrow' ? (
-                    <>
-                      <EditorRotationField
-                        value={editorRotationFromConfig('editor.arrow', selected.data.config)}
-                        onChange={(rotation) => setConfigValue('rotation', rotation)}
-                      />
-                      <div className="space-y-1">
-                        <label className="text-xs font-medium" htmlFor="ed-arrow-color">
-                          Color
-                        </label>
-                        <Input
-                          id="ed-arrow-color"
-                          className="h-8 font-mono"
-                          value={String(selected.data.config.color ?? '')}
-                          placeholder="CSS color"
-                          onChange={(e) => setConfigValue('color', e.target.value)}
-                        />
-                      </div>
-                    </>
+                    (() => {
+                      const arrow = normalizeArrowConfig(selected.data.config)
+                      const points = arrow.points ?? DEFAULT_ARROW_POINTS
+                      const patchArrow = (patch: Record<string, unknown>) => {
+                        const next = normalizeArrowConfig({ ...selected.data.config, ...patch })
+                        patchEditorConfig(selected.id, {
+                          ...next,
+                          rotation: undefined,
+                          direction: undefined,
+                        })
+                      }
+                      return (
+                        <>
+                          <div className="space-y-1">
+                            <label className="text-xs font-medium" htmlFor="ed-arrow-color">
+                              Color
+                            </label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                id="ed-arrow-color"
+                                type="color"
+                                className="h-8 w-10 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
+                                value={
+                                  /^#[0-9a-f]{6}$/i.test(String(arrow.color ?? ''))
+                                    ? String(arrow.color)
+                                    : '#a1a1aa'
+                                }
+                                onChange={(e) => patchArrow({ color: e.target.value })}
+                              />
+                              <Input
+                                className="h-8 font-mono"
+                                value={String(arrow.color ?? '#a1a1aa')}
+                                onChange={(e) => patchArrow({ color: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-stroke">
+                                Thickness
+                              </label>
+                              <Input
+                                id="ed-arrow-stroke"
+                                className="h-8"
+                                type="number"
+                                min={1}
+                                max={16}
+                                value={arrow.strokeWidth ?? 2}
+                                onChange={(e) =>
+                                  patchArrow({
+                                    strokeWidth: Math.min(16, Math.max(1, Number(e.target.value) || 2)),
+                                  })
+                                }
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-head-size">
+                                Head size
+                              </label>
+                              <Input
+                                id="ed-arrow-head-size"
+                                className="h-8"
+                                type="number"
+                                min={4}
+                                max={48}
+                                value={arrow.headSize ?? 10}
+                                onChange={(e) =>
+                                  patchArrow({
+                                    headSize: Math.min(48, Math.max(4, Number(e.target.value) || 10)),
+                                  })
+                                }
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-xs font-medium">Line style</span>
+                            <div className="flex gap-1">
+                              {ARROW_DASH_OPTIONS.map((opt) => (
+                                <Button
+                                  key={opt.value}
+                                  type="button"
+                                  variant={(arrow.dash ?? 'solid') === opt.value ? 'secondary' : 'outline'}
+                                  size="sm"
+                                  className="h-8 flex-1 px-2 text-xs"
+                                  onClick={() => patchArrow({ dash: opt.value })}
+                                >
+                                  {opt.label}
+                                </Button>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-start-head">
+                                Start head
+                              </label>
+                              <select
+                                id="ed-arrow-start-head"
+                                className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                                value={arrow.startHead ?? 'none'}
+                                onChange={(e) => patchArrow({ startHead: e.target.value as ArrowHead })}
+                              >
+                                {ARROW_HEAD_OPTIONS.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-xs font-medium" htmlFor="ed-arrow-end-head">
+                                End head
+                              </label>
+                              <select
+                                id="ed-arrow-end-head"
+                                className="flex h-8 w-full rounded-md border border-input bg-transparent px-2 text-xs"
+                                value={arrow.endHead ?? 'arrow'}
+                                onChange={(e) => patchArrow({ endHead: e.target.value as ArrowHead })}
+                              >
+                                {ARROW_HEAD_OPTIONS.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-xs font-medium">Curve points</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">{points.length} points</span>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                disabled={points.length >= 8}
+                                onClick={() => {
+                                  const mid = Math.floor(points.length / 2)
+                                  const a = points[mid - 1] ?? points[0]
+                                  const b = points[mid] ?? points[points.length - 1]
+                                  const inserted = {
+                                    x: (a.x + b.x) / 2,
+                                    y: Math.min(1, Math.max(0, (a.y + b.y) / 2 - 0.12)),
+                                  }
+                                  const next = [...points.slice(0, mid), inserted, ...points.slice(mid)]
+                                  patchArrow({ points: next })
+                                }}
+                              >
+                                Add bend
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 px-2 text-xs"
+                                disabled={points.length <= 2}
+                                onClick={() => {
+                                  if (points.length <= 2) return
+                                  const mid = Math.floor(points.length / 2)
+                                  const next = points.filter((_, i) => i !== mid)
+                                  patchArrow({ points: next.length >= 2 ? next : points })
+                                }}
+                              >
+                                Remove bend
+                              </Button>
+                            </div>
+                            <p className="text-[10px] text-muted-foreground">
+                              Select the arrow and drag the handles to reshape the curve.
+                            </p>
+                          </div>
+                        </>
+                      )
+                    })()
                   ) : (
                     <>
                       <div className="space-y-1">

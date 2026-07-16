@@ -105,6 +105,8 @@ export async function runFlowAndRecord(
         nodeType: type,
         status: nodeReport.status,
         notes: nodeReport.notes,
+        counts: nodeReport.counts,
+        durationMs: nodeReport.durationMs,
         ...(nodeReport.error ? { error: nodeReport.error } : {}),
       })
       hooks?.onNodeDone?.(nodeId, nodeReport)
@@ -245,6 +247,25 @@ flowRouter.get('/api/flows', (_req, res) => {
   res.json({ flows: flowsDb.listFlows() })
 })
 
+// Bulk graph payload for the read-only Flow Map. Declared before `/:id` so
+// "map" isn't captured as an id. One round-trip instead of N× GET /api/flows/:id.
+flowRouter.get('/api/flows/map', (_req, res) => {
+  const state = flowsDb.getFlowMapState()
+  res.json({ flows: flowsDb.listFlowsForMap(), layout: state.layout, notes: state.notes })
+})
+
+// Persist Flow Map group positions + sticky notes (shared for all admins).
+flowRouter.put('/api/flows/map/state', (req, res) => {
+  const body = req.body as { layout?: unknown; notes?: unknown }
+  const layout =
+    body.layout && typeof body.layout === 'object' && !Array.isArray(body.layout)
+      ? (body.layout as flowsDb.FlowMapState['layout'])
+      : {}
+  const notes = Array.isArray(body.notes) ? (body.notes as flowsDb.FlowMapNote[]) : []
+  const state = flowsDb.saveFlowMapState({ layout, notes })
+  res.json({ layout: state.layout, notes: state.notes })
+})
+
 flowRouter.post('/api/flows', (req, res) => {
   const body = req.body as { name?: unknown; description?: unknown }
   const name = typeof body.name === 'string' ? body.name.trim() : ''
@@ -310,8 +331,16 @@ flowRouter.put('/api/flows/:id', (req, res) => {
     description?: unknown
     graph?: unknown
     component?: unknown
+    enabled?: unknown
   }
   const patch: Parameters<typeof flowsDb.updateFlow>[1] = {}
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled must be a boolean' })
+      return
+    }
+    patch.enabled = body.enabled
+  }
   if (body.name !== undefined) {
     if (typeof body.name !== 'string' || !body.name.trim()) {
       res.status(400).json({ error: 'name must be a non-empty string' })
@@ -502,6 +531,9 @@ export function dispatchFires(fires: FireRequest[] | undefined): void {
   })().catch((e) => console.error('dispatchFires failed', e))
 }
 
+// Deliberately ignores flows.enabled: disable turns off *automation*
+// (schedules + event triggers), while manual runs are how you iterate on a
+// disabled flow before switching it back on.
 flowRouter.post('/api/flows/:id/run', async (req, res) => {
   const id = Number(req.params.id)
   const row = Number.isFinite(id) ? flowsDb.getFlow(id) : undefined

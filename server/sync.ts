@@ -1,11 +1,12 @@
 import { jfJson, JfItem } from './jellyfin.js'
 import { upsertPortalItem, prunePortalItemsNotIn, PortalItem, getPortalItem } from './portalDb.js'
 import {
-  listSeries, SeriesRow, EpisodeRow,
-  countCachedEpisodes, getEpisodeTitles, upsertEpisodes,
+  listSeries, SeriesRow,
+  countCachedEpisodes, getEpisodeTitles,
   lastFetchAttempt, recordFetchAttempt,
 } from './db.js'
-import { searchAnime, pickPosterUrl, fetchAnimeEpisodesPage, episodeNumberFromUrl } from './jikan.js'
+import { searchAnime, pickPosterUrl } from './jikan.js'
+import { fillEpisodeTitles } from './episodes.js'
 import { ensureFranchiseBanners } from './banners.js'
 
 const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
@@ -38,23 +39,19 @@ const RETRY_EMPTY_MS = 24 * 60 * 60 * 1000
 // only the first time (paginated); best-effort — returns whatever is cached on
 // error so a Jikan hiccup never breaks the portal sync.
 async function ensureEpisodeTitles(mal_id: number): Promise<Map<number, string>> {
-  if (countCachedEpisodes(mal_id) > 0) return getEpisodeTitles(mal_id)
+  // Already fully titled (every cached episode has a title) — nothing to do. The
+  // cache may hold AniList-fed air-date rows with no title yet, so check titles,
+  // not row count.
+  const titled = getEpisodeTitles(mal_id)
+  if (titled.size > 0 && titled.size >= countCachedEpisodes(mal_id)) return titled
   if (Date.now() - lastFetchAttempt('episode-titles', String(mal_id)) < RETRY_EMPTY_MS) {
     return getEpisodeTitles(mal_id)
   }
   recordFetchAttempt('episode-titles', String(mal_id))
   try {
-    const rows: EpisodeRow[] = []
-    for (let page = 1; page <= 20; page++) {
-      const { episodes, pagination } = await fetchAnimeEpisodesPage(mal_id, page)
-      for (const e of episodes) {
-        const number = episodeNumberFromUrl(e.url)
-        if (number != null) rows.push({ number, title: e.title, title_japanese: e.title_japanese ?? null, aired: e.aired ?? null })
-      }
-      if (!pagination?.has_next_page) break
-      // Jikan spacing handled by the shared 'jikan' queue in jikan.ts.
-    }
-    if (rows.length) upsertEpisodes(mal_id, rows)
+    // Multi-source title merge (Jikan → Kitsu → AniList streaming). Portal items
+    // are on-site, so allow the sources to establish episode existence too.
+    await fillEpisodeTitles(mal_id, { finished: true })
   } catch (e) {
     console.error('episode-title fetch failed for mal', mal_id, e)
   }

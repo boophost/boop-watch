@@ -19,7 +19,11 @@
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { filterCredentials, getEarliestReset } from './cooldown.mjs'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
 
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '')
 if (!BASE_URL) {
@@ -61,11 +65,18 @@ for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH',
 
 // Try each pooled credential, same as run.mjs — a capped account must not look
 // like a broken browser.
-const tokens = [
+const allTokens = [
   process.env.CLAUDE_CODE_OAUTH_TOKEN,
   process.env.CLAUDE_CODE_OAUTH_TOKEN_2,
   process.env.CLAUDE_CODE_OAUTH_TOKEN_3,
 ].filter((t) => t?.trim())
+const creds = allTokens.map((t, i) => ({ name: `TOKEN_${i}`, env: { CLAUDE_CODE_OAUTH_TOKEN: t } }))
+const validCreds = filterCredentials(creds)
+if (allTokens.length > 0 && validCreds.length === 0) {
+  console.log(`All credentials are on cooldown until ${getEarliestReset(creds) || 'unknown'}. Skipping verify-browser since agent will skip too.`)
+  process.exit(0)
+}
+const tokens = validCreds.map(c => c.env.CLAUDE_CODE_OAUTH_TOKEN)
 
 // Read the structured `result` event rather than string-sniffing the whole
 // stream: a *previous* credential's 429 text lingers in the buffer and would

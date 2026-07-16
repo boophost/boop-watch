@@ -28,7 +28,7 @@ import {
   type ScheduleSpec,
   type WeekDay,
 } from './flowsDb.js'
-import { listSeries } from './db.js'
+import { listSeries, markTorrentsCompleted } from './db.js'
 import { getAllPortalItems } from './portalDb.js'
 import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
 import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
@@ -132,6 +132,12 @@ async function fireScheduled(sched: FlowSchedule): Promise<void> {
     })
     return
   }
+  if (!flow.enabled) {
+    // Automation is off for this flow: roll the cadence forward without
+    // running, so re-enabling later doesn't unleash a backlog of missed fires.
+    rollSchedule(sched, now)
+    return
+  }
   let runId: number | null = null
   try {
     const graph = JSON.parse(flow.graph) as FlowGraph
@@ -163,6 +169,10 @@ async function fireScheduled(sched: FlowSchedule): Promise<void> {
 export async function runScheduleNow(sched: FlowSchedule): Promise<RunReport> {
   const flow = getFlow(sched.flow_id)
   if (!flow) throw new Error('Flow not found for this schedule')
+  // Manual runs of the flow itself stay allowed (POST /api/flows/:id/run);
+  // running it *through its schedule* while disabled is almost always a
+  // mistake, so fail loudly instead.
+  if (!flow.enabled) throw new Error(`Flow "${flow.name}" is disabled — enable it to run its schedule`)
   const graph = JSON.parse(flow.graph) as FlowGraph
   const resolver = buildSpecResolver(flow.id, getFlow)
   const invalid = validateGraph(graph, resolver)
@@ -294,6 +304,9 @@ async function watchNewPortalItems(): Promise<void> {
 async function watchQbitComplete(): Promise<void> {
   if (!qbitConfigured() || flowsWithTriggerType('trigger.qbit-complete').length === 0) return
   const done = (await qbitList()).filter((t) => t.progress >= 1)
+  // Torrent-ledger observation: completed downloads move off queued/downloading
+  // the moment we see them, independent of whether the fire below dispatches.
+  markTorrentsCompleted(done.map((t) => t.hash))
   if (!triggerStateSeeded('qbit-done')) {
     triggerStateAdd('qbit-done', done.map((t) => t.hash))
     markTriggerSeeded('qbit-done')

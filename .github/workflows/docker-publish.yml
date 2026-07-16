@@ -123,6 +123,36 @@ jobs:
           kubectl -n link-apps set image deployment/boop-watch-dev boop-watch-dev=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.build.outputs.digest }}
           kubectl -n link-apps rollout status deployment/boop-watch-dev --timeout=180s
 
+  gate:
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      bump: ${{ steps.gate.outputs.bump }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Gate auto-QA (version bump)
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          bump=$(node scripts/qa-agent/version-bump.mjs "origin/${{ github.base_ref }}")
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+          if [[ "$bump" == "patch" || "$bump" == "none" ]]; then
+            gh pr comment ${{ github.event.pull_request.number }} -b "<!-- qa-agent -->
+            ### 🤖 Auto-QA skipped
+            
+            Auto-QA skipped (patch/no minor bump). Unchecked test-plan items stay on the promotion PR — mark that PR **Ready for review** to catch up before prod."
+          fi
+
   # Per-PR preview environment: an isolated clone of boop-watch-dev (own DB
   # seeded from dev, flow sink disabled) at pr-<N>-watch.boopurno.es. Provisioned
   # on every dev-targeted PR (open/sync), torn down on close (preview-down).
@@ -130,8 +160,8 @@ jobs:
   # Deployments/Services/PVCs/IngressRoutes + pods/exec for boop-watch-pr-* in
   # link-apps (see boophost/boop-watch-ops).
   preview-up:
-    needs: build
-    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.action != 'closed'
+    needs: [build, gate]
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.action != 'closed' && (needs.gate.outputs.bump == 'minor' || needs.gate.outputs.bump == 'major')
     runs-on: [self-hosted, k3s-cp]
     permissions:
       contents: read
@@ -186,8 +216,8 @@ jobs:
   # ticks propagate into the dev→main promotion PR (update-promotion-pr.mjs seeds
   # a checked promotion box from a `[x]` feature-PR line).
   qa-agent:
-    needs: preview-up
-    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.action != 'closed'
+    needs: [preview-up, gate]
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.action != 'closed' && (needs.gate.outputs.bump == 'minor' || needs.gate.outputs.bump == 'major')
     runs-on: [self-hosted, k3s-cp]
     permissions:
       contents: read
@@ -223,7 +253,49 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check cooldown
+        id: cooldown
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
+          CLAUDE_CODE_OAUTH_TOKEN_3: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_3 }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node -e "
+            import { filterCredentials, getEarliestReset, credentialPool } from './scripts/qa-agent/cooldown.mjs'
+            const creds = credentialPool()
+            if (creds.length > 0 && filterCredentials(creds).length === 0) {
+              const earliest = getEarliestReset(creds) || 'unknown'
+              console.log('All credentials cooling down until ' + earliest)
+              const fs = await import('node:fs')
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, 'cooling=true\nearliest=' + earliest + '\n')
+            }
+          "
+          if grep -q "cooling=true" "$GITHUB_OUTPUT"; then
+            earliest=$(grep "earliest=" "$GITHUB_OUTPUT" | cut -d= -f2)
+            gh pr comment ${{ github.event.pull_request.number }} -b "<!-- qa-agent -->
+            ### 🤖 QA agent — paused
+            
+            QA paused — all credentials rate limited until $earliest (UTC)."
+          fi
+      - name: Debounce
+        id: debounce
+        if: steps.cooldown.outputs.cooling != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QA_DEBOUNCE_MS: ${{ vars.QA_DEBOUNCE_MS }}
+        run: |
+          sleep_time=$(( ${QA_DEBOUNCE_MS:-480000} / 1000 ))
+          echo "Sleeping for $sleep_time seconds..."
+          sleep $sleep_time
+          current_sha=$(gh api /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq .head.sha)
+          if [ "$current_sha" != "${{ github.sha }}" ]; then
+            echo "Debounced — newer commits landed; the newer run will QA."
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install Claude CLI
+        if: steps.cooldown.outputs.cooling != 'true' && steps.debounce.outputs.superseded != 'true'
         env:
           DISABLE_AUTOUPDATER: '1'
           DISABLE_TELEMETRY: '1'
@@ -242,6 +314,7 @@ jobs:
       # installing the browser under sudo would put it in /root and the agent
       # (running as the runner user) would never find it.
       - name: Ensure Chromium for Playwright
+        if: steps.cooldown.outputs.cooling != 'true' && steps.debounce.outputs.superseded != 'true'
         run: |
           # Install the browser with the MCP's OWN bundled Playwright. Using
           # `playwright@latest` instead installs a different chromium revision
@@ -256,8 +329,10 @@ jobs:
       # curl — for a client-rendered SPA that's a false pass. This reads the real
       # tool_use blocks and fails if no browser tool was called.
       - name: Verify the QA browser really works
+        if: steps.cooldown.outputs.cooling != 'true' && steps.debounce.outputs.superseded != 'true'
         run: node scripts/qa-agent/verify-browser.mjs
       - name: Run QA agent
+        if: steps.cooldown.outputs.cooling != 'true' && steps.debounce.outputs.superseded != 'true'
         run: |
           export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
           export JWT_SECRET="$(kubectl -n link-apps get secret boop-watch-dev-secret -o jsonpath='{.data.JWT_SECRET}' | base64 -d)"

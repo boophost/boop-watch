@@ -17,6 +17,7 @@ import {
 } from './downloads.js'
 import { getAllPortalItems } from './portalDb.js'
 import {
+  applyWantState,
   resolveChaseTarget,
   resolveExpected,
   resolveNextChase,
@@ -25,7 +26,9 @@ import {
   type EpisodeChase,
   type MalBroadcast,
 } from './episodeChase.js'
+import { wantForEpisode } from './sourcing.js'
 import { fetchAnimeFull } from './jikan.js'
+import { fetchAniListMedia } from './anilist.js'
 
 export type { EpisodeChase }
 export { toPublicChase }
@@ -72,7 +75,7 @@ function chaseFromStatus(
 } {
   const airInfos = airInfosForSeries(series)
   const { airedCount, expected } = resolveExpected(series.episodes, airInfos)
-  const nextChase = resolveNextChase({
+  const derived = resolveNextChase({
     episodes: airInfos,
     siteEpisodes: status.siteEpisodes,
     libraryEpisodes,
@@ -80,6 +83,11 @@ function chaseFromStatus(
     malEpisodes: series.episodes,
     broadcast: broadcast ?? parseStoredBroadcast(series.broadcast),
   })
+  // Persisted sourcing state wins over pure derivation: a want row knows
+  // whether the episode is being retried (and when next), not just whether a
+  // torrent happens to be visible in qBittorrent right now.
+  const wantState = derived ? wantForEpisode(series.mal_id, derived.episode) : null
+  const nextChase = applyWantState(derived, wantState?.want ?? null, wantState?.torrent ?? null)
   return { airedCount, expectedForPipeline: expected, nextChase }
 }
 
@@ -107,8 +115,14 @@ async function ensureBroadcast(
 
   const fetchAndPersist = async (): Promise<MalBroadcast | null> => {
     try {
-      const mal = await fetchAnimeFull(series.mal_id)
-      const bc = mal.broadcast ?? null
+      // AniList-primary (current, auth-free); its next-airing timestamp yields
+      // the weekly broadcast slot. Fall back to Jikan only if AniList can't answer.
+      const al = await fetchAniListMedia(series.mal_id)
+      const bc: MalBroadcast | null = al
+        ? al.broadcast
+        : ((await fetchAnimeFull(series.mal_id)).broadcast ?? null)
+      const episodes = al?.totalEpisodes ?? null
+      const status = al?.status ?? null
       const serialized = serializeBroadcast(bc)
       if (serialized && serialized !== series.broadcast) {
         try {
@@ -116,10 +130,8 @@ async function ensureBroadcast(
             { mal_id: series.mal_id, title: series.title },
             {
               broadcast: serialized,
-              ...(typeof mal.episodes === 'number' && mal.episodes > 0
-                ? { episodes: mal.episodes }
-                : {}),
-              ...(mal.status ? { status: mal.status } : {}),
+              ...(typeof episodes === 'number' && episodes > 0 ? { episodes } : {}),
+              ...(status ? { status } : {}),
             },
           )
         } catch (e) {
@@ -187,7 +199,12 @@ export async function buildSeriesChase(
     malEpisodes: series.episodes,
     broadcast: parseStoredBroadcast(series.broadcast),
   })
-  const status = await getSeriesDownloadStatus(seriesId, { skipQbit: !target || !target.due })
+  // A persisted open want means nothing is queued — qBit can add nothing, so
+  // skip its (slow while busy) query too. Only a sourced want (or no want row
+  // at all, the pre-wants fallback) still needs live download progress.
+  const targetWant = target?.due ? wantForEpisode(series.mal_id, target.episode) : null
+  const skipQbit = !target || !target.due || targetWant?.want.status === 'open'
+  const status = await getSeriesDownloadStatus(seriesId, { skipQbit })
   let libraryEpisodes = new Set<number>()
   if (opts.includeLibrary !== false) {
     try {

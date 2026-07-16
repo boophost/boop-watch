@@ -6,6 +6,24 @@ export interface EpisodeChase {
   airsAt: string | null
   state: ChaseState
   progress?: number | null
+  /** Persisted want backing this state (absent on pre-wants series). */
+  wantId?: number
+  attempts?: number
+  nextAttemptAt?: string | null
+  note?: string | null
+}
+
+/** "retry in 5h" / "retrying now" for a searching chase backed by a want. */
+export function formatRetry(nextAttemptAt: string | null | undefined, now = Date.now()): string | null {
+  if (!nextAttemptAt) return null
+  const t = Date.parse(nextAttemptAt.endsWith('Z') ? nextAttemptAt : nextAttemptAt + 'Z')
+  if (!Number.isFinite(t)) return null
+  const delta = t - now
+  if (delta <= 60_000) return 'retrying now'
+  const hours = Math.floor(delta / 3_600_000)
+  if (hours < 1) return `retry in ${Math.max(1, Math.round(delta / 60_000))}m`
+  if (hours < 48) return `retry in ${hours}h`
+  return `retry in ${Math.floor(hours / 24)}d`
 }
 
 export function formatCountdown(airsAt: string | null | undefined, now = Date.now()): string | null {

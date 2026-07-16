@@ -1,0 +1,60 @@
+name: Promotion QA Catch-up
+
+on:
+  pull_request:
+    types: [ready_for_review]
+
+concurrency:
+  group: promotion-qa-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  promotion-qa:
+    # Only run on the dev -> main promotion PR (identified by base=main, head=dev)
+    if: github.repository == 'boophost/boop-watch' && github.base_ref == 'main' && github.head_ref == 'dev'
+    runs-on: [self-hosted, k3s-cp]
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      CLAUDE_CODE_OAUTH_TOKEN_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
+      CLAUDE_CODE_OAUTH_TOKEN_3: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_3 }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      QA_PLAYWRIGHT: '1'
+      QA_TIMEOUT_MS: ${{ vars.QA_TIMEOUT_MS || '1500000' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Claude CLI
+        env:
+          DISABLE_AUTOUPDATER: '1'
+          DISABLE_TELEMETRY: '1'
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          timeout 60 claude --version || { echo "::error::claude CLI won't start (AVX-less CPU? see k8s-cp cpu=host)"; exit 1; }
+
+      - name: Ensure Chromium for Playwright
+        run: |
+          sudo -n env "PATH=$PATH" npx --yes --package=@playwright/mcp@latest -- playwright install-deps chromium
+          npx --yes --package=@playwright/mcp@latest -- playwright install chromium
+
+      - name: Verify the QA browser really works
+        run: node scripts/qa-agent/verify-browser.mjs
+
+      - name: Run Catch-up QA
+        run: |
+          export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
+          export JWT_SECRET="$(kubectl -n link-apps get secret boop-watch-dev-secret -o jsonpath='{.data.JWT_SECRET}' | base64 -d)"
+          node scripts/qa-agent/catch-up.mjs "${{ github.event.pull_request.number }}"
