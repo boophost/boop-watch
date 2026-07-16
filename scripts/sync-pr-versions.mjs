@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 function sh(cmd, args = []) {
   return execFileSync(cmd, args, { encoding: 'utf8' }).trim();
@@ -74,15 +74,51 @@ function main() {
         continue;
       }
       
-      console.log(`Bumping to ${newVersion} to match dev.`);
+      let hadConflicts = false;
+      try {
+        sh('git', ['merge', 'origin/dev', '-m', `chore: sync with dev and bump version`]);
+      } catch (e) {
+        hadConflicts = true;
+        const unmerged = sh('git', ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
+        const onlyPackage = unmerged.every(f => f === 'package.json' || f === 'package-lock.json');
+        
+        if (!onlyPackage) {
+          console.log(`PR #${pr.number} has non-package conflicts (${unmerged.join(', ')}). Aborting merge.`);
+          sh('git', ['merge', '--abort']);
+          continue;
+        }
+        
+        console.log(`Resolving package.json conflict automatically...`);
+        let pkgStr = readFileSync('package.json', 'utf8');
+        const conflictRegex = /<<<<<<< HEAD\r?\n\s*"version":\s*"[^"]+",?\r?\n(?:\|\|\|\|\|\|\| [^\r\n]+\r?\n\s*"version":\s*"[^"]+",?\r?\n)?=======\r?\n\s*"version":\s*"[^"]+",?\r?\n>>>>>>> [^\r\n]+\r?\n/g;
+        
+        if (conflictRegex.test(pkgStr)) {
+           pkgStr = pkgStr.replace(conflictRegex, `  "version": "${newVersion}",\n`);
+           writeFileSync('package.json', pkgStr);
+        } else {
+           console.log(`Complex package.json conflict. Aborting.`);
+           sh('git', ['merge', '--abort']);
+           continue;
+        }
+        
+        console.log(`Regenerating package-lock.json...`);
+        sh('git', ['checkout', '--theirs', 'package-lock.json']);
+        sh('npm', ['install', '--package-lock-only']);
+        
+        sh('git', ['add', 'package.json', 'package-lock.json']);
+        sh('git', ['commit', '--no-edit']);
+      }
       
-      sh('npm', ['--no-git-tag-version', 'version', newVersion]);
+      if (!hadConflicts) {
+        const prVersionPostMerge = JSON.parse(readFileSync('package.json', 'utf8')).version;
+        if (prVersionPostMerge !== newVersion) {
+           sh('npm', ['--no-git-tag-version', 'version', newVersion]);
+           sh('git', ['add', 'package.json', 'package-lock.json']);
+           sh('git', ['commit', '--amend', '--no-edit']);
+        }
+      }
       
-      sh('git', ['add', 'package.json', 'package-lock.json']);
-      sh('git', ['commit', '-m', `chore: sync version to ${newVersion} from dev`]);
       sh('git', ['push']);
-      
-      console.log(`Successfully updated PR #${pr.number}`);
     } catch (e) {
       console.error(`Failed to update PR #${pr.number}: ${e.message}`);
     } finally {
