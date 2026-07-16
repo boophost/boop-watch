@@ -15,7 +15,8 @@ import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView } from './publicRoutes.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
-import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock } from './flowRoutes.js'
+import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock, fireEvent } from './flowRoutes.js'
+import type { FlowItem } from './flowNodes.js'
 import { pruneWorkDir, assertScratchVolumeSafe } from './flowNodes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
@@ -831,6 +832,25 @@ app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res)
   } finally {
     releaseFlowLock()
   }
+})
+
+// Re-fire the `new-item` trigger for one series — the same event the scheduler
+// emits when a title is first added. Re-runs the "Show added" flow on this
+// series (resolve airing status, mint wants for aired-but-missing episodes,
+// chain into chase-wants), using each flow's own qBit category — so unlike the
+// legacy /research route it stays env-isolated. Fire-and-forget: the flow chain
+// runs in the background and shows up in the Activity tab.
+app.post('/api/series/:id/retrigger', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) {
+    res.status(404).json({ error: 'Series not found' })
+    return
+  }
+  void fireEvent('new-item', [series as unknown as FlowItem]).catch((e) =>
+    console.error(`retrigger new-item for series ${id} failed —`, e),
+  )
+  res.json({ ok: true })
 })
 
 // ---- Season-banner candidates (admin picker + upload) ---------------------
