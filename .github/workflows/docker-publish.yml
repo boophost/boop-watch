@@ -286,7 +286,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           QA_DEBOUNCE_MS: ${{ vars.QA_DEBOUNCE_MS }}
         run: |
-          sleep_time=$(( ${QA_DEBOUNCE_MS:-480000} / 1000 ))
+          # Default 3 min — long enough to coalesce push bursts, short enough that
+          # QA isn't sitting idle. Override with repo var QA_DEBOUNCE_MS (ms).
+          sleep_time=$(( ${QA_DEBOUNCE_MS:-180000} / 1000 ))
           echo "Sleeping for $sleep_time seconds..."
           sleep $sleep_time
           current_sha=$(gh api /repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq .head.sha)
