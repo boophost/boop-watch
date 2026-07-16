@@ -318,7 +318,7 @@ export interface EpisodeMedia {
 /** Resolve a Jellyfin Series id for a catalog row. Prefer portal (mal_id / title),
  * then fall back to a Jellyfin library search — needed when the show is in the
  * media library but not (yet) in the Public collection / portal cache. */
-async function resolveJfSeriesId(series: {
+export async function resolveJfSeriesId(series: {
   mal_id: number
   title: string
   title_english?: string | null
