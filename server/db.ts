@@ -172,6 +172,10 @@ export function getDb(): Database.Database {
       mal_id INTEGER NOT NULL,
       number INTEGER NOT NULL,
       title TEXT,
+      -- Which source the title came from ('jikan' | 'kitsu' | 'anilist' |
+      -- 'jellyfin'). Provenance decides whether the title is *proper* or a
+      -- provisional stand-in still worth re-checking — see server/episodes.ts.
+      title_source TEXT,
       title_japanese TEXT,
       aired TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -355,6 +359,16 @@ export function getDb(): Database.Database {
   )
   if (!bannerCols.has('thumb_url')) {
     instance.exec(`ALTER TABLE series_banners ADD COLUMN thumb_url TEXT`)
+  }
+
+  // Additive migration: episode-title provenance. Rows written before this
+  // column existed keep a NULL source — readers treat that as "unknown", and
+  // fall back to inspecting the title text itself (see isProperTitle).
+  const episodeCols = new Set(
+    (instance.prepare(`PRAGMA table_info(series_episodes)`).all() as { name: string }[]).map((c) => c.name),
+  )
+  if (!episodeCols.has('title_source')) {
+    instance.exec(`ALTER TABLE series_episodes ADD COLUMN title_source TEXT`)
   }
   // `kind` splits banners from posters. The dedupe index has to widen with it,
   // or a poster could never share a URL with its series' banner. An existing DB
@@ -743,6 +757,9 @@ export function getSeriesById(id: number): SeriesRow | undefined {
 export interface EpisodeRow {
   number: number
   title: string | null
+  /** Which source supplied `title`; NULL on rows written before provenance was
+   * tracked. See `isProperTitle` in server/episodes.ts. */
+  title_source?: string | null
   title_japanese?: string | null
   aired?: string | null
 }
@@ -791,7 +808,7 @@ export function getEpisodeTitles(mal_id: number): Map<number, string> {
 export function getCachedEpisodes(mal_id: number): EpisodeRow[] {
   return getDb()
     .prepare(
-      'SELECT number, title, title_japanese, aired FROM series_episodes WHERE mal_id = ? ORDER BY number',
+      'SELECT number, title, title_source, title_japanese, aired FROM series_episodes WHERE mal_id = ? ORDER BY number',
     )
     .all(mal_id) as EpisodeRow[]
 }
@@ -990,28 +1007,35 @@ export function upsertEpisodeAirDates(
  * of several sources (see server/episodes.ts); the caller controls which episode
  * numbers to write — for an airing show only numbers already in the cache
  * (AniList owns existence), for a finished show any number a source knows. */
-export function upsertEpisodeTitles(
-  mal_id: number,
-  rows: { number: number; title: string | null; title_japanese?: string | null; aired?: string | null }[],
-): void {
+export function upsertEpisodeTitles(mal_id: number, rows: EpisodeRow[]): void {
   if (rows.length === 0) return
   const stmt = getDb().prepare(`
-    INSERT INTO series_episodes (mal_id, number, title, title_japanese, aired, updated_at)
-    VALUES (@mal_id, @number, @title, @title_japanese, @aired, datetime('now'))
+    INSERT INTO series_episodes (mal_id, number, title, title_source, title_japanese, aired, updated_at)
+    VALUES (@mal_id, @number, @title, @title_source, @title_japanese, @aired, datetime('now'))
     ON CONFLICT(mal_id, number) DO UPDATE SET
       title = COALESCE(excluded.title, series_episodes.title),
+      -- Tied to the title above: a NULL incoming title leaves the stored title
+      -- alone, so its source must stay too or provenance drifts off the text.
+      title_source = CASE WHEN excluded.title IS NULL
+                          THEN series_episodes.title_source
+                          ELSE excluded.title_source END,
       title_japanese = COALESCE(excluded.title_japanese, series_episodes.title_japanese),
       aired = COALESCE(series_episodes.aired, excluded.aired),
       updated_at = datetime('now')
   `)
-  const tx = getDb().transaction(
-    (rs: { number: number; title: string | null; title_japanese?: string | null; aired?: string | null }[]) => {
-      for (const r of rs) {
-        if (!Number.isFinite(r.number)) continue
-        stmt.run({ mal_id, number: r.number, title: r.title ?? null, title_japanese: r.title_japanese ?? null, aired: r.aired ?? null })
-      }
-    },
-  )
+  const tx = getDb().transaction((rs: EpisodeRow[]) => {
+    for (const r of rs) {
+      if (!Number.isFinite(r.number)) continue
+      stmt.run({
+        mal_id,
+        number: r.number,
+        title: r.title ?? null,
+        title_source: r.title_source ?? null,
+        title_japanese: r.title_japanese ?? null,
+        aired: r.aired ?? null,
+      })
+    }
+  })
   tx(rows)
 }
 

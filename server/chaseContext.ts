@@ -26,6 +26,7 @@ import {
   type EpisodeChase,
   type MalBroadcast,
 } from './episodeChase.js'
+import { isProperTitle } from './episodes.js'
 import { wantForEpisode } from './sourcing.js'
 import { fetchAnimeFull } from './jikan.js'
 import { fetchAniListMedia } from './anilist.js'
@@ -36,7 +37,8 @@ export { toPublicChase }
 function airInfosForSeries(series: SeriesRow): EpisodeAirInfo[] {
   return getCachedEpisodes(series.mal_id).map((e) => ({
     episode: e.number,
-    title: e.title,
+    // A provisional title is release residue, not a name worth chasing with.
+    title: isProperTitle(e.title, e.title_source) ? e.title : null,
     aired: e.aired ?? null,
   }))
 }
