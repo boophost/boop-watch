@@ -1362,27 +1362,41 @@ function FlowMapInner() {
     const handle = (ev: ActivityStreamEvent) => {
       setConnected(true)
       switch (ev.type) {
-        case 'start':
-          setLive({
+        case 'start': {
+          const next: LiveRun = {
             runToken: ev.runToken,
             flowId: ev.flowId,
             flowName: ev.flowName,
             dryRun: ev.dryRun,
             startedAt: ev.startedAt,
             nodes: [],
-          })
+          }
+          // Sync ref immediately — node-start events often arrive in the same
+          // SSE chunk before React re-renders, and must see this runToken.
+          liveRef.current = next
+          setLive(next)
           // Keep prior node reports so cascaded/subflow runs don't erase the trail.
           setNodeLive((nl) => {
-            const next: Record<string, NodeLive> = {}
+            const nextNl: Record<string, NodeLive> = {}
             for (const [id, cur] of Object.entries(nl)) {
-              next[id] = { ...cur, running: false }
+              nextNl[id] = { ...cur, running: false }
             }
-            return next
+            return nextNl
           })
           setFadeUntil(0)
+          // Drop any queued flashes from the previous run so this run's trigger
+          // isn't stuck behind a long cooldown trail.
+          flashQueue.current = []
+          if (flashDrainTimer.current) {
+            clearTimeout(flashDrainTimer.current)
+            flashDrainTimer.current = null
+          }
+          flashNextAt.current = 0
+          lastFlashAt.current.clear()
           if (ev.flowId != null) lightFlow(ev.flowId, { replace: true })
           else setLiveFlowIds([])
           break
+        }
         case 'node-start': {
           const p = liveRef.current
           if (!p || p.runToken !== ev.runToken) break
@@ -1493,7 +1507,11 @@ function FlowMapInner() {
           })
           setTimeout(() => {
             if (cancelled) return
-            setLive((p) => (p && p.runToken === token ? null : p))
+            // Only tear down if this run is still the live one — a self-fire
+            // loop starts the next iteration before this timer fires.
+            if (liveRef.current?.runToken !== token) return
+            liveRef.current = null
+            setLive(null)
             setLiveFlowIds([])
             setEdges((eds) =>
               eds.map((e) => ({
