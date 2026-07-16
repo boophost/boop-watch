@@ -176,6 +176,10 @@ a manual process for now).
 - `ADMIN_EMAILS` — comma-separated emails allowed on the admin-only APIs (the flow editor)
 - `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD` — qBittorrent WebUI for the flow sink node
   (unset ⇒ the "Send to qBittorrent" node errors at run time; dry runs still work)
+- `QBIT_CATEGORY` — qBit category the **code-built research flow** (`buildResearchGraph`, the
+  "Blacklist & replace" / research route) queues into (default `anime`). Saved flow graphs carry
+  their own category; this only covers the graph we construct in code. **Set `anime-dev` on staging**
+  so a dev instance sharing qBit with prod never queues into prod's `anime` category.
 - `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
 - `LIBRARY_DIR` — where the **library-import** flow places files (default `/library`);
