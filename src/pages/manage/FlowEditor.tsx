@@ -493,7 +493,7 @@ function FlowNodeView({ id, data, selected }: NodeProps<RFNode>) {
       {flashing ? (
         <span
           key={flashUntil}
-          className="flow-node-flash-burst pointer-events-none absolute rounded-md"
+          className="flow-node-flash-burst pointer-events-none absolute"
         />
       ) : null}
       <div
