@@ -2959,6 +2959,24 @@ const torrentSearch: NodeImpl = {
                 ? raw.filter((c) => c.pinId === best.c!.pinId)
                 : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
               : []
+          // Without an id pin, title relevance can't tell seasons of a
+          // franchise apart ("Tensei shitara Slime Datta Ken" matches the
+          // "…4th Season" release). When the item knows its season, drop
+          // candidates whose own name declares a DIFFERENT one — a release
+          // with no season marker stays (S1 releases usually carry none).
+          const wantSeason = asNumber(item.tvdb_season)
+          if (wantSeason != null) {
+            const before = relevant.length
+            relevant = relevant.filter((c) => {
+              const rs = parseSeason(c.name)
+              return rs == null || rs === wantSeason
+            })
+            if (relevant.length < before) {
+              ctx.notes.push(
+                `dropped ${before - relevant.length} other-season release(s) for "${q}" (want season ${wantSeason}, no id pin)`,
+              )
+            }
+          }
         }
         const blocked = blacklistedHashes()
         const cands = relevant
@@ -4553,6 +4571,20 @@ const qbittorrentSink: NodeImpl = {
           if (wantId == null) continue
           const t = getTorrent(h)
           if (!t) continue
+          // The tracked torrent only satisfies the want when it's the same
+          // series. A cross-series hit (title relevance matched a sibling
+          // season's torrent — S4E11 for an S1 want, observed on prod) must
+          // NOT fulfil; it's a failed search, back off and retry elsewhere.
+          const wantMal = asNumber(it.mal_id)
+          const sameSeries = t.mal_id == null || wantMal == null || t.mal_id === wantMal
+          if (!sameSeries) {
+            recordWantAttempt(
+              wantId,
+              360,
+              `search matched torrent ${h.slice(0, 8)} of a different series (mal ${t.mal_id} ≠ ${wantMal}) — backing off`,
+            )
+            continue
+          }
           if (t.status === 'imported') {
             fulfilWantById(wantId, h, 'already imported by a tracked torrent')
           } else if (t.status === 'queued' || t.status === 'downloading' || t.status === 'completed') {
