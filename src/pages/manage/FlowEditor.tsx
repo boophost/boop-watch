@@ -1709,6 +1709,7 @@ function FlowEditorInner() {
             const idOnCanvas = canvasNodeId(ev.id)
             if (!paint(idOnCanvas)) return
             const nested = ev.id.includes('/')
+            const skipped = ev.report.status === 'skipped'
             setNodes((ns) =>
               ns.map((n) => {
                 if (n.id !== idOnCanvas) return n
@@ -1721,8 +1722,9 @@ function FlowEditorInner() {
                 }
               }),
             )
-            flashNode(idOnCanvas)
-            if (!nested && ev.report.counts) {
+            // Inactive switch arms are reported as skipped — don't flash them.
+            if (!skipped) flashNode(idOnCanvas)
+            if (!skipped && !nested && ev.report.counts) {
               const nowMs = Date.now()
               setEdges((eds) =>
                 eds.map((e) => {

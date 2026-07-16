@@ -2071,9 +2071,9 @@ function switchPorts(config: Record<string, unknown>): { inputs: NodePort[]; out
 }
 
 /**
- * Multi-way branch: each item goes to exactly one output — the first matching
- * case, or "else". Unlike chaining Compare nodes (which can fan out), Switch
- * guarantees a single path per item.
+ * Multi-way exclusive branch: each item goes to exactly one output — the first
+ * matching case, or "else". Downstream of empty arms is not evaluated (unlike
+ * Compare, which still schedules both sides).
  */
 const switchNode: NodeImpl = {
   spec: {
@@ -2081,7 +2081,7 @@ const switchNode: NodeImpl = {
     label: 'Switch',
     category: 'filter',
     description:
-      'Routes each item to exactly one output by matching a field against an ordered list of cases (first match wins). Unmatched items go to "else". Add/remove cases in config to grow or shrink the output ports.',
+      'Exclusive multi-way branch: each item goes to exactly one output (first matching case, else "else"). Only arms that receive items run downstream — empty arms are skipped. Add/remove cases in config to grow or shrink the output ports.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
       { id: 'a', label: 'A' },

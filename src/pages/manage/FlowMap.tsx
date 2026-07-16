@@ -1425,8 +1425,8 @@ function FlowMapInner() {
               }
               return next
             })
-            // Flash on complete only if start was skipped (instant nodes).
-            flashCanvasNodes(targets)
+            // Inactive switch arms are skipped without node-start — don't flash.
+            if (ev.status !== 'skipped') flashCanvasNodes(targets)
             if (ev.nodeType === 'flow.subflow' || nested) {
               const child = subflowTargetId(flowsRef.current, parentId, ev.nodeId)
               if (child != null) lightFlow(child)
