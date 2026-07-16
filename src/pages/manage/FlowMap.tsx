@@ -659,7 +659,7 @@ const MapFlowNode = memo(function MapFlowNode({ data }: NodeProps<MapRFNode>) {
       {flashing ? (
         <span
           key={flashUntil}
-          className="flow-node-flash-burst pointer-events-none absolute rounded-md"
+          className="flow-node-flash-burst pointer-events-none absolute"
         />
       ) : null}
       <div className="relative z-[1] flex items-center gap-2 border-b border-border px-2.5 py-1.5">
