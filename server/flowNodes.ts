@@ -1151,7 +1151,7 @@ const randomNumber: NodeImpl = {
     label: 'Random number',
     category: 'value',
     description:
-      'Emits one or more random numbers on a typed number port. Wire into "Set field from value" — one value broadcasts to every item; set Count to N to zip a distinct roll onto each item.',
+      'Emits one or more random numbers on a typed number port. Wire into "Set field from value" — one value broadcasts to every item; set Count to N to zip a distinct roll onto each item. Evaluated on demand when a live downstream node needs it (not at flow start), so a Random feeding only an untaken Switch arm stays idle.',
     inputs: [],
     outputs: [{ id: 'value', label: 'number', dataType: 'number' }],
     config: [
