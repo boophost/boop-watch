@@ -16,6 +16,9 @@ data/
 *.sqlite
 *.sqlite-*
 
+# per-agent local worktrees (scripts/agent-env.mjs) — never commit
+.agent-envs/
+
 # playwright mcp scratch output
 .playwright-mcp/
 

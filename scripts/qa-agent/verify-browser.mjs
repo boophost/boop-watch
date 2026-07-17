@@ -21,7 +21,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { filterCredentials, getEarliestReset } from './cooldown.mjs'
+import { filterCredentials, getEarliestReset, credentialPool } from './cooldown.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -63,20 +63,16 @@ Output a single fenced json block, nothing after:
 const env = { ...process.env }
 for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION']) delete env[k]
 
-// Try each pooled credential, same as run.mjs — a capped account must not look
-// like a broken browser.
-const allTokens = [
-  process.env.CLAUDE_CODE_OAUTH_TOKEN,
-  process.env.CLAUDE_CODE_OAUTH_TOKEN_2,
-  process.env.CLAUDE_CODE_OAUTH_TOKEN_3,
-].filter((t) => t?.trim())
-const creds = allTokens.map((t, i) => ({ name: `TOKEN_${i}`, env: { CLAUDE_CODE_OAUTH_TOKEN: t } }))
-const validCreds = filterCredentials(creds)
-if (allTokens.length > 0 && validCreds.length === 0) {
-  console.log(`All credentials are on cooldown until ${getEarliestReset(creds) || 'unknown'}. Skipping verify-browser since agent will skip too.`)
+// Same pool + cooldown filter as run.mjs — a capped account must not look like
+// a broken browser. Only OAuth tokens here (API-key billing doesn't hit the
+// same subscription 429 path this guard rotates through).
+const allCreds = credentialPool().filter((c) => c.kind === 'oauth')
+const validCreds = filterCredentials(allCreds)
+if (allCreds.length > 0 && validCreds.length === 0) {
+  console.log(`All credentials are on cooldown until ${getEarliestReset(allCreds) || 'unknown'}. Skipping verify-browser since agent will skip too.`)
   process.exit(0)
 }
-const tokens = validCreds.map(c => c.env.CLAUDE_CODE_OAUTH_TOKEN)
+const tokens = validCreds.map((c) => c.env.CLAUDE_CODE_OAUTH_TOKEN).filter(Boolean)
 
 // Read the structured `result` event rather than string-sniffing the whole
 // stream: a *previous* credential's 429 text lingers in the buffer and would

@@ -284,23 +284,62 @@ jobs:
         if: steps.cooldown.outputs.cooling != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Cap on how long we'll wait for a quiet tip (default 3 min).
           QA_DEBOUNCE_MS: ${{ vars.QA_DEBOUNCE_MS }}
+          # Tip must stay unchanged this long before QA starts (default 30s).
+          QA_DEBOUNCE_QUIET_MS: ${{ vars.QA_DEBOUNCE_QUIET_MS }}
+          # How often to re-check the PR head (default 15s).
+          QA_DEBOUNCE_POLL_MS: ${{ vars.QA_DEBOUNCE_POLL_MS }}
         run: |
-          sleep_time=$(( ${QA_DEBOUNCE_MS:-480000} / 1000 ))
-          echo "Sleeping for $sleep_time seconds..."
-          sleep $sleep_time
-          # Compare against the head sha that triggered this run — NOT github.sha,
-          # which on pull_request is the *merge* commit and so never equals a head
-          # sha. That mismatch marked every run superseded, silently skipping QA
-          # while the job still reported success.
-          triggering_sha=${{ github.event.pull_request.head.sha }}
-          current_sha=$(node scripts/qa-agent/gh.mjs head-sha ${{ github.event.pull_request.number }})
-          echo "triggering head sha: $triggering_sha"
-          echo "current head sha:    $current_sha"
-          if [ "$current_sha" != "$triggering_sha" ]; then
-            echo "Debounced — newer commits landed; the newer run will QA."
-            echo "superseded=true" >> "$GITHUB_OUTPUT"
-          fi
+          # Quiet-period debounce (no static full sleep, no `gh` CLI):
+          # poll PR head.sha until it's been equal to this run's trigger tip for
+          # QUIET_MS, or until MAX_MS elapses. If head moves off the trigger tip,
+          # this run is superseded (the newer workflow will QA).
+          #
+          # Compare against pull_request.head.sha — NOT github.sha (that's the
+          # ephemeral merge commit on pull_request events and would always "differ").
+          set -euo pipefail
+          TRIGGER_SHA='${{ github.event.pull_request.head.sha }}'
+          MAX_MS="${QA_DEBOUNCE_MS:-180000}"
+          QUIET_MS="${QA_DEBOUNCE_QUIET_MS:-30000}"
+          POLL_MS="${QA_DEBOUNCE_POLL_MS:-15000}"
+          PR='${{ github.event.pull_request.number }}'
+          START_MS=$(($(date +%s%3N)))
+          QUIET_SINCE_MS="$START_MS"
+
+          head_sha() {
+            node scripts/qa-agent/gh.mjs head-sha "$PR"
+          }
+
+          echo "Debounce: trigger=${TRIGGER_SHA:0:7} quiet=${QUIET_MS}ms poll=${POLL_MS}ms cap=${MAX_MS}ms"
+          while true; do
+            NOW_MS=$(($(date +%s%3N)))
+            ELAPSED=$((NOW_MS - START_MS))
+            CURRENT="$(head_sha)"
+            if [ "$CURRENT" != "$TRIGGER_SHA" ]; then
+              echo "Debounced — head moved ${TRIGGER_SHA:0:7} → ${CURRENT:0:7}; newer run will QA."
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            STABLE_FOR=$((NOW_MS - QUIET_SINCE_MS))
+            if [ "$STABLE_FOR" -ge "$QUIET_MS" ]; then
+              echo "Tip quiet for ${STABLE_FOR}ms — proceeding with QA."
+              exit 0
+            fi
+            if [ "$ELAPSED" -ge "$MAX_MS" ]; then
+              echo "Hit debounce cap (${ELAPSED}ms) still on ${TRIGGER_SHA:0:7} — proceeding."
+              exit 0
+            fi
+            REMAIN_QUIET=$((QUIET_MS - STABLE_FOR))
+            REMAIN_CAP=$((MAX_MS - ELAPSED))
+            SLEEP_MS="$POLL_MS"
+            if [ "$REMAIN_QUIET" -lt "$SLEEP_MS" ]; then SLEEP_MS="$REMAIN_QUIET"; fi
+            if [ "$REMAIN_CAP" -lt "$SLEEP_MS" ]; then SLEEP_MS="$REMAIN_CAP"; fi
+            if [ "$SLEEP_MS" -lt 1 ]; then SLEEP_MS=1; fi
+            echo "Tip ${CURRENT:0:7} stable ${STABLE_FOR}ms — sleeping ${SLEEP_MS}ms…"
+            # bash sleep wants seconds; allow sub-second via node when needed.
+            node -e "setTimeout(()=>{}, Number(process.argv[1]))" "$SLEEP_MS"
+          done
       - name: Install Claude CLI
         if: steps.cooldown.outputs.cooling != 'true' && steps.debounce.outputs.superseded != 'true'
         env:
