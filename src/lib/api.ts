@@ -99,6 +99,12 @@ export interface SeasonInfo {
   episodes: number
   /** This season's own premiere year, distinct from the series' overall year. */
   year: number | null
+  /**
+   * Admin-authored season line ("Season 1 Part 2", "Diamond is Unbreakable").
+   * null when unset — there is no server-side fallback, the portal picks the
+   * default (generic "Season N", nothing for a single-season show).
+   */
+  displayTitle: string | null
 }
 export interface SeriesDetail {
   type: 'series'

@@ -12,7 +12,10 @@ import {
 import { buildWatchData, type Segment } from './watch.js'
 import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
-import { getPortalItem, getPortalEpisodes, getPortalSeasonCounts } from './portalDb.js'
+import {
+  getPortalItem, getPortalEpisodes, getPortalSeasonCounts, getPortalSeasonYears,
+  getPortalSeasonTitles, getPortalCollectionItems, type PortalItem,
+} from './portalDb.js'
 import { getBanner, getSelectedBanner, findByMalId, listSeries, listComments, type BannerRow, type SeriesRow, type CommentRow } from './db.js'
 import { BANNERS_DIR } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
@@ -87,6 +90,22 @@ function franchiseForSeries(pItem: { mal_id: number | null; name: string }): Ser
     }
   }
   return franchise
+}
+
+/**
+ * Reverse of franchiseForSeries: the Public JF series a catalog cour belongs to.
+ * The /manage pages are keyed by catalog (mal) id while the season-title
+ * override is keyed by JF series id, so the admin editor needs this bridge.
+ * Resolves by asking each Public series which cours it owns — same anchoring the
+ * portal itself uses, so the two can never disagree.
+ */
+export function portalSeriesForCatalog(malId: number): PortalItem | null {
+  for (const pItem of getPortalCollectionItems()) {
+    if (pItem.type !== 'Series') continue
+    if (pItem.mal_id === malId) return pItem
+    if (franchiseForSeries(pItem).some((s) => s.mal_id === malId)) return pItem
+  }
+  return null
 }
 
 /** Catalog cour for a Public JF series (see franchiseForSeries for anchoring). */
@@ -381,14 +400,22 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
           new Promise<JfSeason[]>((r) => setTimeout(() => r([]), 1500)),
         ])
       }
+      // Years come from our own synced episodes first, so a slow/timed-out
+      // Jellyfin (the race above resolving to []) can't blank them out; the JF
+      // season item stays a fallback for a season we somehow have no dates for.
+      const seasonYears = getPortalSeasonYears(id)
+      const seasonTitles = getPortalSeasonTitles(id)
       const seasonList = seasonCounts.map((c) => {
         const jfSeason = jfSeasons.find((s) => s.IndexNumber === c.season)
         return {
           season: c.season,
           name: jfSeason?.Name || `Season ${c.season}`,
           episodes: c.episodes,
-          year: jfSeason?.ProductionYear
+          year: seasonYears.get(c.season)
+            ?? jfSeason?.ProductionYear
             ?? (jfSeason?.PremiereDate ? new Date(jfSeason.PremiereDate).getFullYear() : null),
+          // Admin override only — no server-side fallback; the portal owns the default.
+          displayTitle: seasonTitles.get(c.season) ?? null,
         }
       })
 

@@ -153,7 +153,14 @@ function resolvePortalSeriesId(
 
 /** Match site episodes + torrents for one series against shared portal/qBit snapshots.
  * When `tvdb_season` is set (a cour in a multi-season franchise), only that JF
- * season's episodes count as on-site — IndexNumber alone collides across seasons. */
+ * season's episodes count as on-site — IndexNumber alone collides across seasons.
+ *
+ * `siteEpisodes` is keyed by **MAL per-cour** episode number, matching how every
+ * consumer looks it up (the episodes list, the chase target). Jellyfin numbers a
+ * split season absolutely (Mushoku S1 = 23 eps = two MAL cours of 11 + 12), so we
+ * reverse `episode_offset` and drop anything outside this cour's own 1..`episodes`
+ * range — otherwise a cour claims its sibling's episodes (the "23/11 playable"
+ * bug) and an offset cour reads its siblings' ids for its own numbers. */
 export function matchSeriesDownloads(
   series: {
     mal_id?: number | null
@@ -161,6 +168,8 @@ export function matchSeriesDownloads(
     title_english?: string | null
     title_japanese?: string | null
     tvdb_season?: number | null
+    episode_offset?: number | null
+    episodes?: number | null
   },
   portalItems: ReturnType<typeof getAllPortalItems>,
   rawTorrents: QbitTorrent[] | null,
@@ -168,12 +177,20 @@ export function matchSeriesDownloads(
 ): SeriesDownloadStatus {
   const variantTokens = variantTokensForSeries(series)
   const season = series.tvdb_season ?? null
+  const offset = series.episode_offset ?? 0
+  // Only a cour that actually sits inside a shared season needs range-clamping;
+  // without a season mapping the JF numbers are already this row's own.
+  const courLength = season != null && series.episodes != null && series.episodes > 0 ? series.episodes : null
   const siteEpisodes: Record<string, string> = {}
   for (const it of portalItems) {
     if (it.type !== 'Episode' || it.index_number == null) continue
     if (season != null && it.parent_index_number !== season) continue
+    const number = season != null ? it.index_number - offset : it.index_number
+    // Before this cour starts, or past its end — belongs to a sibling cour.
+    if (number < 1) continue
+    if (courLength != null && number > courLength) continue
     if (bestOverlap(it.series_name ?? it.name, variantTokens) >= 0.5) {
-      siteEpisodes[String(it.index_number)] = it.id
+      siteEpisodes[String(number)] = it.id
     }
   }
   const portalSeriesId = resolvePortalSeriesId(series, portalItems)
