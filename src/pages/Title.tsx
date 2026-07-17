@@ -70,13 +70,16 @@ function PosterImg({ src, fallback }: { src: string; fallback?: string }) {
 }
 
 function DetailShell({
-  id, name, seasonLine, badges, sub, overview, manageId, poster, backdrop, children,
+  id, name, seasonLine, badges, sub, overview, manageId, poster, backdrop, aside, children,
 }: {
   id: string; name: string
   /** Second line of the title block: the season this page is showing. */
   seasonLine?: string | null
   badges?: ReactNode; sub?: string; overview?: string
-  manageId?: number | null; poster?: string; backdrop?: string; children: ReactNode
+  manageId?: number | null; poster?: string; backdrop?: string
+  /** Right column under the hero — season picker on multi-season titles. */
+  aside?: ReactNode
+  children: ReactNode
 }) {
   const { user } = useAuth()
   const isAdmin = user?.isAdmin ?? false
@@ -142,18 +145,17 @@ function DetailShell({
               </Link>
             )}
           </div>
-        </div>
-      </div>
-      <div className="series-body">
-        <div>{children}</div>
-        <aside>
-          {overview && (
-            <div className="panel" style={{ padding: 18 }}>
+          {overview ? (
+            <div className="series-synopsis">
               <div className="h-eyebrow">Synopsis</div>
               <p className="synopsis">{overview}</p>
             </div>
-          )}
-        </aside>
+          ) : null}
+        </div>
+      </div>
+      <div className={`series-body${aside ? ' has-aside' : ''}`}>
+        <div>{children}</div>
+        {aside ? <aside>{aside}</aside> : null}
       </div>
     </main>
   )
@@ -230,41 +232,56 @@ export default function Title() {
     if (displayYear) subParts.push(String(displayYear))
     const sub = subParts.join('  ·  ')
 
+    const seasonAside = multiSeason ? (
+      <div className="season-picker">
+        <div className="h-eyebrow">Seasons</div>
+        <div className="season-strip">
+          {seasonList.map((s) => {
+            const label = s.displayTitle?.trim() || s.name
+            return (
+              <button
+                key={s.season}
+                type="button"
+                className="season-card"
+                data-active={season === s.season}
+                onClick={() => setSearchParams(s.season === seasons[seasons.length - 1] ? {} : { season: String(s.season) })}
+              >
+                <img
+                  src={backdropUrl(data.id, s.season)} alt="" loading="lazy"
+                  onError={(e) => {
+                    const img = e.currentTarget
+                    // Banner → season poster → series poster. The card is wide,
+                    // so a portrait fallback just gets centre-cropped.
+                    if (img.dataset.fallback === 'poster') { img.remove(); return }
+                    if (img.dataset.fallback === 'season') {
+                      img.dataset.fallback = 'poster'
+                      img.src = imgUrl(data.id)
+                      return
+                    }
+                    img.dataset.fallback = 'season'
+                    img.src = seasonImgUrl(data.id, s.season)
+                  }}
+                />
+                <span className="season-scrim" />
+                <span className="season-meta">
+                  <span className="season-name">{label}</span>
+                  {s.episodes > 0 && <span className="season-eps">{s.episodes} eps</span>}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    ) : null
+
     return (
       <PortalLayout crumb={BackCrumb}>
         <DetailShell
           id={data.id} name={data.name} seasonLine={seasonLine} sub={sub} overview={data.overview} manageId={data.manageId}
           poster={multiSeason && season != null ? seasonImgUrl(data.id, season) : undefined}
           backdrop={multiSeason && season != null ? backdropUrl(data.id, season) : undefined}
+          aside={seasonAside}
         >
-          {multiSeason ? (
-            <div className="season-strip">
-              {seasonList.map((s) => (
-                <button
-                  key={s.season}
-                  type="button"
-                  className="season-card"
-                  data-active={season === s.season}
-                  onClick={() => setSearchParams(s.season === seasons[seasons.length - 1] ? {} : { season: String(s.season) })}
-                >
-                  <img
-                    src={seasonImgUrl(data.id, s.season)} alt="" loading="lazy"
-                    onError={(e) => {
-                      const img = e.currentTarget
-                      if (img.dataset.fallback) { img.remove(); return }
-                      img.dataset.fallback = '1'
-                      img.src = imgUrl(data.id)
-                    }}
-                  />
-                  <span className="season-scrim" />
-                  <span className="season-info">
-                    <span className="season-name">{s.name}</span>
-                    {s.episodes > 0 && <span className="season-eps">{s.episodes} eps</span>}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : null}
           {/* The chase status sits after the spacer, so it grows into the empty
               right end of the head instead of pushing anything — it appears and
               disappears (and its "airs in 2d 19h" retimes) with zero shift. */}
