@@ -369,17 +369,17 @@
   & .chip:hover { color: var(--fg); border-color: var(--border-strong); }
   & .chip[data-active="true"] { background: var(--accent-soft); color: var(--accent-soft-fg); border-color: transparent; }
 
-  /* Season picker — full-bleed poster cards on multi-season title pages */
-  & .season-strip { display: flex; gap: 12px; overflow-x: auto; margin-bottom: 24px; padding-bottom: 4px;
-    scrollbar-width: thin; }
-  & .season-card { flex: none; position: relative; width: 200px; height: 96px; padding: 0;
+  /* Season picker — stacked wide banner cards in the title-page aside */
+  & .season-picker { display: flex; flex-direction: column; gap: 12px; }
+  & .season-strip { display: flex; flex-direction: column; gap: 10px; }
+  & .season-card { position: relative; width: 100%; aspect-ratio: 16 / 7; padding: 0;
     border-radius: 12px; overflow: hidden; border: 1px solid var(--border); cursor: pointer;
     background: linear-gradient(135deg, oklch(0.26 0.06 310) 0%, oklch(0.16 0.03 285) 100%);
     font: 13px var(--font-sans); text-align: left; color: var(--fg);
     transition: border-color .14s, transform .18s ease; }
   & .season-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
   & .season-card > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
-    object-position: center 20%; display: block; filter: saturate(1.05);
+    object-position: center 30%; display: block; filter: saturate(1.05);
     transition: transform .25s ease, filter .14s; }
   & .season-card:hover > img { transform: scale(1.04); }
   & .season-card .season-scrim { position: absolute; inset: 0;
@@ -389,7 +389,7 @@
     background: linear-gradient(to top, oklch(0.14 0.05 310 / 92%) 0%, oklch(0.12 0.03 310 / 45%) 45%, oklch(0.1 0 0 / 12%) 100%); }
   & .season-card:not([data-active="true"]) > img { filter: saturate(0.7) brightness(0.85); }
   & .season-card:not([data-active="true"]):hover > img { filter: saturate(1.05); }
-  & .season-card .season-info { position: absolute; inset: auto 12px 10px 12px;
+  & .season-card .season-meta { position: absolute; inset: auto 12px 10px 12px;
     display: flex; flex-direction: column; gap: 2px; }
   & .season-card .season-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     text-shadow: 0 1px 4px oklch(0 0 0 / 50%); }
@@ -555,11 +555,17 @@
     text-shadow: 0 2px 14px oklch(0.145 0.008 285 / 65%); }
   & .series-season::before { content: ""; flex: none; width: 3px; align-self: stretch; border-radius: 2px; background: var(--accent); }
   & .series-sub { font-family: var(--font-mono); font-size: 12px; color: var(--fg-subtle); letter-spacing: 0.04em; margin-top: 6px; }
+  /* Synopsis sits beside the poster under the title/actions — fills the empty
+     column the shorter meta block used to leave. Clamp so a novel-length
+     overview can't shove the episodes list down past the poster's bottom. */
+  & .series-synopsis { margin-top: 18px; max-width: 62ch; }
+  & .series-synopsis .synopsis {
+    display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden;
+    margin-top: 8px;
+  }
 
-  & .series-body { display: grid; grid-template-columns: 1fr 320px; gap: 32px; margin-top: 8px; }
-  /* Grid items default to min-width:auto, so the season strip's min-content width
-     (one card per season, ~200px each) widened the column past the viewport and
-     scrolled the whole page sideways instead of scrolling the strip. */
+  & .series-body { display: grid; grid-template-columns: 1fr; gap: 32px; margin-top: 8px; }
+  & .series-body.has-aside { grid-template-columns: 1fr 320px; }
   & .series-body > * { min-width: 0; }
   & .ep-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
   & .ep-head .spacer { flex: 1; }
@@ -606,7 +612,8 @@
        block still reads as one unit next to the art. */
     & .series-name { font-size: 22px; }
     & .series-season { font-size: 14px; margin-top: 6px; }
-    & .series-body { grid-template-columns: 1fr; gap: 20px; }
+    & .series-synopsis .synopsis { -webkit-line-clamp: 6; }
+    & .series-body, & .series-body.has-aside { grid-template-columns: 1fr; gap: 20px; }
   }
 }
 
