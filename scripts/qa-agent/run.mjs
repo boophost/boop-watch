@@ -294,10 +294,47 @@ function runAgent(prompt, cred) {
     if (err instanceof RateLimitError) throw err
     result = raw // some versions print the text directly
   }
+  return parseVerdicts(result)
+}
+
+// Pull the verdict(s) out of the agent's final message. The model is asked for
+// one JSON object per line inside a ```json block (prompt.md), which makes
+// partial recovery trivial — a single malformed line (an unescaped quote or
+// stray newline in an `evidence` string) no longer sinks the whole run. We still
+// accept the older `{"verdicts":[...]}` / bare-array shapes. Returns
+// `{ verdicts, unreadable }`: `unreadable` is a tail of the output when nothing
+// at all could be salvaged, so the caller can report instead of crashing.
+function parseVerdicts(result) {
+  const tail = result.slice(-800).trim()
   const blocks = [...result.matchAll(/```json\s*([\s\S]*?)```/g)]
-  if (!blocks.length) throw new Error(`agent produced no json verdict block:\n${result.slice(-500)}`)
-  const parsed = JSON.parse(blocks[blocks.length - 1][1])
-  return parsed.verdicts ?? []
+  if (!blocks.length) return { verdicts: [], unreadable: tail }
+  const block = blocks[blocks.length - 1][1].trim()
+
+  const isVerdict = (v) => v && typeof v === 'object' && typeof v.index === 'number'
+
+  // Whole-block parse first — handles {"verdicts":[...]}, a bare [...] array, or
+  // a single {...} object. JSONL (the format we now ask for) fails here and
+  // falls through to the line-by-line salvage below.
+  try {
+    const whole = JSON.parse(block)
+    const verdicts = Array.isArray(whole) ? whole : (whole.verdicts ?? [whole])
+    if (Array.isArray(verdicts) && verdicts.some(isVerdict)) {
+      return { verdicts: verdicts.filter(isVerdict), unreadable: null }
+    }
+  } catch { /* fall through to line-by-line salvage */ }
+
+  // Salvage line-by-line: keep every line that parses to a verdict object, drop
+  // the rest. One stray line no longer discards the good ones.
+  const verdicts = []
+  for (const line of block.split(/\r?\n/)) {
+    const s = line.trim().replace(/,\s*$/, '') // tolerate trailing array commas
+    if (!s || '{}[]'.includes(s)) continue
+    try {
+      const obj = JSON.parse(s)
+      if (isVerdict(obj)) verdicts.push(obj)
+    } catch { /* skip this unparseable line */ }
+  }
+  return verdicts.length ? { verdicts, unreadable: null } : { verdicts: [], unreadable: tail }
 }
 
 class RateLimitError extends Error {
@@ -341,6 +378,29 @@ function buildComment(items, verdicts, baseUrl) {
     '| | Test-plan item | Evidence |',
     '|---|---|---|',
     ...rows,
+    '',
+    '_Automated QA — not a merge approval._',
+  ].join('\n')
+}
+
+// Posted when the agent ran but its verdict block couldn't be parsed at all.
+// Better than a silent exit-1: the human sees QA ran, that nothing was ticked,
+// and the tail of the raw output to judge from.
+function buildUnreadableComment(items, baseUrl, tail) {
+  const fenced = tail.replace(/```/g, '`​``') // neutralize fences in the tail
+  return [
+    BODY_MARKER,
+    '### 🤖 QA agent — verdict unreadable',
+    '',
+    `Ran against the preview env (${baseUrl}) but did not emit a parseable JSON verdict block, so none of the ${items.length} item(s) were checked off. A human should review the run and the output below.`,
+    '',
+    '<details><summary>Output tail</summary>',
+    '',
+    '```',
+    fenced,
+    '```',
+    '',
+    '</details>',
     '',
     '_Automated QA — not a merge approval._',
   ].join('\n')
@@ -399,11 +459,14 @@ async function main() {
   if (!dryRun) console.log(`Claude credentials available: ${creds.map((c) => c.name).join(', ')}`)
 
   let verdicts
+  let unreadable = null
   if (dryRun) {
     verdicts = items.map((_, i) => ({ index: i, status: 'pass', evidence: 'dry-run: not actually verified' }))
   } else {
     try {
-      verdicts = runAgentWithFailover(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items, pr }), creds)
+      const res = runAgentWithFailover(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items, pr }), creds)
+      verdicts = res.verdicts
+      unreadable = res.unreadable
     } catch (err) {
       // Every credential is capped — nothing was verified, but that's not a QA
       // failure either. Say so on the PR, tick nothing, and exit clean so the
@@ -415,6 +478,15 @@ async function main() {
       }
       throw err
     }
+  }
+
+  // The agent ran but emitted no parseable verdict block at all (malformed JSON,
+  // or none emitted). Don't crash — post what we have so the run isn't silently
+  // lost to a red X, and leave every item unchecked for a human to review.
+  if (unreadable && !verdicts.length) {
+    await upsertComment(pr, buildUnreadableComment(items, baseUrl, unreadable))
+    console.log('QA ran but produced no parseable verdicts — posted the output tail for a human.')
+    return
   }
 
   const passedIdx = verdicts.filter((v) => v.status === 'pass').map((v) => v.index)
