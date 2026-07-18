@@ -389,6 +389,18 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
     } catch (persistErr) {
       console.error('detail: failed to persist metadata —', persistErr)
     }
+    // Backstop the add-time enrich: any row still unmapped (add-time attempt
+    // failed, or it predates that path) gets its season mapping resolved now, so
+    // the episode/download matcher can disambiguate seasons. Gated on unmapped
+    // (mapping_source == null) so we neither re-resolve every view nor clobber a
+    // manual override. Best-effort — a dataset hiccup never breaks the detail.
+    if (series.mapping_source == null) {
+      try {
+        await enrichSeasonMapping(series.mal_id)
+      } catch (mapErr) {
+        console.error('detail: season mapping enrich failed —', mapErr)
+      }
+    }
     res.json({ series: seriesDb.getSeriesById(id) ?? series, mal })
   } catch (e) {
     console.error(e)
@@ -519,6 +531,17 @@ app.post('/api/series', requireAuth, (req, res) => {
       synopsis,
       image_url,
       url,
+    })
+    // Populate the multi-season placement mapping (tvdb_season/episode_offset)
+    // for this newly-added row. Without it, a cour in a multi-season franchise
+    // has no season to disambiguate on, so the download/episode matcher keys
+    // site episodes by bare IndexNumber — which collides across seasons and
+    // links an episode to the wrong Jellyfin season (e.g. a S2 cour's Ep 3
+    // resolving to S3E3). Best-effort + non-blocking: the dataset fetch can be
+    // slow on a cold cache, and a hiccup must never fail the add. The detail
+    // route re-attempts this for any row left unmapped.
+    void enrichSeasonMapping(mal_id).catch((mapErr) => {
+      console.error('add: season mapping enrich failed —', mapErr)
     })
     res.status(201).json({ series: row })
   } catch (e) {
