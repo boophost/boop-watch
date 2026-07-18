@@ -4885,9 +4885,15 @@ function normalizeDirName(name: string): string {
 }
 
 /** The directory to use for one templated segment: an existing directory that
- * differs only by a `(year)` suffix or season padding, else `wanted` itself. */
+ * differs only by a `(year)` suffix or season padding, else `wanted` itself.
+ *
+ * Note we deliberately do NOT short-circuit on `existsSync(wanted)`: once a
+ * `… (2026)` twin exists alongside the legacy `…` folder, returning the exact
+ * templated name would keep every import landing in the twin, and Jellyfin
+ * indexes it as a second, separate (and non-Public) series — the episodes never
+ * surface on the portal, so the chase sits at "importing" forever. Always run
+ * the normalised match and pick the canonical twin so both folders converge. */
 function resolveDirSegment(parent: string, wanted: string): string {
-  if (fs.existsSync(path.join(parent, wanted))) return wanted
   let entries: fs.Dirent[]
   try {
     entries = fs.readdirSync(parent, { withFileTypes: true })
@@ -4896,7 +4902,8 @@ function resolveDirSegment(parent: string, wanted: string): string {
   }
   const target = normalizeDirName(wanted)
   // Sorted so the choice is deterministic while a duplicate pair still exists;
-  // the un-suffixed legacy name sorts before its "… (2026)" twin.
+  // the un-suffixed legacy name sorts before its "… (2026)" twin, and an
+  // unpadded "Season 4" resolves within it once the show folder converges.
   const matches = entries
     .filter((e) => e.isDirectory() && normalizeDirName(e.name) === target)
     .map((e) => e.name)
