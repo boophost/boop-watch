@@ -10,9 +10,12 @@ import {
   fetchAnimeFull,
 } from './jikan.js'
 import * as seriesDb from './db.js'
-import { getEpisodesForDisplay } from './episodes.js'
+import { getEpisodesForDisplay, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { publicRouter, commentView } from './publicRoutes.js'
+import { publicRouter, commentView, portalSeriesForCatalog } from './publicRoutes.js'
+import {
+  getPortalSeasonCounts, getPortalSeasonTitles, getPortalSeasonYears, setPortalSeasonTitle,
+} from './portalDb.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock, fireEvent } from './flowRoutes.js'
@@ -386,6 +389,18 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
     } catch (persistErr) {
       console.error('detail: failed to persist metadata —', persistErr)
     }
+    // Backstop the add-time enrich: any row still unmapped (add-time attempt
+    // failed, or it predates that path) gets its season mapping resolved now, so
+    // the episode/download matcher can disambiguate seasons. Gated on unmapped
+    // (mapping_source == null) so we neither re-resolve every view nor clobber a
+    // manual override. Best-effort — a dataset hiccup never breaks the detail.
+    if (series.mapping_source == null) {
+      try {
+        await enrichSeasonMapping(series.mal_id)
+      } catch (mapErr) {
+        console.error('detail: season mapping enrich failed —', mapErr)
+      }
+    }
     res.json({ series: seriesDb.getSeriesById(id) ?? series, mal })
   } catch (e) {
     console.error(e)
@@ -426,7 +441,9 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
       mal_id: series.mal_id,
       url: malUrl,
       title: e.title ?? `Episode ${e.number}`,
-      title_japanese: e.title_japanese,
+      // No source has published a real title yet — the `title` above is the
+      // placeholder, not a name anyone wrote.
+      title_pending: e.titlePending,
       aired: e.aired,
       filler: false,
       recap: false,
@@ -445,22 +462,25 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
     const cached = seriesDb.getCachedEpisodes(series.mal_id)
     const rows =
       cached.length > 0
-        ? cached.map((c) => ({
-            mal_id: series.mal_id,
-            url: malUrl,
-            title: c.title ?? `Episode ${c.number}`,
-            title_japanese: c.title_japanese ?? null,
-            aired: c.aired ?? null,
-            filler: false,
-            recap: false,
-            episode: c.number,
-          }))
+        ? cached.map((c) => {
+            const proper = isProperTitle(c.title, c.title_source)
+            return {
+              mal_id: series.mal_id,
+              url: malUrl,
+              title: proper ? (c.title as string) : `Episode ${c.number}`,
+              title_pending: !proper,
+              aired: c.aired ?? null,
+              filler: false,
+              recap: false,
+              episode: c.number,
+            }
+          })
         : total && total > 0
           ? Array.from({ length: total }, (_, i) => ({
               mal_id: series.mal_id,
               url: malUrl,
               title: `Episode ${i + 1}`,
-              title_japanese: null,
+              title_pending: true,
               aired: null,
               filler: false,
               recap: false,
@@ -511,6 +531,17 @@ app.post('/api/series', requireAuth, (req, res) => {
       synopsis,
       image_url,
       url,
+    })
+    // Populate the multi-season placement mapping (tvdb_season/episode_offset)
+    // for this newly-added row. Without it, a cour in a multi-season franchise
+    // has no season to disambiguate on, so the download/episode matcher keys
+    // site episodes by bare IndexNumber — which collides across seasons and
+    // links an episode to the wrong Jellyfin season (e.g. a S2 cour's Ep 3
+    // resolving to S3E3). Best-effort + non-blocking: the dataset fetch can be
+    // slow on a cold cache, and a hiccup must never fail the add. The detail
+    // route re-attempts this for any row left unmapped.
+    void enrichSeasonMapping(mal_id).catch((mapErr) => {
+      console.error('add: season mapping enrich failed —', mapErr)
     })
     res.status(201).json({ series: row })
   } catch (e) {
@@ -877,6 +908,61 @@ function bannerView(b: seriesDb.BannerRow) {
 /** `?kind=poster` picks the portrait art; anything else means the wide banner. */
 const artKind = (req: express.Request): seriesDb.ArtKind =>
   seriesDb.isArtKind(req.query.kind) ? req.query.kind : 'banner'
+
+// ---------------------------------------------------------------------------
+// Season titles — the admin-authored season line on the portal title page
+// ("Season 1 Part 2", "Diamond is Unbreakable"). Stored per (JF series id, JF
+// season); these routes are keyed by catalog id to match the rest of /manage,
+// and resolve the JF series through the portal's own franchise anchoring.
+// ---------------------------------------------------------------------------
+
+/** The season rows for a catalog series' JF show, override included. */
+function seasonTitleView(malId: number) {
+  const pItem = portalSeriesForCatalog(malId)
+  if (!pItem) return { seriesId: null, seriesName: null, seasons: [] }
+  const years = getPortalSeasonYears(pItem.id)
+  const titles = getPortalSeasonTitles(pItem.id)
+  return {
+    seriesId: pItem.id,
+    seriesName: pItem.name,
+    seasons: getPortalSeasonCounts(pItem.id).map((c) => ({
+      season: c.season,
+      episodes: c.episodes,
+      year: years.get(c.season) ?? null,
+      displayTitle: titles.get(c.season) ?? null,
+    })),
+  }
+}
+
+app.get('/api/series/:id/season-titles', requireAuth, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  res.json(seasonTitleView(series.mal_id))
+})
+
+// Set or clear one season's override. A blank/absent displayTitle clears it —
+// the portal then falls back to its own generic default.
+app.put('/api/series/:id/season-titles/:season', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id)
+  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const season = Number(req.params.season)
+  if (!Number.isInteger(season)) { res.status(400).json({ error: 'Invalid season' }); return }
+  const pItem = portalSeriesForCatalog(series.mal_id)
+  if (!pItem) { res.status(404).json({ error: 'No Public series for this catalog entry' }); return }
+  if (!getPortalSeasonCounts(pItem.id).some((c) => c.season === season)) {
+    res.status(400).json({ error: 'Unknown season for this series' })
+    return
+  }
+  const raw = (req.body as { displayTitle?: unknown })?.displayTitle
+  if (raw != null && typeof raw !== 'string') {
+    res.status(400).json({ error: 'displayTitle must be a string or null' })
+    return
+  }
+  setPortalSeasonTitle(pItem.id, season, raw ?? null)
+  res.json(seasonTitleView(series.mal_id))
+})
 
 // List candidates of one kind (gathering them from remote sources on first view).
 app.get('/api/series/:id/banners', requireAuth, async (req, res) => {

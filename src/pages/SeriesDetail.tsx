@@ -133,7 +133,6 @@ interface MalDetail {
   url: string
   title: string
   title_english?: string | null
-  title_japanese?: string | null
   type?: string
   source?: string
   episodes?: number | null
@@ -154,7 +153,8 @@ interface EpisodeRow {
   mal_id: number
   url: string
   title: string
-  title_japanese: string | null
+  /** `title` is a synthesized "Episode N" — no source has named it yet. */
+  title_pending?: boolean
   aired: string | null
   filler: boolean
   recap: boolean
@@ -447,6 +447,115 @@ function EpisodeChasePanel({
           ) : null}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+interface SeasonTitleRow {
+  season: number
+  episodes: number
+  year: number | null
+  displayTitle: string | null
+}
+
+/**
+ * Per-season custom title for the portal's season line. Blank clears the
+ * override, and the portal falls back to its own generic "Season N".
+ * Self-contained: owns its own fetch/state, keyed by catalog series id.
+ */
+function SeasonTitlesPanel({ id }: { id: number }) {
+  const [rows, setRows] = useState<SeasonTitleRow[]>([])
+  const [seriesName, setSeriesName] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [drafts, setDrafts] = useState<Record<number, string>>({})
+  const [busy, setBusy] = useState<number | null>(null)
+  const [msg, setMsg] = useState('')
+
+  const apply = useCallback((d: { seriesName?: string | null; seasons?: SeasonTitleRow[] }) => {
+    const seasons = d.seasons ?? []
+    setSeriesName(d.seriesName ?? null)
+    setRows(seasons)
+    setDrafts(Object.fromEntries(seasons.map((s) => [s.season, s.displayTitle ?? ''])))
+  }, [])
+
+  useEffect(() => {
+    if (!Number.isFinite(id)) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const r = await fetchAuth(`/api/series/${id}/season-titles`)
+        if (!r.ok) return
+        const d = (await r.json()) as { seriesName?: string | null; seasons?: SeasonTitleRow[] }
+        if (!cancelled) apply(d)
+      } catch {
+        /* panel just stays empty */
+      } finally {
+        if (!cancelled) setLoaded(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [id, apply])
+
+  const save = async (season: number) => {
+    setBusy(season)
+    setMsg('')
+    try {
+      const r = await fetchAuth(`/api/series/${id}/season-titles/${season}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayTitle: drafts[season] ?? '' }),
+      })
+      const d = await parseAuthJson<{ seriesName?: string | null; seasons?: SeasonTitleRow[]; error?: string }>(r)
+      if (!r.ok) throw new Error(d.error ?? 'Update failed')
+      apply(d)
+      setMsg(drafts[season]?.trim() ? `Saved season ${season}` : `Cleared season ${season}`)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Update failed')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (!loaded || rows.length === 0) return null
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+      <h3 className="text-sm font-medium text-muted-foreground">Season titles</h3>
+      <p className="mt-0.5 text-[11px] text-muted-foreground">
+        The season line on the portal title page{seriesName ? ` for ${seriesName}` : ''}. Leave blank
+        for the default ("Season 2").
+      </p>
+      <div className="mt-2 flex flex-col gap-2">
+        {rows.map((row) => (
+          <div key={row.season} className="flex items-center gap-2">
+            <span className="w-28 shrink-0 text-xs text-muted-foreground">
+              Season {row.season}
+              <span className="ml-1 text-[10px]">
+                ({row.episodes} ep{row.episodes === 1 ? '' : 's'}
+                {row.year != null ? `, ${row.year}` : ''})
+              </span>
+            </span>
+            <input
+              type="text"
+              placeholder={`Season ${row.season}`}
+              className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+              value={drafts[row.season] ?? ''}
+              onChange={(e) => setDrafts({ ...drafts, [row.season]: e.target.value })}
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy === row.season || (drafts[row.season] ?? '') === (row.displayTitle ?? '')}
+              onClick={() => void save(row.season)}
+            >
+              Save
+            </Button>
+          </div>
+        ))}
+      </div>
+      {msg ? <p className="mt-1.5 text-[11px] text-muted-foreground">{msg}</p> : null}
     </div>
   )
 }
@@ -768,10 +877,6 @@ export default function SeriesDetail() {
             mal.title_english !== mal.title ? (
               <p className="text-sm text-muted-foreground">{mal.title_english}</p>
             ) : null}
-            {mal?.title_japanese ? (
-              <p className="text-sm text-muted-foreground">{mal.title_japanese}</p>
-            ) : null}
-
             {metaLine ? (
               <p className="text-sm text-muted-foreground">{metaLine}</p>
             ) : null}
@@ -880,9 +985,10 @@ export default function SeriesDetail() {
           ) : null}
         </div>
 
-        <ArtPicker seriesId={id} kind="banner" />
-
-        <ArtPicker seriesId={id} kind="poster" />
+        <div className="grid gap-6 lg:grid-cols-2">
+          <ArtPicker seriesId={id} kind="banner" />
+          <ArtPicker seriesId={id} kind="poster" />
+        </div>
 
         <section>
           <div className="mb-4">
@@ -1063,6 +1169,8 @@ export default function SeriesDetail() {
             {mapMsg ? <p className="mt-1.5 text-[11px] text-muted-foreground">{mapMsg}</p> : null}
           </div>
 
+          <SeasonTitlesPanel id={id} />
+
           {dl && dl.blacklist.length > 0 ? (
             <div className="mt-4">
               <h3 className="mb-2 text-sm font-medium text-muted-foreground">
@@ -1128,10 +1236,15 @@ export default function SeriesDetail() {
                       {ep.episode ?? '—'}
                     </td>
                     <td className="px-3 py-2 align-top">
-                      <span className="font-medium">{ep.title}</span>
-                      {ep.title_japanese ? (
-                        <span className="mt-0.5 block text-xs text-muted-foreground">
-                          {ep.title_japanese}
+                      <span className={ep.title_pending ? 'text-muted-foreground' : 'font-medium'}>
+                        {ep.title}
+                      </span>
+                      {ep.title_pending ? (
+                        <span
+                          className="mt-1 block w-fit rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground"
+                          title="No source has published a title for this episode yet"
+                        >
+                          Untitled
                         </span>
                       ) : null}
                       {ep.filler || ep.recap ? (
@@ -1229,9 +1342,13 @@ export default function SeriesDetail() {
                     MAL ↗
                   </a>
                 </div>
-                <p className="mt-1 font-medium">{ep.title}</p>
-                {ep.title_japanese ? (
-                  <p className="text-xs text-muted-foreground">{ep.title_japanese}</p>
+                <p className={`mt-1 ${ep.title_pending ? 'text-muted-foreground' : 'font-medium'}`}>
+                  {ep.title}
+                </p>
+                {ep.title_pending ? (
+                  <span className="mt-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
+                    Untitled
+                  </span>
                 ) : null}
                 <p className="mt-1 text-xs text-muted-foreground">
                   {formatAired(ep.aired)}

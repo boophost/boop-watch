@@ -70,10 +70,16 @@ function PosterImg({ src, fallback }: { src: string; fallback?: string }) {
 }
 
 function DetailShell({
-  id, name, badges, sub, overview, manageId, poster, backdrop, children,
+  id, name, seasonLine, badges, sub, overview, manageId, poster, backdrop, aside, children,
 }: {
-  id: string; name: string; badges: ReactNode; sub?: string; overview?: string
-  manageId?: number | null; poster?: string; backdrop?: string; children: ReactNode
+  id: string; name: string
+  /** Second line of the title block: the season this page is showing. */
+  seasonLine?: string | null
+  badges?: ReactNode; sub?: string; overview?: string
+  manageId?: number | null; poster?: string; backdrop?: string
+  /** Right column under the hero — season picker on multi-season titles. */
+  aside?: ReactNode
+  children: ReactNode
 }) {
   const { user } = useAuth()
   const isAdmin = user?.isAdmin ?? false
@@ -120,9 +126,10 @@ function DetailShell({
           </div>
           <PosterImg src={poster ?? imgUrl(id)} fallback={imgUrl(id)} />
         </div>
-        <div style={{ paddingBottom: 6 }}>
-          <div className="series-meta-row">{badges}</div>
-          <h1 className="k-h1" style={{ fontSize: 32 }}>{name}</h1>
+        <div className="series-info">
+          {badges ? <div className="series-meta-row">{badges}</div> : null}
+          <h1 className="series-name">{name}</h1>
+          {seasonLine ? <p className="series-season">{seasonLine}</p> : null}
           {sub && <div className="series-sub">{sub}</div>}
           <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {user && (
@@ -138,18 +145,17 @@ function DetailShell({
               </Link>
             )}
           </div>
-        </div>
-      </div>
-      <div className="series-body">
-        <div>{children}</div>
-        <aside>
-          {overview && (
-            <div className="panel" style={{ padding: 18 }}>
+          {overview ? (
+            <div className="series-synopsis">
               <div className="h-eyebrow">Synopsis</div>
               <p className="synopsis">{overview}</p>
             </div>
-          )}
-        </aside>
+          ) : null}
+        </div>
+      </div>
+      <div className={`series-body${aside ? ' has-aside' : ''}`}>
+        <div>{children}</div>
+        {aside ? <aside>{aside}</aside> : null}
       </div>
     </main>
   )
@@ -202,74 +208,92 @@ export default function Title() {
     const playableCount = data.episodes.filter((ep) => ep.id).length
     const seasons = data.seasons ?? []
     const season = data.season ?? null
-    const seasonList = data.seasonList ?? seasons.map((s) => ({ season: s, name: `Season ${s}`, episodes: 0, year: null }))
+    const seasonList = data.seasonList
+      ?? seasons.map((s) => ({ season: s, name: `Season ${s}`, episodes: 0, year: null, displayTitle: null }))
     const multiSeason = seasonList.length > 1
     const activeSeason = season != null ? seasonList.find((s) => s.season === season) ?? null : null
-    // Only worth calling out when it's a real name (JoJo's "Stardust Crusaders"),
-    // not a generic "Season 3" that would just repeat the S3 badge as words.
+    // A JF season name only says something when it isn't the generic "Season 3"
+    // (JoJo's "Stardust Crusaders", "Final Season").
     const namedSeason = activeSeason && activeSeason.name !== `Season ${activeSeason.season}` ? activeSeason.name : null
-    // A multi-season franchise's cours can air years apart (JoJo runs 2012-2022) —
-    // prefer the selected season's own year over the series-level one once it's known.
-    const displayYear = (multiSeason ? activeSeason?.year : null) ?? data.year
+    // The season line under the title, in precedence order:
+    //  1. the admin's own override ("Season 1 Part 2") — hand-authored, always wins;
+    //  2. a real JF season name ("Stone Ocean");
+    //  3. the generic "Season N" — and nothing at all for a season 1 / a show with
+    //     no seasons, where "Season 1" is just noise under the series name.
+    const seasonLine = activeSeason?.displayTitle?.trim()
+      || namedSeason
+      || (season != null && season !== 1 ? `Season ${season}` : null)
+    // A franchise's cours can air years apart (JoJo runs 2012-2022) — the selected
+    // season's own year beats the series-level one whenever the server knows it.
+    const displayYear = activeSeason?.year ?? data.year
 
     const subParts: string[] = []
     if (data.genres.length) subParts.push(data.genres.slice(0, 3).join(' · '))
     if (displayYear) subParts.push(String(displayYear))
     const sub = subParts.join('  ·  ')
 
-    const badges = (
-      <>
-        {season != null ? (
-          <span className="badge badge-mono badge-square">S{season}</span>
-        ) : null}
-        {namedSeason ? <span className="badge">{namedSeason}</span> : null}
-        <span className="badge badge-mono badge-square">{playableCount} eps</span>
-        {data.nextEpisode ? (
-          <span className="badge ep-chase">
-            <EpisodeStatus chase={data.nextEpisode} prefix />
-          </span>
-        ) : null}
-      </>
-    )
+    const seasonAside = multiSeason ? (
+      <div className="season-picker">
+        <div className="h-eyebrow">Seasons</div>
+        <div className="season-strip">
+          {seasonList.map((s) => {
+            const label = s.displayTitle?.trim() || s.name
+            return (
+              <button
+                key={s.season}
+                type="button"
+                className="season-card"
+                data-active={season === s.season}
+                onClick={() => setSearchParams(s.season === seasons[seasons.length - 1] ? {} : { season: String(s.season) })}
+              >
+                <img
+                  src={backdropUrl(data.id, s.season)} alt="" loading="lazy"
+                  onError={(e) => {
+                    const img = e.currentTarget
+                    // Banner → season poster → series poster. The card is wide,
+                    // so a portrait fallback just gets centre-cropped.
+                    if (img.dataset.fallback === 'poster') { img.remove(); return }
+                    if (img.dataset.fallback === 'season') {
+                      img.dataset.fallback = 'poster'
+                      img.src = imgUrl(data.id)
+                      return
+                    }
+                    img.dataset.fallback = 'season'
+                    img.src = seasonImgUrl(data.id, s.season)
+                  }}
+                />
+                <span className="season-scrim" />
+                <span className="season-meta">
+                  <span className="season-name">{label}</span>
+                  {s.episodes > 0 && <span className="season-eps">{s.episodes} eps</span>}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    ) : null
+
     return (
       <PortalLayout crumb={BackCrumb}>
         <DetailShell
-          id={data.id} name={data.name} badges={badges} sub={sub} overview={data.overview} manageId={data.manageId}
+          id={data.id} name={data.name} seasonLine={seasonLine} sub={sub} overview={data.overview} manageId={data.manageId}
           poster={multiSeason && season != null ? seasonImgUrl(data.id, season) : undefined}
           backdrop={multiSeason && season != null ? backdropUrl(data.id, season) : undefined}
+          aside={seasonAside}
         >
-          {multiSeason ? (
-            <div className="season-strip">
-              {seasonList.map((s) => (
-                <button
-                  key={s.season}
-                  type="button"
-                  className="season-card"
-                  data-active={season === s.season}
-                  onClick={() => setSearchParams(s.season === seasons[seasons.length - 1] ? {} : { season: String(s.season) })}
-                >
-                  <img
-                    src={seasonImgUrl(data.id, s.season)} alt="" loading="lazy"
-                    onError={(e) => {
-                      const img = e.currentTarget
-                      if (img.dataset.fallback) { img.remove(); return }
-                      img.dataset.fallback = '1'
-                      img.src = imgUrl(data.id)
-                    }}
-                  />
-                  <span className="season-scrim" />
-                  <span className="season-info">
-                    <span className="season-name">{s.name}</span>
-                    {s.episodes > 0 && <span className="season-eps">{s.episodes} eps</span>}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : null}
+          {/* The chase status sits after the spacer, so it grows into the empty
+              right end of the head instead of pushing anything — it appears and
+              disappears (and its "airs in 2d 19h" retimes) with zero shift. */}
           <div className="ep-head">
             <h2 className="k-h3">Episodes</h2>
             <span className="badge badge-mono">{playableCount}</span>
             <div className="spacer" />
+            {data.nextEpisode ? (
+              <span className="ep-head-chase">
+                <EpisodeStatus chase={data.nextEpisode} prefix />
+              </span>
+            ) : null}
           </div>
           <div className="panel" style={{ overflow: 'hidden', opacity: loading ? 0.55 : 1, transition: 'opacity .15s' }}>
             <div className="eplist">

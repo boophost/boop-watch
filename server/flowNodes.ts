@@ -38,7 +38,7 @@ import {
   type WantStatus,
 } from './db.js'
 import { fetchAniListAiring, fetchAniListMedia, type AniListMedia } from './anilist.js'
-import { refreshEpisodeCache } from './episodes.js'
+import { refreshEpisodeCache, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
@@ -3288,7 +3288,8 @@ const episodeTitlesNode: NodeImpl = {
       // Cache-first: skip series already fully titled + fresh (refreshEpisodeCache
       // no-ops), and cap upstream lookups per run.
       const cachedRows = getCachedEpisodes(mal)
-      const missing = cachedRows.length === 0 || cachedRows.some((e) => !e.title)
+      const missing =
+        cachedRows.length === 0 || cachedRows.some((e) => !isProperTitle(e.title, e.title_source))
       if (!missing) continue
       if (maxFetch > 0 && refreshed >= maxFetch) continue
       const finished =
