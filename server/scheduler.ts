@@ -29,6 +29,7 @@ import {
   type WeekDay,
 } from './flowsDb.js'
 import { listSeries, markTorrentsCompleted } from './db.js'
+import { sourcingReconcile, qbitReconcileUnsafe } from './sourcing.js'
 import { getAllPortalItems } from './portalDb.js'
 import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
 import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
@@ -343,6 +344,36 @@ async function watchReleases(): Promise<void> {
   }
 }
 
+// Periodic sourcing self-heal. Without this, a want stuck in 'sourced' because
+// its queued torrent vanished from qBittorrent (removed / no seeders / failed)
+// never recovers: the Chase-wants flow only re-sources 'open' wants, and
+// sink.qbittorrent refuses to re-queue the dead hash — so the episode stays
+// missing forever until someone runs reconcile by hand. This runs the same safe
+// fixer (server/sourcing.ts) hourly: dead-torrent orphans → failed, their
+// sourced wants → open, phantom-fulfilled wants (file gone from disk) → open.
+const RECONCILE_INTERVAL_MS = 60 * 60_000
+let lastReconcileAt = 0
+
+async function reconcileSourcing(): Promise<void> {
+  if (Date.now() - lastReconcileAt < RECONCILE_INTERVAL_MS) return
+  // qBit answering unreliably would turn live torrents into false orphans — skip
+  // this pass (retry next tick) rather than reopen wants off a bad read.
+  if (await qbitReconcileUnsafe()) return
+  // Take the flow lock so we never reconcile while a chase is mid-queue (a
+  // just-queued torrent not yet visible in qBit would read as an orphan). A
+  // running flow means try again next tick.
+  if (!acquireFlowLock()) return
+  try {
+    lastReconcileAt = Date.now()
+    const r = await sourcingReconcile(false)
+    if (r.orphanRowsClosed || r.wantsReopened || r.phantomFulfilledReopened) {
+      console.log('scheduler: sourcing reconcile —', JSON.stringify(r))
+    }
+  } finally {
+    releaseFlowLock()
+  }
+}
+
 // Watchers advance their watermark only after a fire is dispatched, so ticks
 // must not overlap — a slow flow (a tick can outlast TICK_MS) would otherwise
 // let the next tick re-detect an in-flight item. This guard drops any tick that
@@ -358,6 +389,9 @@ async function tick(): Promise<void> {
     await watchNewPortalItems().catch((e) => console.error('scheduler: watchNewPortalItems threw', e))
     await watchQbitComplete().catch((e) => console.error('scheduler: watchQbitComplete threw', e))
     await watchReleases().catch((e) => console.error('scheduler: watchReleases threw', e))
+    // Self-heal orphaned sourcing state last, only when nothing else holds the
+    // flow lock this tick (gated to hourly internally).
+    await reconcileSourcing().catch((e) => console.error('scheduler: reconcileSourcing threw', e))
   } finally {
     ticking = false
   }

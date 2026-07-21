@@ -284,6 +284,30 @@ export interface ReconcileResult {
   phantomFulfilledReopened: number
 }
 
+/**
+ * Whether it is unsafe to run an *unattended* reconcile right now, because
+ * qBittorrent's answer can't be trusted. qBit unreachable (qbitList throws) or
+ * — the subtler trap — configured but answering an empty list while we still
+ * track live torrents: that is the mid-restart blip signature, and reconciling
+ * on it would read every live torrent as an orphan and reopen every want,
+ * spawning duplicate downloads. The manual `POST /api/sourcing/reconcile` has a
+ * human watching and skips this guard; the scheduler's periodic pass uses it.
+ */
+export async function qbitReconcileUnsafe(): Promise<boolean> {
+  if (!qbitConfigured()) return false // nothing qBit-derived to get wrong
+  let live: QbitTorrent[]
+  try {
+    live = await qbitListOurs()
+  } catch {
+    return true // unreachable — don't judge orphans off a failed fetch
+  }
+  if (live.length > 0) return false
+  const cat = ourCategory()
+  return allTorrentRows().some(
+    (r) => LIVE_STATUSES.has(r.status) && (r.category == null || r.category === cat),
+  )
+}
+
 /** Apply the safe fixes for what `sourcingLedger` reports. */
 export async function sourcingReconcile(dryRun: boolean): Promise<ReconcileResult> {
   const report = await sourcingLedger()
