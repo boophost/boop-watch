@@ -28,7 +28,7 @@ import { searchAnimeAniList, fetchAniListMedia } from './anilist.js'
 import { warmScope, ensureScope, getPlayableIds } from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
-import { sourcingLedger, sourcingBackfill, sourcingReconcile, wantAction } from './sourcing.js'
+import { sourcingLedger, sourcingBackfill, sourcingReconcile, sourcingSweep, wantAction } from './sourcing.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import { createIssue, githubConfigured } from './github.js'
 import * as blacklist from './blacklist.js'
@@ -713,6 +713,19 @@ app.post('/api/sourcing/reconcile', requireAuth, requireAdmin, async (req, res) 
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: e instanceof Error ? e.message : 'Reconcile failed' })
+  }
+})
+
+// Open wants for aired-but-untracked episodes of airing shows. The scheduler
+// runs this every 15 min; the route is the on-demand handle (and the dry run is
+// how you see what the sweep would do before it does it).
+app.post('/api/sourcing/sweep', requireAuth, requireAdmin, async (req, res) => {
+  const dryRun = (req.body as { dryRun?: unknown } | undefined)?.dryRun !== false
+  try {
+    res.json(await sourcingSweep(dryRun))
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Sweep failed' })
   }
 })
 
