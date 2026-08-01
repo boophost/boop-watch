@@ -121,7 +121,17 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
       const dead =
         !w.torrent_hash ||
         (!liveT && configured && (!t || LIVE_STATUSES.has(t.status))) ||
-        (t != null && (t.status === 'failed' || t.status === 'cleaned' || t.status === 'superseded'))
+        // `exhausted` belongs here too: the torrent is alive and complete in
+        // qBittorrent, but the import flow found nothing importable in it, so it
+        // will never fulfil the want and `source.qbittorrent` skips it forever.
+        // Without this the want is invisible to reconcile and sits `sourced`
+        // indefinitely — episodeChase.ts already tells the UI "the reconciler
+        // will reopen it", which was not true until now.
+        (t != null &&
+          (t.status === 'failed' ||
+            t.status === 'cleaned' ||
+            t.status === 'superseded' ||
+            t.status === 'exhausted'))
       return dead
         ? {
             want_id: w.id,
@@ -489,6 +499,35 @@ export async function sourcingReconcile(dryRun: boolean): Promise<ReconcileResul
   }
 
   return { dryRun, orphanRowsClosed, wantsReopened, phantomFulfilledReopened }
+}
+
+/**
+ * Put an `exhausted` torrent back in front of the import flow.
+ *
+ * `exhausted` means every file in it was skipped for a terminal reason — most
+ * often `unresolved-episode`, i.e. no episode number could be parsed from the
+ * filenames. The torrent is still sitting in qBittorrent fully downloaded, but
+ * `source.qbittorrent` skips exhausted hashes forever, so once the cause is
+ * fixed there is otherwise no way to make the import reconsider it.
+ *
+ * Deliberately human-triggered only — nothing calls this on a timer. An
+ * automatic retry would loop forever against a torrent that is genuinely
+ * unimportable (import → exhausted → retry → import → …).
+ */
+export function retryExhaustedTorrent(hash: string): {
+  ok: boolean
+  hash: string
+  status: string | null
+  reason?: string
+} {
+  const h = hash.trim().toLowerCase()
+  const t = getTorrent(h)
+  if (!t) return { ok: false, hash: h, status: null, reason: 'not in the torrent ledger' }
+  if (t.status !== 'exhausted') {
+    return { ok: false, hash: h, status: t.status, reason: 'only an exhausted torrent can be retried' }
+  }
+  setTorrentStatus(h, 'completed', 'admin: retry import after exhausted')
+  return { ok: true, hash: h, status: 'completed' }
 }
 
 /** Admin action on a single want (SeriesDetail chase panel). */
