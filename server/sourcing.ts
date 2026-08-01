@@ -10,6 +10,8 @@ import {
   listWants,
   listLibraryFiles,
   forgetLibraryFile,
+  getCachedEpisodes,
+  getSeriesStatus,
   getTorrent,
   recordTorrentQueued,
   setTorrentStatus,
@@ -22,6 +24,7 @@ import {
   type WantRow,
 } from './db.js'
 import { qbitConfigured, qbitList, parseTorrentTags, type QbitTorrent } from './qbit.js'
+import { refreshEpisodeCache } from './episodes.js'
 
 // qBittorrent is shared between prod and staging; each environment owns one
 // category (QBIT_CATEGORY: prod 'anime', staging 'anime-dev'). Reconciliation
@@ -272,6 +275,130 @@ export async function sourcingBackfill(dryRun: boolean): Promise<BackfillResult>
   }
 
   return { dryRun, adoptedFromQbit, adoptedFromLibrary, wantsFulfilled }
+}
+
+// --- Airing-shows want sweep -------------------------------------------------
+
+/**
+ * An aired episode we hold no want for. Reported by `sourcingSweep` and, when
+ * not a dry run, turned into an open want.
+ */
+export interface SweptEpisode {
+  mal_id: number
+  title: string
+  episode: number
+  airedAt: string
+}
+
+export interface SweepResult {
+  dryRun: boolean
+  /** Catalog rows the sweep looked at (airing, non-movie). */
+  seriesConsidered: number
+  /** Aired episodes that had no want row — opened unless dryRun. */
+  wantsOpened: SweptEpisode[]
+  /** Series whose episode-cache refresh threw (their air dates may be stale). */
+  refreshFailures: { mal_id: number; error: string }[]
+}
+
+/** Never open more than this many wants for one series in a single sweep. A
+ * mis-set air_status on a long finished show would otherwise queue a whole
+ * back catalog in one pass; a weekly show can only ever need one. */
+const SWEEP_MAX_PER_SERIES = 26
+
+/**
+ * The backstop that makes "currently airing shows get sourced automatically"
+ * true without depending on the schedule scrape.
+ *
+ * The event path (`trigger.release` → the "Release aired" flow) is the fast
+ * path, but it is built on animeschedule.net's homepage and a fuzzy library
+ * title match, which is season-blind by construction: `baseTitle` deliberately
+ * strips "Season 3" so a cour matches its parent show, and the scraped "Ep 12"
+ * label is the show's continuing number, not the cour's. For a multi-cour show
+ * in the catalog as several mal_id rows (Mushoku Tensei S1/II/S3 all share
+ * tvdb 371310) that files the want against the wrong cour at an episode number
+ * that cour never had — which then never finds a release — while the episode
+ * that actually aired is left with no want at all and silently stops being
+ * chased. It also only ever sees the current week, so a miss is permanent.
+ *
+ * This pass owes nothing to any of that. It walks each airing catalog row
+ * against *its own* cached AniList air dates, keyed on its own mal_id in its
+ * own per-cour episode numbering, and opens a want for anything that has aired
+ * and isn't already held or tracked. Idempotent: `upsertWant` without `reopen`
+ * leaves fulfilled and admin-abandoned wants alone, so a re-run is a no-op.
+ */
+export async function sourcingSweep(dryRun: boolean): Promise<SweepResult> {
+  const now = Date.now()
+  const wantsOpened: SweptEpisode[] = []
+  const refreshFailures: { mal_id: number; error: string }[] = []
+  let seriesConsidered = 0
+
+  // Episodes already on disk, in each cour's own MAL numbering (library rows
+  // store the post-offset absolute slot — reverse it, as backfill does).
+  const offsets = new Map(listSeries().map((s) => [s.mal_id, s.episode_offset ?? 0]))
+  const inLibrary = new Set<string>()
+  for (const f of listLibraryFiles()) {
+    if (f.mal_id == null || f.episode == null) continue
+    inLibrary.add(`${f.mal_id}:${f.episode - (offsets.get(f.mal_id) ?? 0)}`)
+  }
+
+  const wanted = new Set(
+    (
+      getDb()
+        .prepare(`SELECT mal_id, episode FROM wants WHERE kind = 'episode' AND episode IS NOT NULL`)
+        .all() as { mal_id: number; episode: number }[]
+    ).map((w) => `${w.mal_id}:${w.episode}`),
+  )
+  // A batch want covers every episode of its show — a season pack is already
+  // being chased, so per-episode wants alongside it would double-source.
+  const batchWanted = new Set(
+    (
+      getDb()
+        .prepare(`SELECT mal_id FROM wants WHERE kind = 'batch' AND status IN ('open','sourced')`)
+        .all() as { mal_id: number }[]
+    ).map((w) => w.mal_id),
+  )
+
+  for (const s of listSeries()) {
+    const status = getSeriesStatus(s.mal_id)
+    if (status?.is_movie) continue
+    // Only shows we believe are mid-broadcast. 'finished' is terminal (a gap in
+    // a finished show is a backfill question, not a keeping-up one) and an
+    // unresolved row has no air dates worth trusting yet.
+    if (status?.air_status !== 'airing') continue
+    seriesConsidered++
+    if (batchWanted.has(s.mal_id)) continue
+
+    // Cache-first (AniList, 6h TTL internally) — a weekly show needs at most
+    // one upstream call per sweep window, usually none.
+    try {
+      await refreshEpisodeCache({
+        mal_id: s.mal_id,
+        finished: false,
+        totalEpisodes: status.total_episodes ?? s.episodes ?? null,
+      })
+    } catch (e) {
+      refreshFailures.push({ mal_id: s.mal_id, error: e instanceof Error ? e.message : String(e) })
+    }
+
+    const total = status.total_episodes ?? s.episodes ?? null
+    let opened = 0
+    for (const ep of getCachedEpisodes(s.mal_id)) {
+      if (opened >= SWEEP_MAX_PER_SERIES) break
+      if (!ep.aired) continue // no air date = nothing to assert about it
+      const airedAt = new Date(ep.aired)
+      if (!Number.isFinite(airedAt.getTime()) || airedAt.getTime() > now) continue
+      if (total != null && total > 0 && ep.number > total) continue
+      const key = `${s.mal_id}:${ep.number}`
+      if (inLibrary.has(key) || wanted.has(key)) continue
+      opened++
+      wanted.add(key) // keep the dry-run report identical to what a live run does
+      wantsOpened.push({ mal_id: s.mal_id, title: s.title, episode: ep.number, airedAt: ep.aired })
+      if (dryRun) continue
+      upsertWant({ mal_id: s.mal_id, kind: 'episode', episode: ep.number, reason: 'airing-sweep' })
+    }
+  }
+
+  return { dryRun, seriesConsidered, wantsOpened, refreshFailures }
 }
 
 export interface ReconcileResult {
