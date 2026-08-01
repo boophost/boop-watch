@@ -161,7 +161,7 @@ const MISSING_VIDEOS_GRAPH: FlowGraph = {
     // pin from the Anime status node's tsuki_id is reliable — AnimeTosho mis-tags
     // some seasons) and structured audio langs. It reports no seeders, so
     // minSeeders=0.
-    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1380, y: 20 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: false, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.5, maxEpisodes: 26, maxItems: 0 } },
+    { id: 'tor', type: 'enrich.torrent-search', position: { x: 1380, y: 20 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, maxResolution: '1080p', preferDualAudio: true, requireDualAudio: false, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.5, maxEpisodes: 26, maxItems: 0 } },
     { id: 'qb', type: 'sink.qbittorrent', position: { x: 1680, y: 90 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
   ],
   edges: [
@@ -243,7 +243,7 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
     // TsukiHime: per-season anime id (reliable season pin) + structured audio
     // langs (dual detected without title-guessing); no seeders → minSeeders=0.
     // AV1 is allowed here — the donor is only muxed for its audio, never played.
-    { id: 'search', type: 'enrich.torrent-search', position: { x: 4680, y: 720 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, preferDualAudio: true, requireDualAudio: true, excludeCodecs: '', minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
+    { id: 'search', type: 'enrich.torrent-search', position: { x: 4680, y: 720 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, maxResolution: '1080p', preferDualAudio: true, requireDualAudio: true, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
     { id: 'upQb', type: 'sink.qbittorrent', position: { x: 4940, y: 720 }, config: { urlField: 'torrent_magnet', category: 'anime', savepath: '', paused: false } },
     // Import path (winners: as-is, muxed, or sub-only-no-donor + unmatched files).
     { id: 'preSub', type: 'combine.merge', position: { x: 4160, y: 220 }, config: {} },

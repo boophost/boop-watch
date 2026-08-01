@@ -192,6 +192,10 @@ export interface BackfillResult {
   adoptedFromQbit: number
   adoptedFromLibrary: number
   wantsFulfilled: number
+  /** library_files rows pointing at a path that is not on disk — skipped rather
+   * than turned into a `fulfilled` want the reconciler would immediately reopen.
+   * A non-zero count means the file ledger has drifted from disk. */
+  skippedMissingFile: number
 }
 
 /**
@@ -211,6 +215,7 @@ export async function sourcingBackfill(dryRun: boolean): Promise<BackfillResult>
   let adoptedFromQbit = 0
   let adoptedFromLibrary = 0
   let wantsFulfilled = 0
+  let skippedMissingFile = 0
 
   if (qbitConfigured()) {
     for (const t of await qbitListOurs()) {
@@ -261,9 +266,23 @@ export async function sourcingBackfill(dryRun: boolean): Promise<BackfillResult>
 
   // Fulfilled wants for what the library already holds — MAL per-cour episode
   // space, so reverse the series' episode_offset from the stored number.
+  //
+  // "Already holds" has to mean a file that is actually on disk, not merely a
+  // library_files row. Those rows drift (a hand-moved file, a path written
+  // before normalisation, a restored DB), and minting a `fulfilled` want from a
+  // stale one is actively harmful: the hourly reconcile then finds a fulfilled
+  // want whose file is missing, correctly reopens it, and the chase downloads a
+  // show we already have. That happened on production — 12 episodes of a
+  // finished show reopened and queued off stale rows. Verify the path first.
+  const libRoot = process.env.LIBRARY_DIR ?? '/library'
+  const libAbs = (p: string) => (path.isAbsolute(p) ? p : path.join(libRoot, p))
   const seen = new Set<string>()
   for (const f of libFiles) {
     if (f.mal_id == null || f.episode == null) continue
+    if (!f.path || !fs.existsSync(libAbs(f.path))) {
+      skippedMissingFile++
+      continue
+    }
     const s = seriesByMal.get(f.mal_id)
     const malEp = f.episode - (s?.episode_offset ?? 0)
     if (!Number.isFinite(malEp) || malEp < 1) continue
@@ -284,7 +303,7 @@ export async function sourcingBackfill(dryRun: boolean): Promise<BackfillResult>
     }
   }
 
-  return { dryRun, adoptedFromQbit, adoptedFromLibrary, wantsFulfilled }
+  return { dryRun, adoptedFromQbit, adoptedFromLibrary, wantsFulfilled, skippedMissingFile }
 }
 
 // --- Airing-shows want sweep -------------------------------------------------
