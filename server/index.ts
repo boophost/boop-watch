@@ -28,7 +28,14 @@ import { searchAnimeAniList, fetchAniListMedia } from './anilist.js'
 import { warmScope, ensureScope, getPlayableIds } from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
-import { sourcingLedger, sourcingBackfill, sourcingReconcile, sourcingSweep, wantAction } from './sourcing.js'
+import {
+  sourcingLedger,
+  sourcingBackfill,
+  sourcingReconcile,
+  sourcingSweep,
+  retryExhaustedTorrent,
+  wantAction,
+} from './sourcing.js'
 import { qbitConfigured, qbitDelete } from './qbit.js'
 import { createIssue, githubConfigured } from './github.js'
 import * as blacklist from './blacklist.js'
@@ -727,6 +734,14 @@ app.post('/api/sourcing/sweep', requireAuth, requireAdmin, async (req, res) => {
     console.error(e)
     res.status(500).json({ error: e instanceof Error ? e.message : 'Sweep failed' })
   }
+})
+
+// Put an `exhausted` torrent back in front of the import flow. See
+// retryExhaustedTorrent — this is the only way to reconsider a fully-downloaded
+// torrent whose files were all skipped, once the cause of the skip is fixed.
+app.post('/api/sourcing/torrents/:hash/retry', requireAuth, requireAdmin, (req, res) => {
+  const r = retryExhaustedTorrent(String(req.params.hash))
+  res.status(r.ok ? 200 : 409).json(r)
 })
 
 // Admin action on one want (the chase panel's "retry now" / "abandon").
