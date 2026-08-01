@@ -2762,6 +2762,7 @@ function relevanceScore(c: Candidate, titleNorm: string, queryTokens: string[]):
 interface SearchOpts {
   resolution: string
   requireResolution: boolean
+  maxResolution: string // hard ceiling by RES_RANK; '' = no cap
   preferDualAudio: boolean
   requireDualAudio: boolean
   minSeeders: number
@@ -2773,8 +2774,21 @@ function passesFilters(c: Candidate, o: SearchOpts): boolean {
   // Seeder floor only applies when the provider reports seeders (TsukiHime doesn't).
   if (o.minSeeders > 0 && c.seeders != null && c.seeders < o.minSeeders) return false
   if (o.requireResolution && o.resolution && c.resolution !== o.resolution) return false
+  // Hard ceiling, distinct from `resolution` (a preference) and from
+  // `requireResolution` (an exact match that would also reject a 720p-only
+  // week). Anything above the cap is dropped outright. This is the guard that
+  // actually holds: our Jellyfin GPU cannot hardware-decode AV1, and 4K
+  // releases are both the most likely to be AV1 and the most expensive to
+  // software-decode — a 2160p AV1 grab is what stalled playback on prod.
+  if (o.maxResolution && RES_RANK[o.maxResolution]) {
+    const rank = RES_RANK[c.resolution]
+    if (rank && rank > RES_RANK[o.maxResolution]) return false
+  }
   if (o.requireDualAudio && !c.dualAudio) return false
-  // Drop unplayable codecs (only when detected — an untagged release is kept).
+  // Drop unplayable codecs. Only fires when the release name states a codec —
+  // plenty of good releases (SubsPlease et al) name none, and rejecting those
+  // would throw away the best-seeded options. So this is a strong filter, not a
+  // guarantee: the only ground truth is ffprobe's `video_codec` after download.
   if (c.videoCodec && o.excludeCodecs.includes(c.videoCodec)) return false
   // Size cap (only when the release reports a size) — keeps a season-pack search
   // from picking an 80GB+ Blu-ray remux over a reasonable WEB-DL.
@@ -2864,6 +2878,7 @@ const torrentSearch: NodeImpl = {
         { value: '', label: 'Any' },
       ], default: '1080p' },
       { key: 'requireResolution', label: 'Require exact resolution', kind: 'boolean', default: false, help: 'Off = prefer it but accept the best available.' },
+      { key: 'maxResolution', label: 'Max resolution', kind: 'text', default: '', help: 'Hard ceiling, e.g. "1080p" — anything higher is dropped. Unlike "require exact", this still allows a lower one when nothing better exists. Set this: 4K releases are the most likely to be AV1, which our Tesla T4 cannot hardware-decode.' },
       { key: 'preferDualAudio', label: 'Prefer dual audio (EN+JP)', kind: 'boolean', default: true },
       { key: 'requireDualAudio', label: 'Require dual audio', kind: 'boolean', default: false, help: 'Drops releases without English+Japanese audio. Many fansubs are sub-only.' },
       { key: 'excludeCodecs', label: 'Exclude codecs', kind: 'text', default: '', help: 'Comma list of video codecs to drop, e.g. "av1". Our Jellyfin GPU (Tesla T4) can’t hardware-decode AV1, so those stall on playback. h264/HEVC are preferred automatically.' },
@@ -2885,6 +2900,7 @@ const torrentSearch: NodeImpl = {
     const opts: SearchOpts = {
       resolution: str(config, 'resolution', '1080p'),
       requireResolution: bool(config, 'requireResolution', false),
+      maxResolution: str(config, 'maxResolution', ''),
       preferDualAudio: bool(config, 'preferDualAudio', true),
       requireDualAudio: bool(config, 'requireDualAudio', false),
       minSeeders: num(config, 'minSeeders', 1),
