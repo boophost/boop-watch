@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
 import {
   listSeries,
+  findByMalId,
   upsertSeriesMetadata,
   recordLibraryFile,
   forgetLibraryFile,
@@ -2601,6 +2602,18 @@ function parseEpisode(title: string): number | null {
   if (m) return Number(m[1])
   m = title.match(/\s-\s(\d{1,4})(?:v\d)?\s*(?:\[|\(|$)/i)
   if (m) return Number(m[1])
+  // "Show - 001 - Episode Title.mkv": the number is followed by another " - "
+  // and the episode's own title, so the branch above (which needs a bracket or
+  // end-of-string) can't see it. Common in BD batch releases. This is not
+  // cosmetic — every file in a batch failing to parse makes `library-import`
+  // skip them all as `unresolved-episode`, which marks the torrent `exhausted`
+  // and drops a fully-downloaded season on the floor permanently.
+  m = title.match(/\s-\s(\d{1,4})(?:v\d)?\s+-\s/i)
+  if (m) {
+    const n = Number(m[1])
+    // "Show - 2023 - Title" is a year, not episode 2023.
+    if (!(m[1].length === 4 && n >= 1900 && n <= 2099)) return n
+  }
   m = title.match(/\s(\d{2,4})\s*(?:\[|\()/)
   if (m) return Number(m[1])
   return null
@@ -3146,6 +3159,44 @@ const animeStatus: NodeImpl = {
           anilist_id: a.anilist != null ? Number(a.anilist) : null,
         })
       } catch {
+        // TsukiHime doesn't carry every MAL id — it 404s on shows whose season
+        // it lists under a different entry (real case: mal 46569 Hell's
+        // Paradise). Falling straight through to 'unknown' left the catalog row
+        // with a null air_status forever, which routes the show down flow 27's
+        // unknown branch and leaves torrent search with no season pin. Our own
+        // catalog row already carries MAL's status text, so use it rather than
+        // giving up. The provider ids stay null (we genuinely don't have them),
+        // but the airing/finished decision is recovered.
+        const row = findByMalId(mal)
+        const malStatus = (row?.status ?? '').toLowerCase()
+        const derived =
+          malStatus.includes('current') || malStatus.includes('airing')
+            ? 'airing'
+            : malStatus.includes('finished') || malStatus.includes('complete')
+              ? 'finished'
+              : null
+        if (derived) {
+          const isMovie = (row?.type ?? '').toLowerCase() === 'movie'
+          saveSeriesStatus(mal, {
+            air_status: derived,
+            total_episodes: row?.episodes ?? null,
+            is_movie: isMovie ? 1 : 0,
+            anidb_id: null,
+            tsuki_id: null,
+            anilist_id: null,
+          })
+          out.push({
+            ...item,
+            air_status: derived,
+            total_episodes: row?.episodes ?? null,
+            is_movie: isMovie,
+            want_mode: item.want_mode ?? (derived === 'airing' ? 'episode' : 'batch'),
+            anidb_id: null,
+            tsuki_id: null,
+            anilist_id: null,
+          })
+          continue
+        }
         // Unknown status → default to batch downstream, but route separately.
         // Never clobber an existing want_mode: an episode want must stay an
         // episode search even when the status lookup fails (a batch fallback
