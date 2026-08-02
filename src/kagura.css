@@ -1340,6 +1340,22 @@ body:has(.suggest-overlay) .app-version { display: none; }
     font-size: 16px;
   }
 
+  /* Backstop for fields the list above doesn't name. Portal pages styled with
+     utility classes rather than Kagura component classes (the profile form's
+     display-name input) still zoom iOS on focus, and enumerating them means the
+     next field added silently regresses. Kept alongside the explicit rules
+     because those component selectors outweigh this one: a media query adds no
+     specificity, so this can't override them on its own.
+     Types with no rendered text are excluded: sizing them does nothing. */
+  .kagura input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  .kagura textarea,
+  .kagura select,
+  .player input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  .player textarea,
+  .player select {
+    font-size: 16px;
+  }
+
   /* The bar keeps its visual height; only the text grows. */
   .kagura .searchbar,
   .player .searchbar { height: 44px; }
