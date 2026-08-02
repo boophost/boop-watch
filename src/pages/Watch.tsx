@@ -893,9 +893,15 @@ function OstPanel({ titleId, season }: { titleId: string; season: number | null 
 }
 
 function Menu({ kind, icon, title, label, children }: { kind: string; icon: IconName; title: string; label: string; children: React.ReactNode }) {
+  const ref = useRef<HTMLDetailsElement>(null)
   return (
-    <details className="pmenu" data-kind={kind}>
+    <details className="pmenu" data-kind={kind} ref={ref}>
       <summary><Icon name={icon} size={16} /><span className="pmlabel">{label}</span><Icon name="chevron" size={14} /></summary>
+      {/* On phones .pop becomes a bottom sheet and this is its scrim. A real
+          element, not a ::before on the <details> — a pseudo-element hit-tests
+          as its originating element, so the outside-click handler above would
+          see the click as *inside* the menu and never close it. */}
+      <span className="pmenu-scrim" aria-hidden onClick={() => ref.current?.removeAttribute('open')} />
       <div className="pop" role="listbox">
         <div className="pop-head">{title}</div>
         {children}
