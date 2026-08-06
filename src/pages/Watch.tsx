@@ -161,6 +161,10 @@ export default function Watch() {
   // server ignores the extra query param; it only changes the source URL).
   const [reloadNonce, setReloadNonce] = useState(0)
   const stallTimer = useRef<number | null>(null)
+  // The failure kind we've already reported to analytics for the current failed
+  // episode ('' once healthy again). Guards the emit effect below against firing
+  // more than once per real transition — see there.
+  const reportedFailure = useRef<'' | 'stall' | 'error'>('')
 
   // selections
   const [audioIndex, setAudioIndex] = useState<string | null>(null)
@@ -269,17 +273,24 @@ export default function Watch() {
     return `/api/play/${encodeURIComponent(data.id)}/master.m3u8${qs ? `?${qs}` : ''}`
   }, [data, selReady, audioIndex, quality, subIndex, reloadNonce])
 
-  // Arm/disarm the stall watchdog. active=true (re)starts the countdown; the
-  // player disarms it once real playback starts and re-arms it whenever it drops
-  // back into buffering, so a stall at any point surfaces the retry.
+  // Arm/disarm the stall watchdog. Disarm (active=false) always clears the timer;
+  // the player disarms it once real playback starts. Arm (active=true) is
+  // *arm-once*: an already-running countdown is left untouched, so a stall that
+  // keeps emitting `waiting` events can't keep postponing detection. hls.js nudges
+  // a stuck stream (seek/retry), which re-fires `waiting` every few seconds — the
+  // old "clear + restart on every arm" reset the 20s clock each time, so a truly
+  // stuck stream spun forever and the retry overlay never appeared. The window now
+  // measures "time since buffering began", not "since the last buffering blip".
   const setWatchdog = useCallback((active: boolean) => {
-    if (stallTimer.current != null) { clearTimeout(stallTimer.current); stallTimer.current = null }
-    if (active) {
-      stallTimer.current = window.setTimeout(() => {
-        stallTimer.current = null
-        setPlaybackFailed((s) => (s ? s : 'stall'))
-      }, STALL_TIMEOUT_MS)
+    if (!active) {
+      if (stallTimer.current != null) { clearTimeout(stallTimer.current); stallTimer.current = null }
+      return
     }
+    if (stallTimer.current != null) return // already counting down — don't extend it
+    stallTimer.current = window.setTimeout(() => {
+      stallTimer.current = null
+      setPlaybackFailed((s) => (s ? s : 'stall'))
+    }, STALL_TIMEOUT_MS)
   }, [])
 
   // A truthy source means the player is (re)loading a transcode — start the
@@ -292,10 +303,18 @@ export default function Watch() {
   }, [src, setWatchdog])
 
   // Surface the failure in analytics so slow/stuck starts show up as a gap
-  // between page loads and real playback. Fires once per transition into a
-  // failed state (src changes reset it to '').
+  // between page loads and real playback. Must fire exactly once per transition
+  // into a failed state. This effect also re-runs when `data`/`user` change by
+  // reference (e.g. AuthContext's refreshIsAdmin swaps in a new `user` object
+  // ~½s after load, once /api/me answers) — without the ref guard that
+  // re-emitted the same stall, so one stall was counted two-plus times and the
+  // dashboards over-reported. Track the reported kind in a ref and only emit on a
+  // genuine '' → stall/error edge; reset it whenever playback recovers so a
+  // fresh stall (e.g. after a retry) is reported again.
   useEffect(() => {
-    if (!playbackFailed || !data) return
+    if (!playbackFailed) { reportedFailure.current = ''; return }
+    if (!data || reportedFailure.current === playbackFailed) return
+    reportedFailure.current = playbackFailed
     track(playbackFailed === 'error' ? 'playback_error' : 'playback_stalled', {
       item_id: data.id,
       auth_state: user ? 'authenticated' : 'anonymous',
