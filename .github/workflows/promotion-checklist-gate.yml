@@ -14,13 +14,24 @@ on:
         description: PR number to check
         required: true
 
+# One gate run per PR. The rolling promotion workflow dispatches this gate
+# explicitly *and* its edit to the PR body fires the `edited` trigger, so a
+# single dev push used to spawn three near-simultaneous runs for one PR. The
+# check only re-reads the PR body, so the newest run is always the truthful
+# one and superseding the older ones costs nothing — whereas leaving them
+# queued strands "pending" checks on the promotion PR forever (two were stuck
+# for over an hour on 2026-08-06).
+concurrency:
+  group: promotion-checklist-gate-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: read
 
 jobs:
   checklist-complete:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout
         uses: actions/checkout@v4
