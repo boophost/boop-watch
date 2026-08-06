@@ -5635,6 +5635,8 @@ const portalSink: NodeImpl = {
       const row: PortalItem = {
         id,
         type: String(item.type ?? existing?.type ?? 'Movie'),
+        // Flow-written rows keep their section; the flow system is anime-side.
+        section: existing?.section ?? 'anime',
         name,
         original_title: (item.original_title ?? existing?.original_title ?? null) as string | null,
         overview: (item.overview ?? existing?.overview ?? null) as string | null,

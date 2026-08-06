@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { SearchBar } from './SearchBar'
+import { SectionSwitch } from './SectionSwitch'
 import { UserCrumb } from './PortalLayout'
 import { Icon } from './Icon'
 import { useAuth } from '@/lib/AuthContext'
@@ -16,6 +17,7 @@ export function Chrome({ crumb }: { crumb?: ReactNode }) {
           <span className="brand-mark">B</span>
           <span className="label">boopurnoes <span className="sub">· watch</span></span>
         </Link>
+        <SectionSwitch />
         {user && (
           <button
             className="chrome-suggest"
