@@ -223,6 +223,8 @@ export function Avatar({ user, size = 34 }: { user: { username: string; avatarUr
   return <Icon name="user" size={15} />
 }
 
+// The label is in its own span so phones can drop it and keep just the chevron
+// as a 40px back button (see .crumb-back in kagura.css).
 export const BackCrumb = (
-  <Link className="crumb" to="/"><Icon name="back" size={15} /> All titles</Link>
+  <Link className="crumb crumb-back" to="/"><Icon name="back" size={15} /> <span className="cl">All titles</span></Link>
 )
