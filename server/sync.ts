@@ -1,5 +1,8 @@
-import { jfJson, JfItem } from './jellyfin.js'
-import { upsertPortalItem, prunePortalItemsNotIn, PortalItem, getPortalItem } from './portalDb.js'
+import { jfJson, JfItem, sectionCollections } from './jellyfin.js'
+import {
+  upsertPortalItem, prunePortalItemsNotIn, PortalItem, getPortalItem,
+  type PortalSection,
+} from './portalDb.js'
 import {
   listSeries, SeriesRow,
   countCachedEpisodes, getEpisodeTitles,
@@ -8,8 +11,6 @@ import {
 import { searchAnime, pickPosterUrl } from './jikan.js'
 import { fillEpisodeTitles } from './episodes.js'
 import { ensureFranchiseBanners } from './banners.js'
-
-const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
 
 const norm = (s: string) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 // A Jellyfin folder/title often carries a trailing "(2023)" the catalog title lacks.
@@ -80,7 +81,7 @@ export function recentSyncs(): SyncSummary[] {
 }
 
 export async function syncJellyfinToPortal() {
-  if (!COLLECTION_ID) return
+  if (sectionCollections().length === 0) return
   const summary: SyncSummary = {
     at: Date.now(), ms: 0, items: 0, episodes: 0, pruned: 0, posterSearches: 0, error: null,
   }
@@ -97,19 +98,38 @@ export async function syncJellyfinToPortal() {
 }
 
 async function runSync(summary: SyncSummary) {
+  // Every id we upsert this pass (series/movies + their episodes) across all
+  // sections. Anything else left in portal.sqlite is a ghost from a removed
+  // collection member or a deleted release-folder "series" — prune once, after
+  // every section has synced (a mid-pass prune would eat the other sections).
+  const keepIds = new Set<string>()
+  for (const { section, collectionId } of sectionCollections()) {
+    await syncSection(section, collectionId, keepIds, summary)
+  }
+  const pruned = prunePortalItemsNotIn(keepIds)
+  summary.pruned = pruned
+  if (pruned > 0) console.log(`portal sync: pruned ${pruned} stale item(s)`)
+}
+
+// Metadata sourcing is per-section: anime is enriched from the MAL/Jikan
+// catalog (clean titles, per-episode names, franchise banners, poster search);
+// tv/movies deliberately keep Jellyfin's own TVDB/TMDb metadata untouched —
+// none of the anime pipelines know anything about live-action titles.
+async function syncSection(
+  section: PortalSection,
+  collectionId: string,
+  keepIds: Set<string>,
+  summary: SyncSummary,
+) {
   const children = await jfJson<{ Items?: JfItem[] }>('/Items', {
-    ParentId: COLLECTION_ID,
+    ParentId: collectionId,
     Recursive: 'true',
     IncludeItemTypes: 'Movie,Series',
     Fields: 'PrimaryImageAspectRatio,BackdropImageTags,ProductionYear,Genres,OriginalTitle,DateCreated,PremiereDate,Overview,RunTimeTicks',
   })
 
   const items = children.Items || []
-  const dbSeries = listSeries()
-  // Every id we upsert this pass (series/movies + their episodes). Anything
-  // else left in portal.sqlite is a ghost from a removed Public member or a
-  // deleted release-folder "series" — prune after the upsert loop.
-  const keepIds = new Set<string>()
+  const dbSeries = section === 'anime' ? listSeries() : []
 
   for (const it of items) {
     keepIds.add(it.Id)
@@ -119,7 +139,7 @@ async function runSync(summary: SyncSummary) {
 
     // A catalog hit lets us use its clean title (and episode titles below) and
     // its poster; Jellyfin's own name/art is the fallback.
-    const match = matchCatalog(it, dbSeries)
+    const match = section === 'anime' ? matchCatalog(it, dbSeries) : undefined
     const displayName = match?.title_english || match?.title || it.Name || ''
 
     // Gather wide season-banner candidates (AniList/Kitsu) for every cour of the
@@ -129,7 +149,7 @@ async function runSync(summary: SyncSummary) {
       try { await ensureFranchiseBanners(match.mal_id) } catch (e) { console.error('banner gather failed', e) }
     }
 
-    if (!imageUrl && !it.PrimaryImageAspectRatio) {
+    if (section === 'anime' && !imageUrl && !it.PrimaryImageAspectRatio) {
       if (match && match.image_url) {
         imageUrl = match.image_url
       } else if (Date.now() - lastFetchAttempt('poster-search', it.Id) >= RETRY_EMPTY_MS) {
@@ -152,6 +172,7 @@ async function runSync(summary: SyncSummary) {
     const pItem: PortalItem = {
       id: it.Id,
       type: it.Type || 'Movie',
+      section,
       name: displayName,
       original_title: it.OriginalTitle || null,
       overview: it.Overview || null,
@@ -192,6 +213,7 @@ async function runSync(summary: SyncSummary) {
         const pEp: PortalItem = {
           id: ep.Id,
           type: ep.Type || 'Episode',
+          section,
           name: malTitle || ep.Name || '',
           original_title: ep.OriginalTitle || null,
           overview: ep.Overview || null,
@@ -214,8 +236,4 @@ async function runSync(summary: SyncSummary) {
       }
     }
   }
-
-  const pruned = prunePortalItemsNotIn(keepIds)
-  summary.pruned = pruned
-  if (pruned > 0) console.log(`portal sync: pruned ${pruned} stale item(s)`)
 }
