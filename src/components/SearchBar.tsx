@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Icon } from './Icon'
 import { loadCatalog, imgUrl, type CatalogItem } from '@/lib/api'
+import { SECTION_LABELS } from '@/lib/sections'
 import { useAuth } from '@/lib/AuthContext'
 import { track } from '@/lib/analytics'
 
@@ -30,6 +31,9 @@ export function SearchBar() {
   const navigate = useNavigate()
   const { user } = useAuth()
   const [catalog, setCatalog] = useState<CatalogItem[]>([])
+  // Search deliberately spans every section; results carry a section label
+  // instead (only worth showing when more than one section exists).
+  const [multiSection, setMultiSection] = useState(false)
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
@@ -42,7 +46,9 @@ export function SearchBar() {
   const slotRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    loadCatalog().then((c) => setCatalog(c.items)).catch(() => {})
+    loadCatalog()
+      .then((c) => { setCatalog(c.items); setMultiSection((c.sections ?? []).length > 1) })
+      .catch(() => {})
   }, [])
 
   // "/" focuses the search bar from anywhere (ignored while typing in a field).
@@ -179,9 +185,10 @@ export function SearchBar() {
                 <div className="sr-main">
                   <div className="sr-title">{it.name}</div>
                   <div className="sr-meta font-mono">
-                    {[it.type === 'Series' ? 'Series' : 'Movie',
+                    {[...(multiSection ? [SECTION_LABELS[it.section] ?? ''] : []),
+                      it.type === 'Series' ? 'Series' : 'Movie',
                       ...(it.genres?.length ? [it.genres.slice(0, 2).join(' · ')] : []),
-                      ...(it.year ? [String(it.year)] : [])].join('  ·  ')}
+                      ...(it.year ? [String(it.year)] : [])].filter(Boolean).join('  ·  ')}
                   </div>
                 </div>
                 <span className="sr-go"><Icon name={it.type === 'Series' ? 'tv' : 'play'} size={it.type === 'Series' ? 14 : 13} fill={it.type === 'Series' ? 'none' : 'currentColor'} /></span>

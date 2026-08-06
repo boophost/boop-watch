@@ -195,6 +195,21 @@
   }
   & .chrome-suggest:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--accent-soft-fg); }
 
+  /* Section switcher (Anime / TV / Movies) — header segmented control */
+  & .sect-switch {
+    display: inline-flex; align-items: center; flex: none; gap: 2px;
+    padding: 3px; border-radius: 999px;
+    background: var(--bg-elev-2); border: 1px solid var(--border);
+  }
+  & .sect-btn {
+    display: inline-flex; align-items: center; height: 26px; padding: 0 12px;
+    border-radius: 999px; font-size: 12.5px; font-weight: 500; white-space: nowrap;
+    color: var(--fg-muted);
+    transition: background .14s ease, color .14s ease;
+  }
+  & .sect-btn:hover { color: var(--fg); background: var(--bg-hover); }
+  & .sect-btn[aria-current="page"] { background: var(--accent-soft); color: var(--accent-soft-fg); }
+
   /* Buttons styled as nav links need the native chrome stripped */
   & .mob-link { border: none; background: transparent; cursor: pointer; font: inherit; }
 
@@ -717,7 +732,9 @@
        the chevron alone reads as back, and the tab bar covers the rest. */
     & .crumb-back .cl { display: none; }
     & .crumb-back { width: 40px; height: 40px; justify-content: center; border-radius: 9px; }
+    & .sect-btn { padding: 0 9px; font-size: 12px; }
   }
+
   @media (max-width: 760px) {
     & main { padding: 28px calc(18px + var(--safe-right)) 100px calc(18px + var(--safe-left)); }
     & .hero { margin: -28px calc(-18px - var(--safe-right)) 0 calc(-18px - var(--safe-left)); height: 280px; }
