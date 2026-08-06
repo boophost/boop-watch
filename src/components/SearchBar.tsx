@@ -37,8 +37,13 @@ export function SearchBar() {
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(0)
+  // Phones collapse the bar to a single icon in the header (see .search-slot in
+  // kagura.css) — a 390px header can't carry brand + search + crumbs at once.
+  // Tapping the icon flips this and the bar takes over the whole header row.
+  const [expanded, setExpanded] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
+  const slotRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     loadCatalog()
@@ -61,14 +66,25 @@ export function SearchBar() {
     return () => document.removeEventListener('keydown', onKey)
   }, [])
 
-  // Click outside closes the dropdown.
+  // Click outside closes the dropdown, and collapses the phone overlay with it.
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
-      if (formRef.current && !formRef.current.contains(e.target as Node)) setOpen(false)
+      if (slotRef.current && !slotRef.current.contains(e.target as Node)) {
+        setOpen(false)
+        setExpanded(false)
+      }
     }
     document.addEventListener('click', onClick)
     return () => document.removeEventListener('click', onClick)
   }, [])
+
+  // While the phone overlay is up it covers the header, so Escape / a committed
+  // navigation has to put it away again.
+  const collapse = () => {
+    setOpen(false)
+    setExpanded(false)
+    inputRef.current?.blur()
+  }
 
   const results = useMemo(() => {
     const query = q.trim().toLowerCase()
@@ -85,7 +101,7 @@ export function SearchBar() {
   useEffect(() => { setActive(0) }, [q])
 
   const go = (it: CatalogItem) => {
-    setOpen(false)
+    collapse()
     track('search_selected', {
       item_id: it.id,
       item_type: it.type === 'Series' ? 'series' : 'movie',
@@ -99,10 +115,25 @@ export function SearchBar() {
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => Math.min(a + 1, results.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)) }
     else if (e.key === 'Enter') { if (results[active]) { e.preventDefault(); go(results[active]) } }
-    else if (e.key === 'Escape') { setOpen(false); inputRef.current?.blur() }
+    else if (e.key === 'Escape') { collapse() }
   }
 
   return (
+    <div className="search-slot" ref={slotRef} data-expanded={expanded}>
+      <button
+        type="button"
+        className="search-trigger"
+        aria-label="Search the library"
+        aria-expanded={expanded}
+        onClick={() => {
+          setExpanded(true)
+          // The input only exists once expanded on phones; focus after paint so
+          // the keyboard comes up with it.
+          requestAnimationFrame(() => inputRef.current?.focus())
+        }}
+      >
+        <Icon name="search" size={18} />
+      </button>
     <form
       ref={formRef}
       className="searchbar"
@@ -130,6 +161,7 @@ export function SearchBar() {
         onKeyDown={onKeyDown}
       />
       <span className="search-kbd"><span className="kbd">/</span></span>
+      <button type="button" className="search-cancel" onClick={collapse}>Cancel</button>
       {showBox && (
         <div className="search-results" id="search-results" role="listbox">
           {results.length === 0 ? (
@@ -143,7 +175,7 @@ export function SearchBar() {
                 aria-selected={i === active}
                 data-active={i === active}
                 to={hrefFor(it)}
-                onClick={() => setOpen(false)}
+                onClick={collapse}
                 onMouseEnter={() => setActive(i)}
               >
                 <div className="sr-thumb">
@@ -166,5 +198,6 @@ export function SearchBar() {
         </div>
       )}
     </form>
+    </div>
   )
 }
