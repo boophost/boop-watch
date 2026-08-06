@@ -281,6 +281,9 @@
      the trigger button (see the phone header block further down). */
   & .search-slot { grid-column: 2; display: flex; align-items: center; min-width: 0; }
   & .search-trigger, & .search-cancel { display: none; }
+  /* Phone-only second row (see Chrome.tsx). Off by default so the desktop
+     header keeps exactly one search bar — the centred one above. */
+  & .chrome-search-row { display: none; }
   & .searchbar {
     position: relative; display: flex; align-items: center; width: 100%; height: 40px;
     background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 9px;
@@ -714,6 +717,35 @@
     & .chrome .chrome-right, & .topbar .umenu, & .topbar .crumb { flex: none; gap: 8px; }
     & .search-slot { flex: none; }
     & .searchbar .search-kbd { display: none; }
+
+    /* Search leaves the header row entirely on a phone: with the brand, the
+       section switcher and the account crumb already there, even the collapsed
+       40px trigger was the element that pushed the row over. It becomes a
+       full-width bar directly beneath the header instead, on the browse pages
+       only — see the `onBrowse` guard in Chrome.tsx. Nothing here is sticky, so
+       it scrolls away with the content and costs no permanent vertical space.
+       The trigger/overlay machinery below belongs to the header copy; the row
+       shows the real bar, so it opts back out of it. */
+    & .chrome > .search-slot { display: none; }
+    & .chrome-search-row {
+      display: block;
+      padding: 8px calc(14px + var(--safe-right)) 10px calc(14px + var(--safe-left));
+      background: oklch(0.145 0.008 285 / 80%); backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    /* Deliberately one level more specific than the collapsed-header rules
+       further down (`.search-slot .searchbar`, `.search-trigger`). Those are
+       equally specific and appear later, so matching their specificity would
+       lose on source order and the row would render an invisible, zero-width
+       bar. */
+    & .chrome-search-row .search-slot { display: flex; flex: 1; width: 100%; }
+    & .chrome-search-row .search-slot .searchbar { display: flex; width: 100%; }
+    & .chrome-search-row .search-slot .search-trigger { display: none; }
+    & .chrome-search-row .search-slot .searchbar .search-kbd { display: none; }
+    /* "Cancel" exists to dismiss the header's full-screen search overlay. The
+       row's bar is simply always there, so there is nothing to dismiss and the
+       button would just eat width and confuse. */
+    & .chrome-search-row .search-slot .search-cancel { display: none; }
 
     & .search-trigger {
       display: inline-flex; align-items: center; justify-content: center; flex: none;
