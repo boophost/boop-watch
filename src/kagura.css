@@ -108,6 +108,12 @@
   @media (max-width: 767px) {
     & .snav { display: none; }
     & .shell-main { padding-bottom: var(--mobnav-space); }
+    /* The tab bar carries its own "Suggest" entry under the same `user` guard,
+       so the header copy is pure duplication exactly where width is scarcest —
+       and the header is the harder of the two to reach one-handed. Cut it here
+       rather than in the 560px block: the tab bar appears at 767px, so that is
+       where the duplication actually starts. */
+    & .chrome-suggest { display: none; }
     /* The bar keeps its 56px of touch target and grows *below* it into the home
        indicator strip, so the icons never sit under the indicator. */
     & .mob-nav {
@@ -735,6 +741,16 @@
     & .sect-btn { padding: 0 9px; font-size: 12px; }
   }
 
+  /* Small phones (360–375px are still the common floor). Everything else in the
+     header is already a fixed-width icon, so the segmented control is the only
+     thing left that can give: three text labels at the 560px sizing run ~130px
+     and push the row to overflow. Tighten it rather than hiding a section —
+     losing a whole library from the nav costs more than a couple of pixels of
+     padding, and the labels stay legible at 11.5px. */
+  @media (max-width: 400px) {
+    & .sect-switch { padding: 2px; }
+    & .sect-btn { padding: 0 7px; font-size: 11.5px; height: 24px; }
+  }
   @media (max-width: 760px) {
     & main { padding: 28px calc(18px + var(--safe-right)) 100px calc(18px + var(--safe-left)); }
     & .hero { margin: -28px calc(-18px - var(--safe-right)) 0 calc(-18px - var(--safe-left)); height: 280px; }
