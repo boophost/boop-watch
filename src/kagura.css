@@ -108,12 +108,6 @@
   @media (max-width: 767px) {
     & .snav { display: none; }
     & .shell-main { padding-bottom: var(--mobnav-space); }
-    /* The tab bar carries its own "Suggest" entry under the same `user` guard,
-       so the header copy is pure duplication exactly where width is scarcest —
-       and the header is the harder of the two to reach one-handed. Cut it here
-       rather than in the 560px block: the tab bar appears at 767px, so that is
-       where the duplication actually starts. */
-    & .chrome-suggest { display: none; }
     /* The bar keeps its 56px of touch target and grows *below* it into the home
        indicator strip, so the icons never sit under the indicator. */
     & .mob-nav {
@@ -140,6 +134,19 @@
     padding: 0 calc(24px + var(--safe-right)) 0 calc(24px + var(--safe-left)); height: 56px;
     background: oklch(0.145 0.008 285 / 80%); backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--border);
+  }
+  /* The centre track is a hard 520px, so the two 1fr side tracks only ever get
+     (W - 520 - gaps - padding) / 2 — 86px at 768px. That was fine when the left
+     cluster was just the wordmark, but #316 added a ~180px section switcher to
+     it, and an overflowing grid item does not push its track wider: it spills
+     across the centre track and lands under the search bar (measured: 252px of
+     overlap at 768px, and only 4px of clearance at 1280px).
+     Below the width where the fixed layout genuinely fits, size the side tracks
+     to their content and let search take what is left. Search stops being
+     exactly centred there, which is the same trade the phone layout already
+     makes, and is strictly better than two controls on top of each other. */
+  @media (max-width: 1120px) {
+    & .chrome { grid-template-columns: auto minmax(0, 1fr) auto; }
   }
   /* Installed to the home screen the status bar is translucent and the page
      starts at y=0, so the header has to carry the inset itself. In a normal
@@ -200,6 +207,16 @@
     transition: background .14s ease, border-color .14s ease, color .14s ease;
   }
   & .chrome-suggest:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--accent-soft-fg); }
+  /* The tab bar carries its own "Suggest" entry under the same `user` guard, so
+     below 767px the header copy is pure duplication exactly where width is
+     scarcest — and the header is the harder of the two to reach one-handed.
+     767px rather than the 560px header block because that is where the tab bar
+     appears, i.e. where the duplication starts. Must sit *after* the rule
+     above: both are `.kagura .chrome-suggest`, a media query adds no
+     specificity, so source order alone decides which display wins. */
+  @media (max-width: 767px) {
+    & .chrome-suggest { display: none; }
+  }
 
   /* Section switcher (Anime / TV / Movies) — header segmented control */
   & .sect-switch {
@@ -739,6 +756,13 @@
     & .crumb-back .cl { display: none; }
     & .crumb-back { width: 40px; height: 40px; justify-content: center; border-radius: 9px; }
     & .sect-btn { padding: 0 9px; font-size: 12px; }
+    /* Collapsing search freed enough width to keep the wordmark here — until
+       #316 put a ~145px section switcher in the same row. The two now compete
+       and the label loses, truncating mid-word ("boopu…"), which reads as
+       breakage rather than branding. The mark alone is unambiguous at this
+       size and the switcher is load-bearing navigation, so the wordmark is the
+       one to drop. */
+    & .chrome .brand .label { display: none; }
   }
 
   /* Small phones (360–375px are still the common floor). Everything else in the
