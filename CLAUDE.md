@@ -201,7 +201,12 @@ a manual process for now).
 - `JELLYFIN_URL` — base URL (default `http://jellyfin:8096`)
 - `JELLYFIN_API_KEY` — admin key, server-side only. **Required** for the public portal; if unset the
   portal routes 503 (the app still boots so `/manage` works).
-- `WATCH_COLLECTION_ID` — the "Public" BoxSet id (same requirement as above)
+- `WATCH_COLLECTION_ID` — the **anime** section's BoxSet id (the original "Public" collection; at
+  least one section collection is required alongside the API key)
+- `WATCH_COLLECTION_ID_TV`, `WATCH_COLLECTION_ID_MOVIES` — optional BoxSet ids for the **TV** and
+  **Movies** portal sections. Unset ⇒ that section is hidden (the header switcher only appears when
+  2+ sections are configured). Only the anime section runs the MAL/Jikan metadata enrichment;
+  TV/movies keep Jellyfin's own TVDB/TMDb metadata.
 - `SCHEDULE_TZ` — schedule timezone (default `TZ` env, else `America/New_York`)
 - `DATA_DIR` — where `series.sqlite` lives (default `./data`; set to a mounted volume in prod)
 - `JWT_SECRET`, `AUTH_USERNAME`, `AUTH_PASSWORD` — `/manage` login (defaults are insecure dev values)
@@ -262,8 +267,9 @@ Drive issues with the `boop-issues` MCP server / CLI (`mcp/issues-server.mjs` �
 
 ## Routes
 
-Public portal — SPA routes served by `index.html`: `/`, `/series/:id`, `/movie/:id`, `/watch/:id`,
-`/schedule`. They consume these **public JSON APIs / passthroughs** (no auth, all behind the scope
+Public portal — SPA routes served by `index.html`: `/` (anime), `/tv`, `/movies` (the three
+section browse pages), `/series/:id`, `/movie/:id`, `/watch/:id`, `/schedule`. `/api/catalog`,
+`/api/recent`, and `/api/featured` accept `?section=anime|tv|movies`. They consume these **public JSON APIs / passthroughs** (no auth, all behind the scope
 guard):
 
 | Route | Purpose |

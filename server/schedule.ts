@@ -247,7 +247,10 @@ function watchlistItems(): JfItem[] {
 
 export async function getSchedule(weekParam: string): Promise<SchedulePayload> {
   const week = await getWeek(weekParam)
-  const resolveTitle = libraryResolver([...getCollectionItems(), ...watchlistItems()])
+  // Anime-section series only: the matcher is deliberately loose (shared
+  // distinctive tokens), and a live-action TV title sharing a word with an
+  // airing anime would otherwise false-positive onto the schedule.
+  const resolveTitle = libraryResolver([...getCollectionItems('anime'), ...watchlistItems()])
   const items = latestPerShow(
     week.airings.flatMap((it) => {
       const display = resolveTitle(it.title)
