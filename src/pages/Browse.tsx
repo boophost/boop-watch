@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { PortalLayout } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
 import { recentlyWatched, type RecentWatch } from '@/lib/progress'
+import { sectionFromPath, SECTION_LABELS } from '@/lib/sections'
 import {
   loadCatalog, getRecent, getFeatured, getItemSummaries, imgUrl, backdropUrl, seasonImgUrl,
   type CatalogItem, type RecentItem, type FeaturedItem, type ItemSummary,
@@ -180,8 +181,9 @@ function PosterCard({ it }: { it: CatalogItem }) {
 }
 
 /** History rows paired with their scope metadata: newest first, one card per
- * title (the latest episode stands in for the show), capped at a single row. */
-async function loadWatchedRail(): Promise<[RecentWatch, ItemSummary][]> {
+ * title (the latest episode stands in for the show), capped at a single row.
+ * Scoped to one section so each browse page continues its own library. */
+async function loadWatchedRail(section: string): Promise<[RecentWatch, ItemSummary][]> {
   const rows = await recentlyWatched(30)
   if (!rows.length) return []
   const { items } = await getItemSummaries(rows.map((r) => r.id))
@@ -191,6 +193,7 @@ async function loadWatchedRail(): Promise<[RecentWatch, ItemSummary][]> {
   for (const r of rows) {
     const sum = byId.get(r.id)          // out-of-scope / deleted ids drop out
     if (!sum) continue
+    if ((sum.section ?? 'anime') !== section) continue
     const title = sum.seriesId || sum.id
     if (seen.has(title)) continue
     seen.add(title)
@@ -202,8 +205,9 @@ async function loadWatchedRail(): Promise<[RecentWatch, ItemSummary][]> {
 
 export default function Browse() {
   const { user } = useAuth()
-  const [items, setItems] = useState<CatalogItem[]>([])
-  const [genres, setGenres] = useState<string[]>([])
+  // Which section this page shows comes from the route (/ = anime, /tv, /movies).
+  const section = sectionFromPath(useLocation().pathname) ?? 'anime'
+  const [allItems, setAllItems] = useState<CatalogItem[]>([])
   const [recent, setRecent] = useState<RecentItem[]>([])
   const [watched, setWatched] = useState<[RecentWatch, ItemSummary][]>([])
   const [featured, setFeatured] = useState<FeaturedItem[]>([])
@@ -217,21 +221,39 @@ export default function Browse() {
 
   useEffect(() => {
     loadCatalog()
-      .then((c) => { setItems(c.items); setGenres(c.genres) })
+      .then((c) => setAllItems(c.items))
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoaded(true))
-    // The banner and rail are bonuses — if they fail, the library still renders.
-    getRecent().then((r) => setRecent(r.items)).catch(() => {})
-    getFeatured().then((r) => setFeatured(r.items)).catch(() => {})
   }, [])
+
+  // The rails are section-scoped server-side; refetch when the section changes.
+  // Bonuses — if they fail, the library still renders.
+  useEffect(() => {
+    setRecent([])
+    setFeatured([])
+    setTag('')
+    getRecent(section).then((r) => setRecent(r.items)).catch(() => {})
+    getFeatured(section).then((r) => setFeatured(r.items)).catch(() => {})
+  }, [section])
+
+  // This section's slice of the shared catalog, and its own genre chips.
+  const items = useMemo(
+    () => allItems.filter((it) => (it.section ?? 'anime') === section),
+    [allItems, section],
+  )
+  const genres = useMemo(
+    () => [...new Set(items.flatMap((it) => it.genres || []))].sort(),
+    [items],
+  )
 
   // Signed-in only: watch history lives in Supabase, RLS-scoped to the account.
   useEffect(() => {
-    if (!user) { setWatched([]); return }
+    setWatched([])
+    if (!user) return
     let live = true
-    loadWatchedRail().then((w) => { if (live) setWatched(w) }).catch(() => {})
+    loadWatchedRail(section).then((w) => { if (live) setWatched(w) }).catch(() => {})
     return () => { live = false }
-  }, [user])
+  }, [user, section])
 
   const visible = useMemo(() => {
     const v = q.trim().toLowerCase()
@@ -263,7 +285,9 @@ export default function Browse() {
 
         {error && <p className="empty">{error}</p>}
         {!error && loaded && items.length === 0 && (
-          <p className="empty">Nothing here yet. Add titles to the “Public” collection in Jellyfin.</p>
+          <p className="empty">
+            Nothing in {SECTION_LABELS[section]} yet. Add titles to its collection in Jellyfin.
+          </p>
         )}
 
         {watched.length > 0 && (

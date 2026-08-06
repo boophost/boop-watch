@@ -3,15 +3,33 @@
 import { Readable, pipeline } from 'node:stream'
 import type { Request, Response } from 'express'
 import { syncJellyfinToPortal } from './sync.js'
-import { getPortalCollectionItems, getPortalScopeEpisodes, getPortalPlayableIds, PortalItem } from './portalDb.js'
+import {
+  getPortalCollectionItems, getPortalScopeEpisodes, getPortalPlayableIds,
+  PortalItem, type PortalSection,
+} from './portalDb.js'
 
 const JF = (process.env.JELLYFIN_URL || 'http://jellyfin:8096').replace(/\/+$/, '')
 const KEY = process.env.JELLYFIN_API_KEY
-const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
 const SCOPE_TTL_MS = 5 * 60 * 1000
 
-/** The public portal needs both an admin key and the "Public" collection id. */
-export const jellyfinConfigured = Boolean(KEY && COLLECTION_ID)
+// One Jellyfin collection per portal section. WATCH_COLLECTION_ID keeps its
+// historical meaning (the original single-collection portal was all anime);
+// the tv/movies collections are optional — an unset one hides that section.
+const SECTION_COLLECTIONS: ReadonlyArray<{ section: PortalSection; collectionId: string }> = ([
+  { section: 'anime', collectionId: process.env.WATCH_COLLECTION_ID ?? '' },
+  { section: 'tv', collectionId: process.env.WATCH_COLLECTION_ID_TV ?? '' },
+  { section: 'movies', collectionId: process.env.WATCH_COLLECTION_ID_MOVIES ?? '' },
+] as const).filter((c) => c.collectionId)
+
+/** The (section, collection) pairs the portal serves, in display order. */
+export const sectionCollections = (): ReadonlyArray<{ section: PortalSection; collectionId: string }> =>
+  SECTION_COLLECTIONS
+
+/** Sections that have a collection configured (drives the header switcher). */
+export const enabledSections = (): PortalSection[] => SECTION_COLLECTIONS.map((c) => c.section)
+
+/** The public portal needs an admin key and at least one section collection. */
+export const jellyfinConfigured = Boolean(KEY && SECTION_COLLECTIONS.length > 0)
 
 export interface JfMediaStream {
   Index: number
@@ -186,6 +204,9 @@ export async function jfSeriesIdByTvdb(tvdbId: number): Promise<string | null> {
 let collectionItems: JfItem[] = []
 let scopeEpisodes: JfItem[] = []
 let playableIds = new Set<string>()
+// Section per scope id (titles + episodes) — JfItem is a Jellyfin shape, so
+// the portal-only section fact lives alongside rather than on it.
+let sectionById = new Map<string, PortalSection>()
 let scopeLoadedAt = 0
 let scopeLoading: Promise<void> | null = null
 
@@ -214,9 +235,12 @@ async function refreshScope(): Promise<void> {
   
   await syncJellyfinToPortal()
 
-  collectionItems = getPortalCollectionItems().map(mapPortalToJf)
-  scopeEpisodes = getPortalScopeEpisodes().map(mapPortalToJf)
+  const titles = getPortalCollectionItems()
+  const episodes = getPortalScopeEpisodes()
+  collectionItems = titles.map(mapPortalToJf)
+  scopeEpisodes = episodes.map(mapPortalToJf)
   playableIds = getPortalPlayableIds()
+  sectionById = new Map([...titles, ...episodes].map((p) => [p.id, p.section]))
   scopeLoadedAt = Date.now()
 }
 
@@ -260,7 +284,7 @@ export async function ensureScope(): Promise<void> {
 /** Best-effort initial load at boot (no-op if Jellyfin isn't configured). */
 export function warmScope(): void {
   if (!jellyfinConfigured) {
-    console.warn('[jellyfin] JELLYFIN_API_KEY / WATCH_COLLECTION_ID not set — public portal routes disabled')
+    console.warn('[jellyfin] JELLYFIN_API_KEY / no section collection (WATCH_COLLECTION_ID[_TV|_MOVIES]) set — public portal routes disabled')
     return
   }
   refreshScope()
@@ -268,10 +292,13 @@ export function warmScope(): void {
     .catch((e) => console.error('initial scope load failed:', e instanceof Error ? e.message : e))
 }
 
-export const getCollectionItems = (): JfItem[] => collectionItems
-export const getScopeEpisodes = (): JfItem[] => scopeEpisodes
+export const getCollectionItems = (section?: PortalSection): JfItem[] =>
+  section ? collectionItems.filter((it) => sectionById.get(it.Id) === section) : collectionItems
+export const getScopeEpisodes = (section?: PortalSection): JfItem[] =>
+  section ? scopeEpisodes.filter((it) => sectionById.get(it.Id) === section) : scopeEpisodes
 export const getPlayableIds = (): Set<string> => playableIds
 export const isCollectionItem = (id: string): boolean => collectionItems.some((it) => it.Id === id)
+export const getItemSection = (id: string): PortalSection | undefined => sectionById.get(id)
 
 // ---------------------------------------------------------------------------
 // Byte-streaming proxy to Jellyfin (images, playlists, segments).

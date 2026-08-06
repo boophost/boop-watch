@@ -78,8 +78,10 @@ export default function App() {
   return (
     <>
       <Routes>
-        {/* Public, no-login portal */}
+        {/* Public, no-login portal — one browse page per section */}
         <Route path="/" element={<Browse />} />
+        <Route path="/tv" element={<Browse />} />
+        <Route path="/movies" element={<Browse />} />
         <Route path="/series/:id" element={<Title />} />
         <Route path="/movie/:id" element={<Title />} />
         <Route path="/watch/:id" element={<Watch />} />

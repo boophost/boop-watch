@@ -109,10 +109,12 @@ body {
 
 /* ── Version badge (fixed corner, same idea as link) ── */
 
+/* --bottom-bar-h is 0 by default and set to the tab bar's height by kagura.css
+   on phones, so the badge rides above the bar instead of on top of it. */
 .app-version {
   position: fixed;
-  right: 0.375rem;
-  bottom: 0.25rem;
+  right: calc(0.375rem + env(safe-area-inset-right, 0px));
+  bottom: calc(0.25rem + env(safe-area-inset-bottom, 0px) + var(--bottom-bar-h, 0px));
   z-index: 9999;
   font-size: 0.5625rem;
   line-height: 1;
