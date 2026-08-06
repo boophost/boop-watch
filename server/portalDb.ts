@@ -6,9 +6,18 @@ import { fileURLToPath } from 'url'
 const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
 const dbPath = path.join(dataDir, 'portal.sqlite')
 
+/** Which portal section an item belongs to — each is its own Jellyfin
+ * collection with its own metadata-sourcing rules (anime gets the MAL/Jikan
+ * enrichment; tv/movies keep Jellyfin's own TVDB/TMDb metadata). */
+export type PortalSection = 'anime' | 'tv' | 'movies'
+export const PORTAL_SECTIONS: PortalSection[] = ['anime', 'tv', 'movies']
+export const isPortalSection = (s: string): s is PortalSection =>
+  (PORTAL_SECTIONS as string[]).includes(s)
+
 export interface PortalItem {
   id: string
   type: string
+  section: PortalSection
   name: string
   original_title: string | null
   overview: string | null
@@ -80,6 +89,13 @@ export function getPortalDb(): Database.Database {
   } catch (e) {
     // ignore if already exists
   }
+  try {
+    // Portal section (anime/tv/movies). Pre-section rows are all from the
+    // original single collection, which the anime section inherits.
+    instance.exec("ALTER TABLE portal_items ADD COLUMN section TEXT NOT NULL DEFAULT 'anime'");
+  } catch (e) {
+    // ignore if already exists
+  }
   db = instance
   return instance
 }
@@ -88,11 +104,21 @@ export function getAllPortalItems(): PortalItem[] {
   return getPortalDb().prepare('SELECT * FROM portal_items').all() as PortalItem[]
 }
 
-export function getPortalCollectionItems(): PortalItem[] {
+export function getPortalCollectionItems(section?: PortalSection): PortalItem[] {
+  if (section) {
+    return getPortalDb()
+      .prepare("SELECT * FROM portal_items WHERE type IN ('Series', 'Movie') AND section = ?")
+      .all(section) as PortalItem[]
+  }
   return getPortalDb().prepare("SELECT * FROM portal_items WHERE type IN ('Series', 'Movie')").all() as PortalItem[]
 }
 
-export function getPortalScopeEpisodes(): PortalItem[] {
+export function getPortalScopeEpisodes(section?: PortalSection): PortalItem[] {
+  if (section) {
+    return getPortalDb()
+      .prepare("SELECT * FROM portal_items WHERE type = 'Episode' AND section = ?")
+      .all(section) as PortalItem[]
+  }
   return getPortalDb().prepare("SELECT * FROM portal_items WHERE type = 'Episode'").all() as PortalItem[]
 }
 
@@ -200,16 +226,17 @@ export function setPortalSeasonTitle(seriesId: string, season: number, displayTi
 export function upsertPortalItem(item: PortalItem) {
   const stmt = getPortalDb().prepare(`
     INSERT INTO portal_items (
-      id, type, name, original_title, overview, date_created, premiere_date,
+      id, type, section, name, original_title, overview, date_created, premiere_date,
       production_year, genres, runtime_ticks, index_number, parent_index_number,
       series_id, series_name, image_url, backdrop_url, has_backdrop, mal_id
     ) VALUES (
-      @id, @type, @name, @original_title, @overview, @date_created, @premiere_date,
+      @id, @type, @section, @name, @original_title, @overview, @date_created, @premiere_date,
       @production_year, @genres, @runtime_ticks, @index_number, @parent_index_number,
       @series_id, @series_name, @image_url, @backdrop_url, @has_backdrop, @mal_id
     )
     ON CONFLICT(id) DO UPDATE SET
       type = excluded.type,
+      section = excluded.section,
       name = excluded.name,
       original_title = excluded.original_title,
       overview = excluded.overview,

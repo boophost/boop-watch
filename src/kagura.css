@@ -150,6 +150,21 @@
   }
   & .chrome-suggest:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--accent-soft-fg); }
 
+  /* Section switcher (Anime / TV / Movies) — header segmented control */
+  & .sect-switch {
+    display: inline-flex; align-items: center; flex: none; gap: 2px;
+    padding: 3px; border-radius: 999px;
+    background: var(--bg-elev-2); border: 1px solid var(--border);
+  }
+  & .sect-btn {
+    display: inline-flex; align-items: center; height: 26px; padding: 0 12px;
+    border-radius: 999px; font-size: 12.5px; font-weight: 500; white-space: nowrap;
+    color: var(--fg-muted);
+    transition: background .14s ease, color .14s ease;
+  }
+  & .sect-btn:hover { color: var(--fg); background: var(--bg-hover); }
+  & .sect-btn[aria-current="page"] { background: var(--accent-soft); color: var(--accent-soft-fg); }
+
   /* Buttons styled as nav links need the native chrome stripped */
   & .mob-link { border: none; background: transparent; cursor: pointer; font: inherit; }
 
@@ -594,6 +609,7 @@
     & .chrome { grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; padding: 0 14px; }
     & .chrome .brand .label { display: none; }
     & .searchbar .search-kbd { display: none; }
+    & .sect-btn { padding: 0 9px; font-size: 12px; }
   }
   @media (max-width: 760px) {
     & main { padding: 28px 18px 100px; }
