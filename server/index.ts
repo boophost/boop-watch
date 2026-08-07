@@ -4,19 +4,17 @@ import jwt from 'jsonwebtoken'
 import path from 'path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'url'
-import {
-  searchAnime,
-  pickPosterUrl,
-  fetchAnimeFull,
-} from './jikan.js'
+import { fetchAnimeFull } from './jikan.js'
 import * as seriesDb from './db.js'
 import { getEpisodesForDisplay, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView, portalSeriesForCatalog } from './publicRoutes.js'
 import {
   getPortalSeasonCounts, getPortalSeasonTitles, getPortalSeasonYears, setPortalSeasonTitle,
-  isPortalSection,
+  isPortalSection, type PortalSection,
 } from './portalDb.js'
+import { sectionConfigs, sectionProvider } from './sections.js'
+import { clientForSection } from './metadata/index.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock, fireEvent } from './flowRoutes.js'
@@ -25,8 +23,11 @@ import { pruneWorkDir, assertScratchVolumeSafe } from './flowNodes.js'
 import { startScheduler } from './scheduler.js'
 import type { FlowGraph } from './flowExecutor.js'
 import { discordPresenceRouter } from './discordPresence.js'
-import { searchAnimeAniList, fetchAniListMedia } from './anilist.js'
-import { warmScope, ensureScope, getPlayableIds } from './jellyfin.js'
+import { fetchAniListMedia } from './anilist.js'
+import {
+  warmScope, ensureScope, getPlayableIds,
+  jfVirtualFolders, sectionCollections, enabledSections,
+} from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import {
@@ -304,51 +305,84 @@ app.delete('/api/profile/avatar', requireAuth, (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/search/anime', requireAuth, async (req, res) => {
-  const raw = req.query.q
-  const q = typeof raw === 'string' ? raw : ''
+/** `?section=` for the manage APIs. Defaults to anime — the only section that
+ *  existed when these routes were written, so an old client keeps its meaning. */
+function reqSection(req: express.Request): PortalSection {
+  const s = String(req.query.section ?? '')
+  return isPortalSection(s) ? s : 'anime'
+}
+
+/**
+ * The sections the manager can work with, and how each is wired.
+ *
+ * This is what lets /manage present libraries as real things rather than
+ * hardcoding three tabs: the client reads the provider, the library root and
+ * the counts from here instead of knowing them. `jellyfin` is best-effort —
+ * a Jellyfin that's down or a key that can't read VirtualFolders costs you the
+ * folder cross-check, not the page.
+ */
+app.get('/api/sections', requireAuth, async (_req, res) => {
+  const counts = seriesDb.countSeriesBySection()
+  const folders = await jfVirtualFolders()
+  res.json({
+    sections: sectionConfigs().map((c) => ({
+      section: c.section,
+      label: c.label,
+      provider: c.provider,
+      providerConfigured: clientForSection(c.section).configured,
+      providerUnavailableReason: clientForSection(c.section).unconfiguredReason,
+      libraryRoot: c.libraryRoot,
+      pathTemplate: c.pathTemplate,
+      collectionType: c.collectionType,
+      collectionId: sectionCollections().find((s) => s.section === c.section)?.collectionId ?? null,
+      /** Configured on the portal side — an unconfigured section is manageable but not browsable. */
+      portalEnabled: enabledSections().includes(c.section),
+      count: counts[c.section] ?? 0,
+      jellyfin: folders?.find((f) => f.CollectionType === c.collectionType) ?? null,
+    })),
+    jellyfinReachable: folders !== null,
+  })
+})
+
+// Search the section's own metadata provider.
+const searchHandler = (forceSection?: PortalSection) =>
+  async (req: express.Request, res: express.Response) => {
+  const q = typeof req.query.q === 'string' ? req.query.q : ''
   if (!q.trim()) {
     res.json({ results: [] })
     return
   }
-  // AniList is the primary search source: it needs no auth, carries idMal (so
-  // hits stay addable to our MAL-id catalog), and is reliable. We self-host
-  // Jikan only for the MAL-specific data AniList lacks (per-episode titles,
-  // detail) — its search endpoint needs a Typesense index we don't run, so it's
-  // the fallback here, used only if AniList is down.
-  // Tag each hit with whether it's already in our catalog so the add-series UI
-  // can mark/skip owned shows.
-  const withInCatalog = <T extends { mal_id: number }>(hits: T[]) =>
-    hits.map((h) => ({ ...h, inCatalog: !!seriesDb.findByMalId(h.mal_id) }))
-  try {
-    const results = await searchAnimeAniList(q)
-    res.json({ results: withInCatalog(results) })
-  } catch (anilistErr) {
-    console.error('search: AniList failed, trying Jikan —', anilistErr)
-    try {
-      const data = await searchAnime(q)
-      res.json({
-        results: withInCatalog(
-          data.map((a) => ({
-            mal_id: a.mal_id,
-            title: a.title,
-            synopsis: a.synopsis ?? '',
-            image_url: pickPosterUrl(a),
-            url: a.url,
-            // Jikan brief carries none of these — the UI degrades gracefully.
-            year: null,
-            type: null,
-            status: null,
-            episodes: null,
-          })),
-        ),
-      })
-    } catch (jikanErr) {
-      console.error('search: Jikan fallback also failed —', jikanErr)
-      res.status(502).json({ error: 'Anime metadata lookup is temporarily unavailable — try again shortly' })
-    }
+  const section = forceSection ?? reqSection(req)
+  const client = clientForSection(section)
+  if (!client.configured) {
+    // 503, not an empty list: "no results" and "no API key" look identical in
+    // the UI otherwise, and the second is a thing the operator must fix.
+    res.status(503).json({ error: client.unconfiguredReason })
+    return
   }
-})
+  try {
+    const hits = await client.search(section, q)
+    // Tag each hit with whether it's already in our catalog so the add UI can
+    // mark/skip owned titles. Keyed on the identity triple, not mal_id — TV and
+    // movies share the tmdb namespace.
+    res.json({
+      results: hits.map((h) => ({
+        ...h,
+        inCatalog: !!seriesDb.findBySource(section, h.source, h.source_id),
+      })),
+    })
+  } catch (e) {
+    console.error(`search(${section}) failed —`, e)
+    res.status(502).json({
+      error: `${section === 'anime' ? 'Anime' : 'TMDB'} metadata lookup is temporarily unavailable — try again shortly`,
+    })
+  }
+}
+
+app.get('/api/search', requireAuth, searchHandler())
+// Back-compat alias — the old path is anime-only by name, so it stays pinned
+// to anime regardless of any ?section= a caller might bolt on.
+app.get('/api/search/anime', requireAuth, searchHandler('anime'))
 
 app.get('/api/series', requireAuth, async (_req, res) => {
   seriesDb.getDb()
@@ -371,8 +405,60 @@ app.get('/api/series', requireAuth, async (_req, res) => {
 })
 
 app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
-  const series = animeSeriesOr(res, Number(req.params.id), 'MAL detail')
-  if (!series) return
+  const id = Number(req.params.id)
+  const row = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!row) {
+    res.status(404).json({ error: 'Series not found' })
+    return
+  }
+  // A TMDB-sourced title resolves through its own provider. The response keeps
+  // the `mal`-shaped envelope the /manage detail page already reads — the page
+  // renders titles, year, score, genres and studios, none of which are
+  // MAL-specific — so one component serves every section.
+  if (!seriesDb.isAnimeSeries(row)) {
+    try {
+      const d = await clientForSection(row.section).detail(row.section, row.source_id)
+      try {
+        seriesDb.updateSeriesMetadataById(row.id, d.metadata)
+      } catch (persistErr) {
+        console.error('detail: failed to persist TMDB metadata —', persistErr)
+      }
+      res.json({
+        series: seriesDb.getSeriesById(row.id) ?? row,
+        mal: {
+          title: d.title,
+          title_english: d.metadata.title_english,
+          title_japanese: d.metadata.title_japanese,
+          synopsis: d.synopsis,
+          type: d.type,
+          episodes: d.episodes,
+          status: d.status,
+          score: d.metadata.score,
+          year: d.year,
+          season: null,
+          aired: null,
+          broadcast: null,
+          genres: JSON.parse(d.metadata.genres ?? '[]').map((name: string) => ({ name })),
+          studios: JSON.parse(d.metadata.studios ?? '[]').map((name: string) => ({ name })),
+          images: d.image_url
+            ? {
+                webp: { large_image_url: d.image_url, image_url: d.image_url },
+                jpg: { large_image_url: d.image_url, image_url: d.image_url },
+              }
+            : undefined,
+          url: d.url,
+          source: null,
+          duration: null,
+          rating: null,
+        },
+      })
+    } catch (e) {
+      console.error(`detail(${row.section}/${row.source_id}) failed —`, e)
+      res.json({ series: row, mal: null })
+    }
+    return
+  }
+  const series = row
   try {
     // AniList-primary (current, auth-free); MyAnimeList/Jikan only if AniList
     // can't answer. `mal` keeps the Jikan-ish shape the /manage UI reads.
@@ -531,34 +617,78 @@ app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
   }
 })
 
-app.post('/api/series', requireAuth, (req, res) => {
+app.post('/api/series', requireAuth, async (req, res) => {
   const body = req.body as {
     mal_id?: unknown
+    /** TMDB titles identify by (section, source_id); anime may still send mal_id alone. */
+    source_id?: unknown
+    section?: unknown
     title?: unknown
     synopsis?: unknown
     image_url?: unknown
     url?: unknown
   }
-  const mal_id = typeof body.mal_id === 'number' ? body.mal_id : Number(body.mal_id)
-  const title = typeof body.title === 'string' ? body.title : ''
-  const synopsis =
-    typeof body.synopsis === 'string' ? body.synopsis : body.synopsis == null ? null : String(body.synopsis)
-  const image_url =
-    typeof body.image_url === 'string' ? body.image_url : body.image_url == null ? null : String(body.image_url)
-  const url =
-    typeof body.url === 'string' ? body.url : body.url == null ? null : String(body.url)
+  const section: PortalSection = isPortalSection(String(body.section ?? ''))
+    ? (String(body.section) as PortalSection)
+    : 'anime'
+  const provider = sectionProvider(section)
+  // An anime add historically sent only mal_id, and that is still its identity.
+  const rawId = body.source_id ?? body.mal_id
+  const source_id = typeof rawId === 'number' ? rawId : Number(rawId)
+  const mal_id = provider === 'mal' ? source_id : null
+  const str = (v: unknown): string | null =>
+    typeof v === 'string' ? v : v == null ? null : String(v)
+  let title = typeof body.title === 'string' ? body.title : ''
+  let synopsis = str(body.synopsis)
+  let image_url = str(body.image_url)
+  let url = str(body.url)
+  let imdb_id: string | null = null
 
-  if (!Number.isFinite(mal_id) || !title) {
-    res.status(400).json({ error: 'mal_id and title are required' })
+  if (!Number.isFinite(source_id)) {
+    res.status(400).json({ error: `A ${provider} id is required to add a ${section} title` })
     return
   }
-  if (seriesDb.findByMalId(mal_id)) {
+  if (seriesDb.findBySource(section, provider, source_id)) {
     res.status(409).json({ error: 'Already in your list' })
     return
   }
+
+  // The add UI posts what the search hit showed, but a caller with only an id
+  // is legitimate (and TMDB search carries no imdb_id), so fill the gaps from
+  // the provider. Best-effort for anime — that path has always accepted a
+  // client-supplied title — but required for TMDB, where a row with no title
+  // is useless and the failure should be visible now rather than as a blank
+  // card later.
+  if (!title || provider === 'tmdb') {
+    try {
+      const d = await clientForSection(section).detail(section, source_id)
+      title = title || d.title
+      synopsis = synopsis ?? d.synopsis
+      image_url = image_url ?? d.image_url
+      url = url ?? d.url
+      imdb_id = d.imdb_id
+    } catch (e) {
+      console.error(`add(${section}/${source_id}): provider lookup failed —`, e)
+      if (!title) {
+        res.status(502).json({
+          error: e instanceof Error ? e.message : 'Could not look that title up',
+        })
+        return
+      }
+    }
+  }
+  if (!title) {
+    res.status(400).json({ error: 'title is required' })
+    return
+  }
+
   try {
     const row = seriesDb.insertSeries({
       mal_id,
+      section,
+      source: provider,
+      source_id,
+      imdb_id,
       title,
       synopsis,
       image_url,
@@ -571,10 +701,14 @@ app.post('/api/series', requireAuth, (req, res) => {
     // links an episode to the wrong Jellyfin season (e.g. a S2 cour's Ep 3
     // resolving to S3E3). Best-effort + non-blocking: the dataset fetch can be
     // slow on a cold cache, and a hiccup must never fail the add. The detail
-    // route re-attempts this for any row left unmapped.
-    void enrichSeasonMapping(mal_id).catch((mapErr) => {
-      console.error('add: season mapping enrich failed —', mapErr)
-    })
+    // route re-attempts this for any row left unmapped. Anime only — the
+    // dataset maps MAL cours onto TVDB seasons, and a TV show has no cours to
+    // map (its TMDB seasons already are the library's seasons).
+    if (mal_id != null) {
+      void enrichSeasonMapping(mal_id).catch((mapErr) => {
+        console.error('add: season mapping enrich failed —', mapErr)
+      })
+    }
     res.status(201).json({ series: row })
   } catch (e) {
     console.error(e)

@@ -294,8 +294,18 @@ guard):
 | `GET /health` | `ok` |
 
 Admin (JWT, `requireAuth`): `POST /api/login`, `/api/logout`, `GET /api/me`,
-`GET /api/search/anime`, `GET|POST /api/series`, `GET /api/series/:id/detail`,
-`/api/series/:id/episodes`, `DELETE /api/series/:id`.
+`GET /api/sections`, `GET /api/search?section=&q=`, `GET|POST /api/series`,
+`GET /api/series/:id/detail`, `/api/series/:id/episodes`, `DELETE /api/series/:id`.
+
+The manage APIs are **section-scoped**: `?section=anime|tv|movies` on `/api/search` and
+`/api/series` (absent ⇒ anime for search, the whole catalog for the list). `POST /api/series` takes
+`{ section, source_id }` and fills title/synopsis/poster/`imdb_id` from that section's provider when
+they aren't supplied — `{ mal_id, title }` still works and still means anime.
+`GET /api/sections` is the registry the UI reads (provider, whether it's configured, library root,
+path template, counts, and a best-effort cross-check against Jellyfin's own `/Library/VirtualFolders`).
+`GET /api/search/anime` is a **back-compat alias pinned to anime** — it ignores `?section=`.
+Anime-only routes (`episodes`, `banners`, `season-titles`, `mapping`, downloads, blacklist,
+research, retrigger) **409** on a TV/movie id via `animeSeriesOr()`, naming the section.
 
 Every public content route runs through the **scope guard**: it 403s/404s unless the id is in the
 Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
