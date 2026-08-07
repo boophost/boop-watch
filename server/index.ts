@@ -26,7 +26,7 @@ import { discordPresenceRouter } from './discordPresence.js'
 import { fetchAniListMedia } from './anilist.js'
 import {
   warmScope, ensureScope, getPlayableIds,
-  jfVirtualFolders, sectionCollections, enabledSections,
+  jfVirtualFolders, sectionCollections, enabledSections, type JfVirtualFolder,
 } from './jellyfin.js'
 import { getSeriesLibraryMedia } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
@@ -326,26 +326,35 @@ app.get('/api/sections', requireAuth, async (_req, res) => {
   const folders = await jfVirtualFolders()
 
   /**
-   * Which Jellyfin library a section's files land in.
+   * Which Jellyfin library a section's files land in, and how confident we are.
    *
-   * Matched on the **path**, not the collection type: anime and tv are both
-   * `tvshows`, so type alone hands them the same folder and the cross-check
-   * becomes a confident lie. Falling back to type is only safe when exactly
-   * one library has that type — with two, we genuinely don't know which is
-   * which, and null ("no Jellyfin library found for this root") is the honest
-   * answer and the useful one: it's what tells the operator the TV library
-   * hasn't been created yet.
+   * Path is the only real evidence. Collection type is not: anime and tv are
+   * both `tvshows`, so type alone hands them the same folder and the panel
+   * states something untrue with total confidence.
+   *
+   * So the match is reported *with its basis*:
+   *  - `path`  — a library's own Locations contain our configured root. Certain.
+   *  - `type`  — the root is unset, but exactly one library has this type, so
+   *              it is the only candidate. A reasonable guess, labelled as one.
+   *  - `null`  — a root IS configured and no library lives there. This is the
+   *              answer that earns its keep: it is how the operator learns the
+   *              TV library doesn't exist yet, or that LIBRARY_DIR_TV points
+   *              somewhere Jellyfin isn't looking. Never paper over it with a
+   *              type guess — that is the bug this replaced.
    */
-  const matchFolder = (root: string, collectionType: string) => {
-    if (!folders) return null
+  const matchFolder = (
+    root: string,
+    collectionType: string,
+  ): { folder: JfVirtualFolder | null; basis: 'path' | 'type' | null } => {
+    if (!folders) return { folder: null, basis: null }
     const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
     if (root) {
       const r = norm(root)
       const byPath = folders.find((f) => (f.Locations ?? []).some((l) => norm(l) === r))
-      if (byPath) return byPath
+      return { folder: byPath ?? null, basis: byPath ? 'path' : null }
     }
     const sameType = folders.filter((f) => f.CollectionType === collectionType)
-    return sameType.length === 1 ? sameType[0] : null
+    return sameType.length === 1 ? { folder: sameType[0], basis: 'type' } : { folder: null, basis: null }
   }
 
   res.json({
@@ -362,7 +371,14 @@ app.get('/api/sections', requireAuth, async (_req, res) => {
       /** Configured on the portal side — an unconfigured section is manageable but not browsable. */
       portalEnabled: enabledSections().includes(c.section),
       count: counts[c.section] ?? 0,
-      jellyfin: matchFolder(c.libraryRoot, c.collectionType),
+      ...(() => {
+        const { folder, basis } = matchFolder(c.libraryRoot, c.collectionType)
+        return {
+          jellyfin: folder,
+          /** 'path' = certain, 'type' = single-candidate guess, null = no library at this root. */
+          jellyfinMatch: basis,
+        }
+      })(),
     })),
     jellyfinReachable: folders !== null,
   })
