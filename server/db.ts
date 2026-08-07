@@ -549,6 +549,25 @@ export function upsertSeriesMetadata(
 }
 
 /**
+ * Set metadata on an existing row by its catalog id.
+ *
+ * The counterpart to upsertSeriesMetadata for rows that have no mal_id to
+ * upsert on — i.e. every TV and movie title. It only ever updates: a TMDB row
+ * is created by the add route, which knows the section and source, and
+ * inventing one here from a metadata refresh would be a way to get a row with
+ * no section.
+ */
+export function updateSeriesMetadataById(id: number, meta: SeriesMetadata): SeriesRow | undefined {
+  const cols = Object.keys(meta).filter((k) => (meta as Record<string, unknown>)[k] !== undefined)
+  if (cols.length === 0) return getSeriesById(id)
+  const assignments = [...cols.map((c) => `${c} = @${c}`), `metadata_updated_at = datetime('now')`]
+  getDb()
+    .prepare(`UPDATE series SET ${assignments.join(', ')} WHERE id = @id`)
+    .run({ ...meta, id })
+  return getSeriesById(id)
+}
+
+/**
  * Set (or clear) the multi-season placement mapping on a catalog row. `source`
  * distinguishes an admin override ('manual') from a dataset-derived value
  * ('auto'); callers doing an auto-enrich must not overwrite a 'manual' row (see

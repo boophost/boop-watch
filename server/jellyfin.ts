@@ -28,6 +28,40 @@ export const sectionCollections = (): ReadonlyArray<{ section: PortalSection; co
 /** Sections that have a collection configured (drives the header switcher). */
 export const enabledSections = (): PortalSection[] => SECTION_COLLECTIONS.map((c) => c.section)
 
+/** One of Jellyfin's configured libraries, as the admin API reports it. */
+export interface JfVirtualFolder {
+  Name: string
+  CollectionType?: string
+  ItemId?: string
+  Locations?: string[]
+}
+
+/**
+ * Jellyfin's own library list, so /manage can show each section's real folder
+ * and on-disk path and flag a mismatch against our LIBRARY_DIR_* config.
+ *
+ * Returns null rather than throwing: this is a cross-check on an informational
+ * panel, and a Jellyfin that's down should cost the cross-check, not the page.
+ * Cached briefly — the manage UI polls, and library config changes rarely.
+ */
+let vfCache: { at: number; folders: JfVirtualFolder[] } | null = null
+const VF_TTL_MS = 5 * 60 * 1000
+
+export async function jfVirtualFolders(): Promise<JfVirtualFolder[] | null> {
+  if (!KEY) return null
+  if (vfCache && Date.now() - vfCache.at < VF_TTL_MS) return vfCache.folders
+  try {
+    const folders = await jfJson<JfVirtualFolder[]>('/Library/VirtualFolders')
+    if (!Array.isArray(folders)) return null
+    vfCache = { at: Date.now(), folders }
+    return folders
+  } catch (e) {
+    console.error('[jellyfin] VirtualFolders lookup failed —', e)
+    // Serve a stale list over nothing; it's better than blanking the panel.
+    return vfCache?.folders ?? null
+  }
+}
+
 /** The public portal needs an admin key and at least one section collection. */
 export const jellyfinConfigured = Boolean(KEY && SECTION_COLLECTIONS.length > 0)
 
