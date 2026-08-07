@@ -324,6 +324,30 @@ function reqSection(req: express.Request): PortalSection {
 app.get('/api/sections', requireAuth, async (_req, res) => {
   const counts = seriesDb.countSeriesBySection()
   const folders = await jfVirtualFolders()
+
+  /**
+   * Which Jellyfin library a section's files land in.
+   *
+   * Matched on the **path**, not the collection type: anime and tv are both
+   * `tvshows`, so type alone hands them the same folder and the cross-check
+   * becomes a confident lie. Falling back to type is only safe when exactly
+   * one library has that type — with two, we genuinely don't know which is
+   * which, and null ("no Jellyfin library found for this root") is the honest
+   * answer and the useful one: it's what tells the operator the TV library
+   * hasn't been created yet.
+   */
+  const matchFolder = (root: string, collectionType: string) => {
+    if (!folders) return null
+    const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    if (root) {
+      const r = norm(root)
+      const byPath = folders.find((f) => (f.Locations ?? []).some((l) => norm(l) === r))
+      if (byPath) return byPath
+    }
+    const sameType = folders.filter((f) => f.CollectionType === collectionType)
+    return sameType.length === 1 ? sameType[0] : null
+  }
+
   res.json({
     sections: sectionConfigs().map((c) => ({
       section: c.section,
@@ -338,7 +362,7 @@ app.get('/api/sections', requireAuth, async (_req, res) => {
       /** Configured on the portal side — an unconfigured section is manageable but not browsable. */
       portalEnabled: enabledSections().includes(c.section),
       count: counts[c.section] ?? 0,
-      jellyfin: folders?.find((f) => f.CollectionType === c.collectionType) ?? null,
+      jellyfin: matchFolder(c.libraryRoot, c.collectionType),
     })),
     jellyfinReachable: folders !== null,
   })
