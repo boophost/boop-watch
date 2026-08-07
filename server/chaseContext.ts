@@ -4,9 +4,10 @@
 import {
   getCachedEpisodes,
   getSeriesById,
-  listSeries,
+  listAnimeSeries,
   upsertSeriesMetadata,
-  type SeriesRow,
+  type AnimeSeriesRow,
+  isAnimeSeries,
 } from './db.js'
 import {
   getSeriesDownloadStatus,
@@ -34,7 +35,7 @@ import { fetchAniListMedia } from './anilist.js'
 export type { EpisodeChase }
 export { toPublicChase }
 
-function airInfosForSeries(series: SeriesRow): EpisodeAirInfo[] {
+function airInfosForSeries(series: AnimeSeriesRow): EpisodeAirInfo[] {
   return getCachedEpisodes(series.mal_id).map((e) => ({
     episode: e.number,
     // A provisional title is release residue, not a name worth chasing with.
@@ -66,7 +67,7 @@ export function serializeBroadcast(bc: MalBroadcast | null | undefined): string 
 }
 
 function chaseFromStatus(
-  series: SeriesRow,
+  series: AnimeSeriesRow,
   status: SeriesDownloadStatus,
   libraryEpisodes: Set<number>,
   broadcast?: MalBroadcast | null,
@@ -103,7 +104,7 @@ function withBudget<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 
 /** Ensure we have a broadcast blob for airing seasons that need an estimate. */
 async function ensureBroadcast(
-  series: SeriesRow,
+  series: AnimeSeriesRow,
   opts: { budgetMs?: number } = {},
 ): Promise<MalBroadcast | null> {
   const existing = parseStoredBroadcast(series.broadcast)
@@ -171,7 +172,10 @@ export async function buildSeriesChase(
   portalSeriesId: string | null
 }> {
   const series = getSeriesById(seriesId)
-  if (!series) {
+  // Chasing is the anime sourcing pipeline: it reasons about MAL air dates,
+  // cours and wants, none of which a TV or movie row has. An unknown id and a
+  // non-anime id are the same answer here — nothing to chase.
+  if (!series || !isAnimeSeries(series)) {
     return {
       airedCount: 0,
       expectedForPipeline: null,
@@ -250,7 +254,7 @@ export async function buildSeriesChase(
 
 /** List chips: one qBit/portal pass; skip series with no episode cache. */
 export async function buildSeriesListChases(
-  seriesList: SeriesRow[] = listSeries(),
+  seriesList: AnimeSeriesRow[] = listAnimeSeries(),
 ): Promise<Map<number, EpisodeChase | null>> {
   const withCache = seriesList.filter((s) => getCachedEpisodes(s.mal_id).length > 0)
   const statuses = await getSeriesDownloadStatusBatch(withCache)

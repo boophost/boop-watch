@@ -6,7 +6,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import {
-  listSeries,
+  listAnimeSeries,
   listWants,
   listLibraryFiles,
   forgetLibraryFile,
@@ -155,7 +155,7 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
   for (const f of listLibraryFiles()) {
     if (f.mal_id != null && f.episode != null) libByEp.set(`${f.mal_id}:${f.episode}`, f.path)
   }
-  const offsetByMal = new Map(listSeries().map((s) => [s.mal_id, s.episode_offset ?? 0]))
+  const offsetByMal = new Map(listAnimeSeries().map((s) => [s.mal_id, s.episode_offset ?? 0]))
   const fulfilledWantsMissingFile: SourcingLedgerReport['fulfilledWantsMissingFile'] = []
   for (const w of wants) {
     if (w.status !== 'fulfilled') continue
@@ -210,7 +210,7 @@ export async function sourcingBackfill(dryRun: boolean): Promise<BackfillResult>
   const libHashes = new Set(
     libFiles.map((f) => (f.torrent_hash ?? '').toLowerCase()).filter(Boolean),
   )
-  const seriesByMal = new Map(listSeries().map((s) => [s.mal_id, s]))
+  const seriesByMal = new Map(listAnimeSeries().map((s) => [s.mal_id, s]))
 
   let adoptedFromQbit = 0
   let adoptedFromLibrary = 0
@@ -363,7 +363,7 @@ export async function sourcingSweep(dryRun: boolean): Promise<SweepResult> {
 
   // Episodes already on disk, in each cour's own MAL numbering (library rows
   // store the post-offset absolute slot — reverse it, as backfill does).
-  const offsets = new Map(listSeries().map((s) => [s.mal_id, s.episode_offset ?? 0]))
+  const offsets = new Map(listAnimeSeries().map((s) => [s.mal_id, s.episode_offset ?? 0]))
   const inLibrary = new Set<string>()
   for (const f of listLibraryFiles()) {
     if (f.mal_id == null || f.episode == null) continue
@@ -387,7 +387,7 @@ export async function sourcingSweep(dryRun: boolean): Promise<SweepResult> {
     ).map((w) => w.mal_id),
   )
 
-  for (const s of listSeries()) {
+  for (const s of listAnimeSeries()) {
     const status = getSeriesStatus(s.mal_id)
     if (status?.is_movie) continue
     // Only shows we believe are mid-broadcast. 'finished' is terminal (a gap in
