@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
 import {
   listSeries,
+  listAnimeSeries,
   findByMalId,
   upsertSeriesMetadata,
   recordLibraryFile,
@@ -2343,7 +2344,7 @@ const indexerMatch: NodeImpl = {
     const mode = str(config, 'matchMode', 'exact')
     const threshold = num(config, 'threshold', 0.6)
     const seasonField = str(config, 'seasonField', '')
-    const catalog = listSeries()
+    const catalog = listAnimeSeries()
     // When the release's season is known, a matching tvdb_season is strong
     // evidence, so we accept a lower title overlap than the general threshold
     // (the franchise name alone is enough to disambiguate within one season).
@@ -5067,7 +5068,7 @@ const libraryImport: NodeImpl = {
 
     // One catalog read per run, not per item.
     let catalogRows: ReturnType<typeof listSeries> | null = null
-    const catalog = () => (catalogRows ??= listSeries())
+    const catalog = () => (catalogRows ??= listAnimeSeries())
 
     /** True when this mal_id is one cour of a multi-season franchise (siblings
      * share its tvdb_id). Guessing Season 1 for such a file buries a later
