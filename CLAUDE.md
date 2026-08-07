@@ -37,6 +37,7 @@ server/                 # Express backend (TypeScript, ESM)
   publicRoutes.ts       # public portal routes + JSON APIs (no auth)
   watch.ts, schedule.ts # player stream-info; animeschedule scraper + library matcher
   db.ts, jikan.ts       # series.sqlite + Jikan/MAL client (the /manage admin)
+  config.ts             # DB-backed app config (CONFIG_SPEC + cfg()); read this before process.env
   sections.ts           # per-section registry: metadata provider, library root, path template
   tmdb.ts, metadata/    # TMDB client (TV+movies) + the MetadataClient interface over mal/tmdb
 Dockerfile              # multi-stage node:22-alpine; builds dist + dist-server
@@ -199,7 +200,39 @@ and this is a deliberate choice (no tooling for it yet — see below), not a bug
 No import/export or diff tooling exists for this yet (discussed and deliberately deferred — this stays
 a manual process for now).
 
+### Configuration lives in the DB — `server/config.ts`, not `process.env`
+
+Most settings are rows in `app_config` (in `series.sqlite`), edited from **`/manage/settings`**, not
+env vars set in `link`. Read them with **`cfg('KEY')`** / `cfgNum` / `cfgBool` / `cfgSafe`, never
+`process.env` — `CONFIG_SPEC` in `server/config.ts` is the registry of every manageable key, and
+adding one there is what puts it on the settings page.
+
+**Precedence — a *present* env var wins over the database, even when its value is empty.** The test
+is `key in process.env`, not truthiness. This looks odd and it is load-bearing: `preview-env.mjs`
+and `agent-env.mjs` both disable the flow sink by injecting **explicit empty** `QBIT_*`/`LIBRARY_DIR`
+env vars over the inherited ones, while previews *seed their DB from dev*. If the database won,
+every preview would inherit dev's real qBittorrent credentials and could queue into the shared
+instance. Don't "fix" this to `??` or `||`.
+
+It also makes migration safe: set a value in the page, confirm the row reads **database**, *then*
+remove it from `link`. Putting it back in `link` overrides the DB again.
+
+**Secrets** (`secret: true` in the spec) are AES-256-GCM at rest under `CONFIG_KEY`, and the API
+never returns them — `listConfig()` omits the `value` property entirely rather than masking it. A
+missing or rotated `CONFIG_KEY` throws a specific error and surfaces on the settings row; it must
+never read as "unset", or a key rotation looks like an unconfigured provider.
+
+**Bootstrap vars stay in env** and are deliberately absent from `CONFIG_SPEC`: `DATA_DIR`,
+`DATABASE_PATH`, `PORT`, `NODE_ENV`, `JWT_SECRET`, `SUPABASE_*`, `CONFIG_KEY` — each is needed
+before the database, or before the login guarding the settings page, exists.
+
 ### Environment variables
+
+`CONFIG_KEY` — 32 random bytes, base64 (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`).
+Required before any secret can be stored; losing it means re-entering every secret.
+
+The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can now be set from
+`/manage/settings` instead, and env is the override rather than the source.
 - `JELLYFIN_URL` — base URL (default `http://jellyfin:8096`)
 - `JELLYFIN_API_KEY` — admin key, server-side only. **Required** for the public portal; if unset the
   portal routes 503 (the app still boots so `/manage` works).
