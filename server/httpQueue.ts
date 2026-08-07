@@ -91,6 +91,7 @@ type ServiceKey =
   | 'tsukihime'
   | 'tosho'
   | 'anilist'
+  | 'tmdb'
   | 'kitsu'
   | 'fanart'
   | 'jimaku'
@@ -105,6 +106,9 @@ const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   anilist: { minGapMs: 350, concurrency: 1, timeoutMs: 15_000, retries: 2 },
+  // TMDB retired its published 40-req/10s cap but still 429s under bursts;
+  // pace it like AniList and let Retry-After absorb the rest.
+  tmdb: { minGapMs: 250, concurrency: 2, timeoutMs: 15_000, retries: 2 },
   kitsu: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   fanart: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   jimaku: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 2 },
@@ -279,6 +283,7 @@ const HOST_KEYS: Array<[RegExp, ServiceKey]> = [
   [/(^|\.)tsukihime\.org$/i, 'tsukihime'],
   [/(^|\.)animetosho\.\w+$/i, 'tosho'],
   [/(^|\.)anilist\.co$/i, 'anilist'],
+  [/(^|\.)themoviedb\.org$/i, 'tmdb'],
   [/(^|\.)kitsu\.(io|app)$/i, 'kitsu'],
   [/(^|\.)fanart\.tv$/i, 'fanart'],
   [/(^|\.)jimaku\.cc$/i, 'jimaku'],
