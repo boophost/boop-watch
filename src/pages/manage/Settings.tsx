@@ -127,7 +127,15 @@ function SettingRow({
                   ? row.isSet
                     ? '•••••••• (set — type to replace)'
                     : 'not set'
-                  : (row.placeholder ?? row.default ?? '')
+                  : shadowedEmpty
+                    // Never show the default here. The field IS empty — the
+                    // deployment blanked it — and rendering "/library" as a
+                    // placeholder reads as the value in effect, flatly
+                    // contradicting the note directly below.
+                    ? 'empty — set by the deployment'
+                    : row.source === 'default'
+                      ? (row.placeholder ?? row.default ?? '')
+                      : ''
               }
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
