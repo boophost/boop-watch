@@ -2,7 +2,7 @@
 // filtered to titles in the library (the Jellyfin "Public" collection + the
 // /manage watchlist). Ported from the legacy server.
 import { getCollectionItems, type JfItem } from './jellyfin.js'
-import { listSeries } from './db.js'
+import { listAnimeSeries } from './db.js'
 
 const SCHEDULE_TZ = process.env.SCHEDULE_TZ || process.env.TZ || 'America/New_York'
 const SCHEDULE_TTL_MS = 30 * 60 * 1000
@@ -239,7 +239,7 @@ function buildDays(items: Airing[], allAirings: Airing[], now: Date): ScheduleDa
 // land in Jellyfin — treat each as a library series for matching.
 function watchlistItems(): JfItem[] {
   try {
-    return listSeries().map((s) => ({ Id: `mal:${s.mal_id}`, Name: s.title, Type: 'Series' }))
+    return listAnimeSeries().map((s) => ({ Id: `mal:${s.mal_id}`, Name: s.title, Type: 'Series' }))
   } catch {
     return [] // DB optional
   }

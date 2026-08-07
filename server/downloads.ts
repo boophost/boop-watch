@@ -4,7 +4,7 @@
 
 import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
 import { getAllPortalItems } from './portalDb.js'
-import { getSeriesById } from './db.js'
+import { getSeriesById, isAnimeSeries } from './db.js'
 import { jellyfinConfigured, jfJson, type JfItem, type JfMediaStream } from './jellyfin.js'
 
 const norm = (s: unknown): string =>
@@ -386,7 +386,8 @@ export async function resolveJfSeriesId(series: {
 export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMedia[]> {
   if (!jellyfinConfigured) return []
   const series = getSeriesById(seriesId)
-  if (!series) return []
+  // resolveJfSeriesId matches on MAL titles, so it only answers for anime rows.
+  if (!series || !isAnimeSeries(series)) return []
 
   const jfSeriesId = await resolveJfSeriesId(series)
   if (!jfSeriesId) return []

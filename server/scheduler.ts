@@ -28,7 +28,7 @@ import {
   type ScheduleSpec,
   type WeekDay,
 } from './flowsDb.js'
-import { listSeries, markTorrentsCompleted } from './db.js'
+import { listAnimeSeries, markTorrentsCompleted } from './db.js'
 import { sourcingReconcile, sourcingSweep, qbitReconcileUnsafe } from './sourcing.js'
 import { getAllPortalItems } from './portalDb.js'
 import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
@@ -265,7 +265,7 @@ function dispatchEvent(kind: TriggerKind, items: FlowItem[], onDispatched: () =>
 // watermark held portal ids).
 async function watchNewItems(): Promise<void> {
   if (flowsWithTriggerType('trigger.new-item').length === 0) return
-  const series = listSeries()
+  const series = listAnimeSeries()
   const key = (s: { mal_id: number }) => String(s.mal_id)
   if (!triggerStateSeeded('catalog-item')) {
     triggerStateAdd('catalog-item', series.map(key))

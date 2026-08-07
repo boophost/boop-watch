@@ -37,6 +37,7 @@ server/                 # Express backend (TypeScript, ESM)
   publicRoutes.ts       # public portal routes + JSON APIs (no auth)
   watch.ts, schedule.ts # player stream-info; animeschedule scraper + library matcher
   db.ts, jikan.ts       # series.sqlite + Jikan/MAL client (the /manage admin)
+  sections.ts           # per-section registry: metadata provider, library root, path template
 Dockerfile              # multi-stage node:22-alpine; builds dist + dist-server
 public/robots.txt       # Disallow: / (the portal is unlisted)
 ```
@@ -219,8 +220,12 @@ a manual process for now).
   so a dev instance sharing qBit with prod never queues into prod's `anime` category.
 - `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
-- `LIBRARY_DIR` — where the **library-import** flow places files (default `/library`);
-  point at the Jellyfin media library dir mounted into the pod (see below)
+- `LIBRARY_DIR` — where the **library-import** flow places the **anime** section's files
+  (default `/library`); point at the Jellyfin media library dir mounted into the pod (see below).
+  Keeps its historical meaning — it was the only library when the import sink was written.
+- `LIBRARY_DIR_TV`, `LIBRARY_DIR_MOVIES` — the same, for the **TV** and **Movies** sections
+  (defaults `/library-tv` / `/library-movies`). Read through `sectionConfig()` in
+  `server/sections.ts`, never off `process.env` at the call site.
 - `JIMAKU_API_KEY`, `JIMAKU_URL` — external subtitle fallback (`enrich.fetch-subs`);
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free
@@ -306,6 +311,28 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
   `req.params.splat`) — not the v4 bare `*` / `req.params[0]`.
 - **TypeScript is strict** (and the app build runs `noUnusedLocals`/`noUnusedParameters`). Use
   `import type` for type-only imports (verbatimModuleSyntax).
+
+## The catalog is sectioned — `mal_id` is not universal
+
+`series.sqlite`'s `series` table used to *be* the anime catalog: `mal_id INTEGER NOT NULL UNIQUE`
+was its identity. It now holds all three sections, so:
+
+- **Identity is the `(section, source, source_id)` triple**, enforced by `uq_series_source`.
+  `section` is the same `PortalSection` the portal uses; `source` is `'mal'` (anime) or `'tmdb'`
+  (TV/movies); `source_id` is that provider's id. Look titles up with `findBySource()`.
+- **`mal_id` is nullable** and identifies anime rows only. It keeps its own partial unique index
+  (`uq_series_mal`) and remains what the whole sourcing pipeline speaks — torrent search, wants,
+  torrents, library_files, episode caches. It is *not* being phased out; it is just not universal.
+- **Anime-only code takes `AnimeSeriesRow`**, not `SeriesRow` — it narrows `mal_id` to `number`.
+  Get rows from `listAnimeSeries()` / `findByMalId()` (both already typed that way), or narrow with
+  `isAnimeSeries()`. **Don't** add null checks to anime-only code to make the types pass; that
+  hides the section bug instead of catching it. In `server/index.ts`, anime-only routes go through
+  `animeSeriesOr(res, id, what)`, which 409s a TV/movie id with an explanatory message.
+- **`wants` / `torrents` / `library_files` carry both `mal_id` and `series_id`.** The anime
+  pipeline still keys on `mal_id` (unchanged, deliberately — that path works); new section-agnostic
+  code should use `series_id`. Converging them is future cleanup, not an invitation to do it inline.
+- **Per-section facts come from `sectionConfig()`** in `server/sections.ts` (provider, library root,
+  import path template) — never from `process.env` at the call site.
 
 ## Data-source gotchas (load-bearing — don't relearn the hard way)
 
