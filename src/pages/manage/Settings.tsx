@@ -60,9 +60,18 @@ function SettingRow({
     setDraft(row.secret ? '' : (row.value ?? ''))
   }, [row])
 
-  const shadowed = row.source === 'env'
   const dirty = row.secret ? draft.length > 0 : draft !== (row.value ?? '')
   const blockedSecret = row.secret && !canWriteSecrets
+
+  // The `env` badge already says a deployment variable is in charge, and the
+  // header says it once for the page. Repeating a paragraph on all 20 shadowed
+  // rows turns the normal pre-migration state into a wall of alarm, which
+  // trains you to ignore exactly the two cases that *are* surprising:
+  //   - a saved value is being silently overridden (a real conflict), or
+  //   - the override is empty, so the row looks unset but is actively blanked
+  //     (this is how previews disable the flow sink — worth spelling out).
+  const shadowedConflict = row.source === 'env' && row.updatedAt != null
+  const shadowedEmpty = row.source === 'env' && row.value === ''
 
   const run = async (fn: () => Promise<ConfigRow>) => {
     setBusy(true)
@@ -154,11 +163,14 @@ function SettingRow({
               variant="ghost"
               size="sm"
               className="h-9 shrink-0 px-2"
-              disabled={busy || row.source !== 'database'}
+              // Keyed on "a row exists", not "the row is winning": a value
+              // shadowed by an env var is still stored and still needs
+              // clearing, and disabling the button would strand it.
+              disabled={busy || row.updatedAt == null}
               title={
-                row.source === 'database'
-                  ? 'Remove the saved value and fall back to the default'
-                  : 'Nothing saved here to clear'
+                row.updatedAt == null
+                  ? 'Nothing saved here to clear'
+                  : 'Remove the saved value and fall back to the default'
               }
               aria-label={`Clear ${row.label}`}
               onClick={() => void run(() => deleteConfig(row.key))}
@@ -167,16 +179,20 @@ function SettingRow({
             </Button>
           </div>
 
-          {shadowed ? (
+          {shadowedConflict ? (
             <p className="mt-1 text-xs text-amber-400/90">
-              An environment variable on the deployment is overriding this
-              {row.value === '' ? ' with an empty value' : ''}. Saving here has no effect until it is
-              removed from the deployment.
+              A value is saved here, but an environment variable on the deployment is overriding it.
+              Remove it from the deployment for the saved value to take effect.
+            </p>
+          ) : shadowedEmpty ? (
+            <p className="mt-1 text-xs text-amber-400/90">
+              Set to empty by the deployment, which disables this. (PR previews and agent worktrees
+              blank the download settings this way on purpose.)
             </p>
           ) : null}
           {row.error ? <p className="mt-1 text-xs text-destructive">{row.error}</p> : null}
           {error ? <p className="mt-1 text-xs text-destructive">{error}</p> : null}
-          {row.source === 'database' && row.updatedAt ? (
+          {row.updatedAt ? (
             <p className="mt-1 text-[11px] text-muted-foreground">
               Saved {formatWhen(row.updatedAt)}
               {row.updatedBy ? ` by ${row.updatedBy}` : ''}
