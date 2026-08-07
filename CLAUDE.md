@@ -38,6 +38,7 @@ server/                 # Express backend (TypeScript, ESM)
   watch.ts, schedule.ts # player stream-info; animeschedule scraper + library matcher
   db.ts, jikan.ts       # series.sqlite + Jikan/MAL client (the /manage admin)
   sections.ts           # per-section registry: metadata provider, library root, path template
+  tmdb.ts, metadata/    # TMDB client (TV+movies) + the MetadataClient interface over mal/tmdb
 Dockerfile              # multi-stage node:22-alpine; builds dist + dist-server
 public/robots.txt       # Disallow: / (the portal is unlisted)
 ```
@@ -230,6 +231,11 @@ a manual process for now).
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free
   personal key); unset ⇒ that source no-ops, the other three still gather
+- `TMDB_API_KEY` — themoviedb.org credential, the metadata source for the **TV** and **Movies**
+  sections (anime stays on AniList/Jikan). Accepts either a v3 API key (sent as `api_key`) or a v4
+  read access token (sent as a `Bearer` header) — the client sniffs which. Unset ⇒ TV/movie search
+  and add report themselves unavailable with a message naming this var; anime is unaffected.
+  `TMDB_URL` overrides the base (default `https://api.themoviedb.org/3`).
 - `JIKAN_URL` — Jikan base for all **id-based** MAL routes; default is the public
   `https://api.jikan.moe/v4` (see `k8s/jikan/` for self-hosting). `JIKAN_SEARCH_URL` — base for
   `/anime?q=` searches only, default public: a self-hosted instance without a search index will
@@ -333,6 +339,9 @@ was its identity. It now holds all three sections, so:
   code should use `series_id`. Converging them is future cleanup, not an invitation to do it inline.
 - **Per-section facts come from `sectionConfig()`** in `server/sections.ts` (provider, library root,
   import path template) — never from `process.env` at the call site.
+- **Metadata goes through `clientForSection()`** (`server/metadata/`), not a direct AniList/Jikan or
+  TMDB call. `mal.ts` also owns `resolveCatalog()` — `enrich.metadata` in `flowNodes.ts` imports it
+  from there, so there is one anime-metadata path, not two.
 
 ## Data-source gotchas (load-bearing — don't relearn the hard way)
 
