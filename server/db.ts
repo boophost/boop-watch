@@ -280,6 +280,20 @@ export function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_library_files_ep ON library_files(mal_id, tvdb_season, episode);
     CREATE INDEX IF NOT EXISTS idx_library_files_hash ON library_files(torrent_hash);
+    -- App configuration that used to be deployment env vars. Managed from
+    -- /manage/settings; read through server/config.ts, which resolves
+    -- env-then-database-then-default (see the precedence note there — a present
+    -- env var wins even when empty, and that is what keeps PR previews from
+    -- inheriting dev's qBittorrent credentials via their seeded DB).
+    -- Secret values are AES-256-GCM ciphertext, never plaintext.
+    CREATE TABLE IF NOT EXISTS app_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      is_secret INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_by TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS fetch_attempts (
       kind TEXT NOT NULL,
       key TEXT NOT NULL,
