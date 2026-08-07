@@ -39,12 +39,13 @@ import {
   type WantKind,
   type WantStatus,
 } from './db.js'
-import { fetchAniListAiring, fetchAniListMedia, type AniListMedia } from './anilist.js'
+import { fetchAniListAiring } from './anilist.js'
 import { refreshEpisodeCache, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
-import { searchAnime, pickPosterUrl, fetchAnimeFull, type JikanAnimeFull } from './jikan.js'
+import { searchAnime, pickPosterUrl } from './jikan.js'
+import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
 import { blacklistedHashes } from './blacklist.js'
 import { qbitList, qbitToItem, qbitConfigured, parseTorrentTags } from './qbit.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
@@ -4375,91 +4376,8 @@ const trimAudioTracks: NodeImpl = {
   },
 }
 
-// A normalized catalog record, produced from either AniList (primary) or Jikan
-// (fallback), so the enrich node's write/emit logic is source-agnostic.
-type CatalogRecord = {
-  base: { title: string; synopsis: string | null; image_url: string | null; url: string }
-  meta: {
-    title_english: string | null
-    title_japanese: string | null
-    type: string | null
-    episodes: number | null
-    status: string | null
-    score: number | null
-    year: number | null
-    season: string | null
-    aired: string | null
-    studios: string
-    genres: string
-    broadcast: string | null
-  }
-}
-
-function aniListToCatalog(a: AniListMedia, mal: number): CatalogRecord {
-  return {
-    base: {
-      title: a.title,
-      synopsis: a.synopsis,
-      image_url: a.coverImage,
-      url: `https://myanimelist.net/anime/${mal}`,
-    },
-    meta: {
-      title_english: a.titleEnglish,
-      title_japanese: a.titleNative,
-      type: a.type,
-      episodes: a.totalEpisodes,
-      status: a.status,
-      score: a.score,
-      year: a.year,
-      season: a.season,
-      aired: a.airedString,
-      studios: JSON.stringify(a.studios),
-      genres: JSON.stringify(a.genres),
-      broadcast: a.broadcast ? JSON.stringify(a.broadcast) : null,
-    },
-  }
-}
-
-function jikanToCatalog(a: JikanAnimeFull): CatalogRecord {
-  return {
-    base: {
-      title: a.title,
-      synopsis: a.synopsis ?? null,
-      image_url: pickPosterUrl(a as unknown as Parameters<typeof pickPosterUrl>[0]),
-      url: a.url,
-    },
-    meta: {
-      title_english: a.title_english ?? null,
-      title_japanese: a.title_japanese ?? null,
-      type: a.type ?? null,
-      episodes: a.episodes ?? null,
-      status: a.status ?? null,
-      score: a.score ?? null,
-      year: a.year ?? null,
-      season: a.season ?? null,
-      aired: a.aired?.string ?? null,
-      studios: JSON.stringify((a.studios ?? []).map((s) => s.name)),
-      genres: JSON.stringify((a.genres ?? []).map((g) => g.name)),
-      broadcast: a.broadcast
-        ? JSON.stringify({
-            day: a.broadcast.day ?? null,
-            time: a.broadcast.time ?? null,
-            timezone: a.broadcast.timezone ?? null,
-            string: a.broadcast.string ?? null,
-          })
-        : null,
-    },
-  }
-}
-
-/** Resolve a catalog record for a mal_id — AniList first (current, not
- * rate-limit-prone), Jikan only if AniList can't answer. Returns the record and
- * which source produced it (for observability). Throws only if both fail. */
-async function resolveCatalog(mal: number): Promise<{ record: CatalogRecord; source: 'anilist' | 'jikan' }> {
-  const al = await fetchAniListMedia(mal)
-  if (al) return { record: aniListToCatalog(al, mal), source: 'anilist' }
-  return { record: jikanToCatalog(await fetchAnimeFull(mal)), source: 'jikan' }
-}
+// CatalogRecord / resolveCatalog live in server/metadata/mal.ts — the admin
+// API resolves anime metadata through the same code, and one copy is the point.
 
 const metadataEnrich: NodeImpl = {
   spec: {
