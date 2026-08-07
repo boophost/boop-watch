@@ -15,6 +15,7 @@ import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView, portalSeriesForCatalog } from './publicRoutes.js'
 import {
   getPortalSeasonCounts, getPortalSeasonTitles, getPortalSeasonYears, setPortalSeasonTitle,
+  isPortalSection,
 } from './portalDb.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
@@ -155,6 +156,43 @@ function requireAdmin(
     return
   }
   next()
+}
+
+/**
+ * Resolve `:id` as an **anime** catalog row, answering the request itself when
+ * it isn't one.
+ *
+ * A large part of the catalog API is anime-specific — MAL detail, episode
+ * caches, season mapping, torrent sourcing, blacklists — because it reasons
+ * about a MAL id the row may not have. Now that the catalog also holds TV and
+ * movie titles, those routes need an answer for "right id, wrong kind of
+ * title" that isn't a 500 on a null mal_id. 409 says the request was
+ * well-formed but doesn't apply to this resource, which is exactly the case.
+ *
+ * Returns null when it has already responded; callers just `return`.
+ */
+function animeSeriesOr(
+  res: express.Response,
+  id: number,
+  what: string,
+): seriesDb.AnimeSeriesRow | null {
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return null
+  }
+  const row = seriesDb.getSeriesById(id)
+  if (!row) {
+    res.status(404).json({ error: 'Series not found' })
+    return null
+  }
+  if (!seriesDb.isAnimeSeries(row)) {
+    res.status(409).json({
+      error: `${what} is only available for anime titles — "${row.title}" is in the ${row.section} section`,
+      section: row.section,
+    })
+    return null
+  }
+  return row
 }
 
 // Flow editor + scheduler APIs (admin-only: flows run external fetches + portal
@@ -314,9 +352,12 @@ app.get('/api/search/anime', requireAuth, async (req, res) => {
 
 app.get('/api/series', requireAuth, async (_req, res) => {
   seriesDb.getDb()
-  const series = seriesDb.listSeries()
+  // ?section= scopes the list to one section; absent means the whole catalog.
+  const sectionQ = String(_req.query.section ?? '')
+  const series = seriesDb.listSeries(isPortalSection(sectionQ) ? sectionQ : undefined)
   try {
-    const chases = await buildSeriesListChases(series)
+    // Chase chips are an anime-sourcing concept; TV/movie rows simply have none.
+    const chases = await buildSeriesListChases(series.filter(seriesDb.isAnimeSeries))
     res.json({
       series: series.map((s) => ({
         ...s,
@@ -330,16 +371,8 @@ app.get('/api/series', requireAuth, async (_req, res) => {
 })
 
 app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
-  const id = Number(req.params.id)
-  if (!Number.isFinite(id)) {
-    res.status(400).json({ error: 'Invalid id' })
-    return
-  }
-  const series = seriesDb.getSeriesById(id)
-  if (!series) {
-    res.status(404).json({ error: 'Series not found' })
-    return
-  }
+  const series = animeSeriesOr(res, Number(req.params.id), 'MAL detail')
+  if (!series) return
   try {
     // AniList-primary (current, auth-free); MyAnimeList/Jikan only if AniList
     // can't answer. `mal` keeps the Jikan-ish shape the /manage UI reads.
@@ -408,7 +441,7 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
         console.error('detail: season mapping enrich failed —', mapErr)
       }
     }
-    res.json({ series: seriesDb.getSeriesById(id) ?? series, mal })
+    res.json({ series: seriesDb.getSeriesById(series.id) ?? series, mal })
   } catch (e) {
     console.error(e)
     res.json({
@@ -420,16 +453,8 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
 })
 
 app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
-  const id = Number(req.params.id)
-  if (!Number.isFinite(id)) {
-    res.status(400).json({ error: 'Invalid id' })
-    return
-  }
-  const series = seriesDb.getSeriesById(id)
-  if (!series) {
-    res.status(404).json({ error: 'Series not found' })
-    return
-  }
+  const series = animeSeriesOr(res, Number(req.params.id), 'The episode list')
+  if (!series) return
   const malUrl = series.url ?? `https://myanimelist.net/anime/${series.mal_id}`
   // `series_episodes` is the single source of truth: existence + air dates come
   // from AniList (current, unlike MAL), titles from a multi-source merge (see
@@ -575,16 +600,10 @@ app.delete('/api/series/:id', requireAuth, (req, res) => {
 // episode offset here; the auto-enrich then leaves it alone. `source: 'auto'`
 // resets the row and re-resolves from the dataset.
 app.patch('/api/series/:id/mapping', requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id)
-  if (!Number.isFinite(id)) {
-    res.status(400).json({ error: 'Invalid id' })
-    return
-  }
-  const series = seriesDb.getSeriesById(id)
-  if (!series) {
-    res.status(404).json({ error: 'Series not found' })
-    return
-  }
+  // Season mapping exists to place MAL cours into TVDB seasons — there is no
+  // cour problem to solve for a TV show or a film.
+  const series = animeSeriesOr(res, Number(req.params.id), 'Season mapping')
+  if (!series) return
   const body = req.body as { tvdb_id?: unknown; tvdb_season?: unknown; episode_offset?: unknown; source?: unknown }
   const numOrNull = (v: unknown): number | null => {
     if (v == null || v === '') return null
@@ -604,7 +623,7 @@ app.patch('/api/series/:id/mapping', requireAuth, requireAdmin, async (req, res)
         source: 'manual',
       })
     }
-    res.json({ series: seriesDb.getSeriesById(id) })
+    res.json({ series: seriesDb.getSeriesById(series.id) })
   } catch (e) {
     console.error('mapping update failed', e)
     res.status(500).json({ error: 'Could not update mapping' })
@@ -963,18 +982,16 @@ function seasonTitleView(malId: number) {
 }
 
 app.get('/api/series/:id/season-titles', requireAuth, (req, res) => {
-  const id = Number(req.params.id)
-  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
-  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const series = animeSeriesOr(res, Number(req.params.id), 'Season titles')
+  if (!series) return
   res.json(seasonTitleView(series.mal_id))
 })
 
 // Set or clear one season's override. A blank/absent displayTitle clears it —
 // the portal then falls back to its own generic default.
 app.put('/api/series/:id/season-titles/:season', requireAuth, requireAdmin, (req, res) => {
-  const id = Number(req.params.id)
-  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
-  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const series = animeSeriesOr(res, Number(req.params.id), 'Season titles')
+  if (!series) return
   const season = Number(req.params.season)
   if (!Number.isInteger(season)) { res.status(400).json({ error: 'Invalid season' }); return }
   const pItem = portalSeriesForCatalog(series.mal_id)
@@ -994,18 +1011,16 @@ app.put('/api/series/:id/season-titles/:season', requireAuth, requireAdmin, (req
 
 // List candidates of one kind (gathering them from remote sources on first view).
 app.get('/api/series/:id/banners', requireAuth, async (req, res) => {
-  const id = Number(req.params.id)
-  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
-  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const series = animeSeriesOr(res, Number(req.params.id), 'Season art')
+  if (!series) return
   try { await ensureSeriesBanners(series.mal_id) } catch (e) { console.error('art gather failed', e) }
   res.json({ banners: seriesDb.listBanners(series.mal_id, artKind(req)).map(bannerView) })
 })
 
 // Choose which candidate the portal serves. The kind comes from the row itself.
 app.post('/api/series/:id/banners/select', requireAuth, requireAdmin, async (req, res) => {
-  const id = Number(req.params.id)
-  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
-  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const series = animeSeriesOr(res, Number(req.params.id), 'Season art')
+  if (!series) return
   const bannerId = Number((req.body as { bannerId?: unknown })?.bannerId)
   const row = Number.isFinite(bannerId) ? seriesDb.getBanner(bannerId) : undefined
   if (!row || !seriesDb.selectBanner(series.mal_id, bannerId)) {
@@ -1024,9 +1039,8 @@ app.post(
   requireAuth, requireAdmin,
   express.raw({ type: Object.keys(EXT_BY_TYPE), limit: '12mb' }),
   (req, res) => {
-    const id = Number(req.params.id)
-    const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
-    if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+    const series = animeSeriesOr(res, Number(req.params.id), 'Season art')
+    if (!series) return
     const ext = EXT_BY_TYPE[String(req.headers['content-type'] ?? '').split(';')[0].trim()]
     const body = req.body as Buffer
     if (!ext || !Buffer.isBuffer(body) || body.length === 0) {
@@ -1045,9 +1059,8 @@ app.post(
 
 // Remove a candidate (deletes an uploaded file; re-selects a default if needed).
 app.delete('/api/series/:id/banners/:bannerId', requireAuth, requireAdmin, (req, res) => {
-  const id = Number(req.params.id)
-  const series = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
-  if (!series) { res.status(404).json({ error: 'Series not found' }); return }
+  const series = animeSeriesOr(res, Number(req.params.id), 'Season art')
+  if (!series) return
   const bannerId = Number(req.params.bannerId)
   const removed = Number.isFinite(bannerId) ? seriesDb.deleteBanner(series.mal_id, bannerId) : undefined
   if (!removed) { res.status(404).json({ error: 'Banner not found' }); return }

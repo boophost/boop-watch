@@ -18,7 +18,7 @@ import {
   getPortalSeasonTitles, getPortalCollectionItems, isPortalSection,
   type PortalItem, type PortalSection,
 } from './portalDb.js'
-import { getBanner, getSelectedBanner, findByMalId, listSeries, listComments, type BannerRow, type SeriesRow, type CommentRow } from './db.js'
+import { getBanner, getSelectedBanner, findByMalId, listAnimeSeries, listComments, type BannerRow, type AnimeSeriesRow, type CommentRow } from './db.js'
 import { BANNERS_DIR } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
@@ -60,7 +60,7 @@ const qSection = (req: Request): PortalSection | undefined => {
 const normTitle = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 
 /** True when a catalog title is clearly the same franchise as the portal name. */
-function titleMatchesFranchise(portalName: string, catalog: SeriesRow): boolean {
+function titleMatchesFranchise(portalName: string, catalog: AnimeSeriesRow): boolean {
   const name = normTitle(portalName)
   if (!name) return false
   for (const raw of [catalog.title, catalog.title_english]) {
@@ -78,10 +78,10 @@ function titleMatchesFranchise(portalName: string, catalog: SeriesRow): boolean 
  * merely shares the same `tvdb_season` number (Slime ?season=2 must not
  * resolve to Mushoku Part 2).
  */
-function franchiseForSeries(pItem: { mal_id: number | null; name: string }): SeriesRow[] {
-  const all = listSeries()
+function franchiseForSeries(pItem: { mal_id: number | null; name: string }): AnimeSeriesRow[] {
+  const all = listAnimeSeries()
 
-  let franchise: SeriesRow[] = []
+  let franchise: AnimeSeriesRow[] = []
   if (pItem.mal_id != null) {
     const seed = findByMalId(pItem.mal_id)
     if (seed?.tvdb_id != null) {
@@ -122,7 +122,7 @@ export function portalSeriesForCatalog(malId: number): PortalItem | null {
 export function catalogCourForSeries(
   pItem: { mal_id: number | null; name: string },
   season: number | null,
-): SeriesRow | null {
+): AnimeSeriesRow | null {
   const franchise = franchiseForSeries(pItem)
 
   if (season != null && franchise.length > 0) {
@@ -153,7 +153,7 @@ export function catalogCourForSeries(
 export function catalogCoursForSeason(
   pItem: { mal_id: number | null; name: string },
   season: number | null,
-): SeriesRow[] {
+): AnimeSeriesRow[] {
   const franchise = franchiseForSeries(pItem)
   if (season == null) return franchise
   const cours = franchise

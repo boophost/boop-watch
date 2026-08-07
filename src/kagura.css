@@ -25,10 +25,43 @@
   --accent-deep:   oklch(0.45 0.21 310);
   --success:       oklch(0.78 0.17 160);
   --info:          oklch(0.75 0.14 240);
+
+  /* Real values only with viewport-fit=cover in the viewport meta (index.html).
+     Everything fixed to a viewport edge pads itself off these so the iPhone
+     home indicator and notch never sit on top of controls. */
+  --safe-top:    env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left:   env(safe-area-inset-left, 0px);
+  --safe-right:  env(safe-area-inset-right, 0px);
+  /* Height of the phone tab bar, minus its safe-area padding. Content panes
+     reserve --mobnav-space so the last row is never trapped under it. */
+  --mobnav-h: 56px;
+  --mobnav-space: calc(var(--mobnav-h) + var(--safe-bottom));
+}
+
+/* Lift the fixed version badge (styled in index.css, rendered outside both
+   scopes) above the phone tab bar wherever that bar is on screen. */
+@media (max-width: 767px) {
+  body:has(.kagura .mob-nav) { --bottom-bar-h: 56px; }
+}
+
+/* Touch behaviour, applied to both scopes. Killing the tap highlight and the
+   300ms double-tap delay is most of what separates "web page" from "app" on a
+   phone; overscroll-behavior stops the whole shell rubber-banding when an inner
+   list hits its end. */
+.kagura,
+.player {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: contain;
+}
+.kagura a, .kagura button, .kagura summary, .kagura [role="button"], .kagura input, .kagura select,
+.player a, .player button, .player summary, .player [role="button"], .player input, .player select {
+  touch-action: manipulation;
 }
 
 .kagura {
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--bg);
   color: var(--fg);
   font: 15px/1.55 var(--font-sans);
@@ -49,14 +82,14 @@
      .shell-body. The header carries the brand; the nav is links-only, and its
      inner column sticks below the (sticky, 56px) header while the page
      scrolls. data-collapsed on the shell shrinks the nav to an icon rail. */
-  &.shell { display: flex; flex-direction: column; min-height: 100vh; }
+  &.shell { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
   & .shell-body { display: flex; flex: 1; min-width: 0; }
   /* inline-size container so the hero can break out of main's centered
      max-width to the full content-pane width (100cqw) on wide screens. */
   & .shell-main { flex: 1; min-width: 0; display: flex; flex-direction: column; container-type: inline-size; }
   & .snav { flex: none; width: 232px; border-right: 1px solid var(--border); transition: width .18s ease; }
   &.shell[data-collapsed="true"] .snav { width: 64px; }
-  & .snav-inner { position: sticky; top: 56px; height: calc(100vh - 56px); display: flex; flex-direction: column;
+  & .snav-inner { position: sticky; top: 56px; height: calc(100dvh - 56px); display: flex; flex-direction: column;
     gap: 2px; padding: 14px 12px; overflow: hidden; }
   & .snav-link { display: flex; align-items: center; gap: 11px; width: 100%; height: 38px; padding: 0 11px;
     border-radius: 9px; border: none; background: transparent; cursor: pointer;
@@ -72,20 +105,25 @@
   &.shell[data-collapsed="true"] .snav-link { justify-content: center; padding: 0; }
   
   & .mob-nav { display: none; }
-  @media (max-width: 767px) { 
-    & .snav { display: none; } 
-    & .shell-main { padding-bottom: 56px; }
+  @media (max-width: 767px) {
+    & .snav { display: none; }
+    & .shell-main { padding-bottom: var(--mobnav-space); }
+    /* The bar keeps its 56px of touch target and grows *below* it into the home
+       indicator strip, so the icons never sit under the indicator. */
     & .mob-nav {
-      display: flex; position: fixed; bottom: 0; left: 0; right: 0; height: 56px;
+      display: flex; position: fixed; bottom: 0; left: 0; right: 0;
+      height: var(--mobnav-space); padding-bottom: var(--safe-bottom);
       background: oklch(0.145 0.008 285 / 90%); backdrop-filter: blur(10px);
       border-top: 1px solid var(--border); z-index: 50;
-      justify-content: space-around; align-items: center;
+      justify-content: space-around; align-items: stretch;
     }
     & .mob-link {
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 4px; font-size: 10px; color: var(--fg-muted); flex: 1; height: 100%;
+      gap: 4px; font-size: 10px; color: var(--fg-muted); flex: 1;
+      transition: color .14s ease, transform .08s ease;
     }
     & .mob-link[aria-current="page"] { color: var(--accent); }
+    & .mob-link:active { transform: scale(0.92); }
   }
 
   /* Chrome / header — brand left, centered search, crumb right */
@@ -93,9 +131,29 @@
     position: sticky; top: 0; z-index: 50;
     display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 520px) minmax(0, 1fr);
     align-items: center; gap: 14px;
-    padding: 0 24px; height: 56px;
+    padding: 0 calc(24px + var(--safe-right)) 0 calc(24px + var(--safe-left)); height: 56px;
     background: oklch(0.145 0.008 285 / 80%); backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--border);
+  }
+  /* The centre track is a hard 520px, so the two 1fr side tracks only ever get
+     (W - 520 - gaps - padding) / 2 — 86px at 768px. That was fine when the left
+     cluster was just the wordmark, but #316 added a ~180px section switcher to
+     it, and an overflowing grid item does not push its track wider: it spills
+     across the centre track and lands under the search bar (measured: 252px of
+     overlap at 768px, and only 4px of clearance at 1280px).
+     Below the width where the fixed layout genuinely fits, size the side tracks
+     to their content and let search take what is left. Search stops being
+     exactly centred there, which is the same trade the phone layout already
+     makes, and is strictly better than two controls on top of each other. */
+  @media (max-width: 1120px) {
+    & .chrome { grid-template-columns: auto minmax(0, 1fr) auto; }
+  }
+  /* Installed to the home screen the status bar is translucent and the page
+     starts at y=0, so the header has to carry the inset itself. In a normal
+     browser tab safe-top is 0 and this is a no-op. */
+  @media (display-mode: standalone) {
+    & .chrome { height: calc(56px + var(--safe-top)); padding-top: var(--safe-top); }
+    & .snav-inner { top: calc(56px + var(--safe-top)); height: calc(100dvh - 56px - var(--safe-top)); }
   }
   & .chrome .brand { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px;
     letter-spacing: -0.02em; min-width: 0; }
@@ -149,6 +207,16 @@
     transition: background .14s ease, border-color .14s ease, color .14s ease;
   }
   & .chrome-suggest:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--accent-soft-fg); }
+  /* The tab bar carries its own "Suggest" entry under the same `user` guard, so
+     below 767px the header copy is pure duplication exactly where width is
+     scarcest — and the header is the harder of the two to reach one-handed.
+     767px rather than the 560px header block because that is where the tab bar
+     appears, i.e. where the duplication starts. Must sit *after* the rule
+     above: both are `.kagura .chrome-suggest`, a media query adds no
+     specificity, so source order alone decides which display wins. */
+  @media (max-width: 767px) {
+    & .chrome-suggest { display: none; }
+  }
 
   /* Section switcher (Anime / TV / Movies) — header segmented control */
   & .sect-switch {
@@ -208,9 +276,16 @@
   }
   & .suggest-done .icon { color: var(--success); }
 
-  /* Advanced search bar */
+  /* Advanced search bar. .search-slot is the grid item; on desktop it's a
+     transparent wrapper and the bar fills it, on phones it collapses to just
+     the trigger button (see the phone header block further down). */
+  & .search-slot { grid-column: 2; display: flex; align-items: center; min-width: 0; }
+  & .search-trigger, & .search-cancel { display: none; }
+  /* Phone-only second row (see Chrome.tsx). Off by default so the desktop
+     header keeps exactly one search bar — the centred one above. */
+  & .chrome-search-row { display: none; }
   & .searchbar {
-    grid-column: 2; position: relative; display: flex; align-items: center; width: 100%; height: 40px;
+    position: relative; display: flex; align-items: center; width: 100%; height: 40px;
     background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 9px;
     transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
   }
@@ -236,7 +311,7 @@
     position: absolute; top: calc(100% + 8px); left: 0; right: 0; z-index: 60;
     background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
     box-shadow: 0 30px 80px -20px oklch(0 0 0 / 70%);
-    max-height: min(70vh, 460px); overflow-y: auto;
+    max-height: min(70dvh, 460px); overflow-y: auto;
   }
   & .sr-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
   & .sr-row:last-child { border-bottom: none; }
@@ -262,7 +337,7 @@
     border: 1px solid transparent; cursor: pointer; text-decoration: none; white-space: nowrap;
     transition: background .14s ease, border-color .14s ease, transform .08s ease;
   }
-  & .btn:active { transform: translateY(0.5px); }
+  & .btn:active { transform: scale(0.97); }
   & .btn-primary { background: var(--accent); color: var(--accent-fg); }
   & .btn-primary:hover { background: var(--accent-hover); }
   & .btn-secondary { background: var(--bg-elev-2); color: var(--fg); border-color: var(--border); }
@@ -322,6 +397,7 @@
   & .cal-tab .d { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-subtle); }
   & .cal-tab .n { font-family: var(--font-mono); font-size: 15px; font-weight: 600; color: var(--fg); }
   & .cal-tab .c { font-size: 9px; color: var(--fg-subtle); }
+  & .cal-tab:active { transform: scale(0.95); }
   & .cal-tab.today { border-color: oklch(0.72 0.18 310 / 40%); background: var(--accent-soft); }
   & .cal-tab.today .n { color: var(--accent-soft-fg); font-weight: 700; }
   & .cal-tab.today .d { color: var(--accent-soft-fg); }
@@ -339,7 +415,8 @@
     & .cal-day-head { background: var(--bg-elev); }
   }
 
-  & main { width: 100%; max-width: 1240px; margin: 0 auto; padding: 36px 32px 120px; }
+  & main { width: 100%; max-width: 1240px; margin: 0 auto;
+    padding: 36px calc(32px + var(--safe-right)) 120px calc(32px + var(--safe-left)); }
 
   /* Section head */
   & .h-eyebrow { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-subtle); }
@@ -380,8 +457,9 @@
   & .cat-chips[hidden] { display: none; }
   & .chip { height: 28px; padding: 0 12px; border-radius: 999px; background: var(--bg-elev-2);
     border: 1px solid var(--border); color: var(--fg-muted); font: 12px var(--font-sans); cursor: pointer;
-    transition: background .14s, color .14s, border-color .14s; white-space: nowrap; }
-  & .chip:hover { color: var(--fg); border-color: var(--border-strong); }
+    transition: background .14s, color .14s, border-color .14s, transform .07s ease; white-space: nowrap; }
+  @media (hover: hover) { & .chip:hover { color: var(--fg); border-color: var(--border-strong); } }
+  & .chip:active { transform: scale(0.95); }
   & .chip[data-active="true"] { background: var(--accent-soft); color: var(--accent-soft-fg); border-color: transparent; }
 
   /* Season picker — stacked wide banner cards in the title-page aside */
@@ -392,11 +470,14 @@
     background: linear-gradient(135deg, oklch(0.26 0.06 310) 0%, oklch(0.16 0.03 285) 100%);
     font: 13px var(--font-sans); text-align: left; color: var(--fg);
     transition: border-color .14s, transform .18s ease; }
-  & .season-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+  @media (hover: hover) {
+    & .season-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+  }
+  & .season-card:active { transform: scale(0.985); }
   & .season-card > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
     object-position: center 30%; display: block; filter: saturate(1.05);
     transition: transform .25s ease, filter .14s; }
-  & .season-card:hover > img { transform: scale(1.04); }
+  @media (hover: hover) { & .season-card:hover > img { transform: scale(1.04); } }
   & .season-card .season-scrim { position: absolute; inset: 0;
     background: linear-gradient(to top, oklch(0.1 0 0 / 90%) 0%, oklch(0.1 0 0 / 45%) 45%, oklch(0.1 0 0 / 12%) 100%); }
   & .season-card[data-active="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -420,7 +501,10 @@
     aspect-ratio: 2 / 3; cursor: pointer;
     transition: transform .18s ease, border-color .18s ease;
   }
-  & .poster-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+  @media (hover: hover) {
+    & .poster-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+  }
+  & .poster-card:active { transform: scale(0.975); }
   & .poster-card img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
   & .poster-card .poster-fallback {
     position: absolute; inset: 0; display: grid; place-items: center; padding: 14px;
@@ -504,7 +588,9 @@
     background: var(--accent); color: var(--accent-fg);
     box-shadow: 0 10px 30px -8px oklch(0 0 0 / 70%);
   }
-  & .poster-card:hover .play-hint { opacity: 1; }
+  @media (hover: hover) {
+    & .poster-card:hover .play-hint { opacity: 1; }
+  }
 
   /* Badges + dots */
   & .badge { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border-radius: 999px;
@@ -554,8 +640,18 @@
   /* Title block starts at the poster's top edge, not its bottom: with the badge
      row gone the series name is the first thing in the column, and hanging it off
      the poster's top gives the two a shared baseline to read from. */
-  & .series-head { display: grid; grid-template-columns: 200px 1fr; gap: 28px; align-items: start; margin: -150px 0 28px; position: relative; }
-  & .series-info { min-width: 0; }
+  /* row-gap 0: the title block and the block under it are two grid rows only so
+     the poster can span them — vertically they're one continuous column, spaced
+     by the children's own margins. */
+  & .series-head { display: grid; grid-template-columns: 200px 1fr; column-gap: 28px; row-gap: 0;
+    align-items: start; margin: -150px 0 28px; position: relative; }
+  /* Transparent on desktop: the poster and the title block are the real grid
+     items, which keeps the original two-column shape. */
+  & .series-top { display: contents; }
+  & .series-poster { grid-column: 1; grid-row: 1 / span 2; }
+  & .series-titleblock { grid-column: 2; grid-row: 1; min-width: 0; }
+  & .series-info { grid-column: 2; grid-row: 2; min-width: 0; }
+  & .series-actions { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
   & .series-poster { position: relative; aspect-ratio: 2/3; border-radius: 12px; overflow: hidden;
     border: 1px solid var(--border-strong); box-shadow: 0 20px 50px -20px oklch(0 0 0 / 70%); background: var(--bg-elev-2); }
   & .series-poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -605,15 +701,115 @@
   & .synopsis { font-size: 13px; line-height: 1.65; color: var(--fg-muted); margin: 10px 0 0; }
   & .empty { color: var(--fg-subtle); padding: 60px 0; text-align: center; }
 
-  @media (max-width: 560px) {
-    & .chrome { grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; padding: 0 14px; }
-    & .chrome .brand .label { display: none; }
+  /* ── Phone header ──────────────────────────────────────────────────────
+     A 390px header cannot carry brand + a 520px search field + crumb + account
+     at once — everything ends up 100px wide and unreadable. So the search stops
+     being a permanent field and becomes an icon; tapping it lifts the full bar
+     over the whole header row until it's dismissed. Both header variants (the
+     portal .chrome and the player .topbar) become flex rows here, which drops
+     the three-column grid placement the desktop layout depends on. */
+  @media (max-width: 640px) {
+    & .chrome, & .topbar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 calc(14px + var(--safe-right)) 0 calc(14px + var(--safe-left));
+    }
+    & .chrome .chrome-left, & .topbar .brand { flex: 1; min-width: 0; }
+    & .chrome .chrome-right, & .topbar .umenu, & .topbar .crumb { flex: none; gap: 8px; }
+    & .search-slot { flex: none; }
     & .searchbar .search-kbd { display: none; }
+
+    /* Search leaves the header row entirely on a phone: with the brand, the
+       section switcher and the account crumb already there, even the collapsed
+       40px trigger was the element that pushed the row over. It becomes a
+       full-width bar directly beneath the header instead, on the browse pages
+       only — see the `onBrowse` guard in Chrome.tsx. Nothing here is sticky, so
+       it scrolls away with the content and costs no permanent vertical space.
+       The trigger/overlay machinery below belongs to the header copy; the row
+       shows the real bar, so it opts back out of it. */
+    & .chrome > .search-slot { display: none; }
+    & .chrome-search-row {
+      display: block;
+      padding: 8px calc(14px + var(--safe-right)) 10px calc(14px + var(--safe-left));
+      background: oklch(0.145 0.008 285 / 80%); backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    /* Deliberately one level more specific than the collapsed-header rules
+       further down (`.search-slot .searchbar`, `.search-trigger`). Those are
+       equally specific and appear later, so matching their specificity would
+       lose on source order and the row would render an invisible, zero-width
+       bar. */
+    & .chrome-search-row .search-slot { display: flex; flex: 1; width: 100%; }
+    & .chrome-search-row .search-slot .searchbar { display: flex; width: 100%; }
+    & .chrome-search-row .search-slot .search-trigger { display: none; }
+    & .chrome-search-row .search-slot .searchbar .search-kbd { display: none; }
+    /* "Cancel" exists to dismiss the header's full-screen search overlay. The
+       row's bar is simply always there, so there is nothing to dismiss and the
+       button would just eat width and confuse. */
+    & .chrome-search-row .search-slot .search-cancel { display: none; }
+
+    & .search-trigger {
+      display: inline-flex; align-items: center; justify-content: center; flex: none;
+      width: 40px; height: 40px; border-radius: 9px; cursor: pointer;
+      background: transparent; border: 1px solid transparent; color: var(--fg-muted);
+      transition: background .14s ease, color .14s ease, transform .08s ease;
+    }
+    & .search-trigger:active { transform: scale(0.92); }
+
+    /* Collapsed: the bar is out of the flow entirely, so it can't compete for
+       header width. Expanded: it covers the header, keyboard-focused. */
+    & .search-slot .searchbar { display: none; }
+    & .search-slot[data-expanded="true"] .search-trigger { display: none; }
+    & .search-slot[data-expanded="true"] .searchbar {
+      display: flex; position: fixed; z-index: 90;
+      top: 0; left: 0; right: 0; height: calc(56px + var(--safe-top));
+      padding: var(--safe-top) calc(8px + var(--safe-right)) 0 calc(8px + var(--safe-left));
+      border: none; border-bottom: 1px solid var(--border); border-radius: 0;
+      background: var(--bg); box-shadow: none;
+    }
+    & .search-slot[data-expanded="true"] .searchbar:focus-within { box-shadow: none; background: var(--bg); }
+    & .search-cancel {
+      display: inline-flex; align-items: center; flex: none; height: 40px; padding: 0 4px 0 12px;
+      background: none; border: none; cursor: pointer;
+      color: var(--accent-soft-fg); font: 14px var(--font-sans);
+    }
+    /* Pin the results to the overlay's bottom edge rather than the bar's box,
+       and let them run to the bottom of the screen. */
+    & .search-slot[data-expanded="true"] .search-results {
+      position: fixed; top: calc(56px + var(--safe-top)); left: 0; right: 0;
+      border-radius: 0; border-left: none; border-right: none;
+      max-height: calc(100dvh - 56px - var(--safe-top) - var(--safe-bottom));
+    }
+    & .sr-row { padding: 12px 14px; }
+    & .sr-thumb { width: 44px; height: 64px; }
+    & .sr-title { font-size: 14px; }
+
+    /* "‹ All titles" costs more width than it's worth next to everything else;
+       the chevron alone reads as back, and the tab bar covers the rest. */
+    & .crumb-back .cl { display: none; }
+    & .crumb-back { width: 40px; height: 40px; justify-content: center; border-radius: 9px; }
     & .sect-btn { padding: 0 9px; font-size: 12px; }
+    /* Collapsing search freed enough width to keep the wordmark here — until
+       #316 put a ~145px section switcher in the same row. The two now compete
+       and the label loses, truncating mid-word ("boopu…"), which reads as
+       breakage rather than branding. The mark alone is unambiguous at this
+       size and the switcher is load-bearing navigation, so the wordmark is the
+       one to drop. */
+    & .chrome .brand .label { display: none; }
+  }
+
+  /* Small phones (360–375px are still the common floor). Everything else in the
+     header is already a fixed-width icon, so the segmented control is the only
+     thing left that can give: three text labels at the 560px sizing run ~130px
+     and push the row to overflow. Tighten it rather than hiding a section —
+     losing a whole library from the nav costs more than a couple of pixels of
+     padding, and the labels stay legible at 11.5px. */
+  @media (max-width: 400px) {
+    & .sect-switch { padding: 2px; }
+    & .sect-btn { padding: 0 7px; font-size: 11.5px; height: 24px; }
   }
   @media (max-width: 760px) {
-    & main { padding: 28px 18px 100px; }
-    & .hero { margin: -28px -18px 0; height: 280px; }
+    & main { padding: 28px calc(18px + var(--safe-right)) 100px calc(18px + var(--safe-left)); }
+    & .hero { margin: -28px calc(-18px - var(--safe-right)) 0 calc(-18px - var(--safe-left)); height: 280px; }
     @supports (width: 1cqw) {
       & .hero { margin: -28px calc((100% - 100cqw) / 2) 0; }
     }
@@ -623,11 +819,26 @@
        beats blurred filler. No spare box below it, so nothing to fade. */
     & .hero .backdrop img { height: 100%; object-fit: cover; object-position: center 30%;
       mask-image: none; -webkit-mask-image: none; }
-    & .series-head { grid-template-columns: 130px 1fr; gap: 18px; margin-top: -110px; }
-    /* A 32px name wraps to four lines against a 130px poster — size it down so the
+    /* Stack instead of columns: a 1fr text column beside a poster is only ~200px
+       wide here, so the title wrapped to four lines while the space under it sat
+       empty. Poster + title share one row, everything else gets the full width. */
+    & .series-head { display: flex; flex-direction: column; gap: 16px; margin: -110px 0 24px; }
+    & .series-top { display: flex; align-items: flex-end; gap: 14px; }
+    & .series-poster { grid-column: auto; grid-row: auto; width: 116px; flex: none; }
+    & .series-titleblock { grid-column: auto; grid-row: auto; flex: 1; min-width: 0; }
+    /* The blocks below the poster row are siblings with their own margins on
+       desktop; here they stack full width, so own the rhythm in one place. */
+    & .series-info { grid-column: auto; grid-row: auto; display: flex; flex-direction: column; gap: 14px; }
+    /* A 32px name wraps to four lines against the poster — size it down so the
        block still reads as one unit next to the art. */
-    & .series-name { font-size: 22px; }
+    & .series-name { font-size: 21px; }
     & .series-season { font-size: 14px; margin-top: 6px; }
+    & .series-sub { margin-top: 0; }
+    /* Full-width buttons read as the primary action here rather than as chips
+       floating in the middle of the page. */
+    & .series-actions { margin-top: 0; }
+    & .series-actions .btn { flex: 1; min-width: 160px; height: 44px; }
+    & .series-synopsis { margin-top: 0; }
     & .series-synopsis .synopsis { -webkit-line-clamp: 6; }
     & .series-body, & .series-body.has-aside { grid-template-columns: 1fr; gap: 20px; }
   }
@@ -636,6 +847,7 @@
 /* ───────────────────────── Player ───────────────────────── */
 .player {
   min-height: 100vh;
+  min-height: 100dvh;
   background: #000;
   color: var(--fg);
   font: 15px/1.5 var(--font-sans);
@@ -663,7 +875,8 @@
     font-family: var(--font-mono); font-size: 13px; color: var(--accent-fg); font-weight: 600; }
   & .topbar .brand .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   & .topbar .brand .sub { color: var(--fg-subtle); font-weight: 500; }
-  & .topbar .searchbar { grid-column: 2; width: 100%; }
+  & .topbar .search-slot { grid-column: 2; width: 100%; }
+  & .topbar .searchbar { width: 100%; }
   & .topbar .crumb { grid-column: 3; justify-self: end; color: var(--fg-muted); font-size: 13px;
     display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
   & .topbar .crumb:hover { color: var(--fg); }
@@ -703,9 +916,9 @@
      the source — so loading, episode switches, and metadata arriving cause no
      layout shift. The player fills it absolutely; the video letterboxes inside. */
   & .vid { position: relative; background: #000; border-radius: 12px; overflow: hidden;
-    aspect-ratio: 16 / 9; max-height: 78vh; margin: 0 auto; /* max-height transfers to a width cap on short windows; keep the box centered then */
+    aspect-ratio: 16 / 9; max-height: 78dvh; margin: 0 auto; /* max-height transfers to a width cap on short windows; keep the box centered then */
     box-shadow: 0 30px 80px -30px oklch(0 0 0 / 80%); }
-  & video { display: block; width: 100%; max-height: 78vh; background: #000; }
+  & video { display: block; width: 100%; max-height: 78dvh; background: #000; }
 
   /* Vidstack player, themed to the Kagura accent. */
   & .vds-player { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none;
@@ -772,7 +985,10 @@
     font: 600 13px var(--font-sans); cursor: pointer; backdrop-filter: blur(8px);
     box-shadow: 0 8px 24px -8px oklch(0 0 0 / 70%);
     transition: background .14s, border-color .14s, transform .14s; }
-  & .skip-btn:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); transform: translateY(-1px); }
+  @media (hover: hover) {
+    & .skip-btn:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); transform: translateY(-1px); }
+  }
+  & .skip-btn:active { transform: scale(0.96); }
 
   & .pbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
   & .pbar .spacer { flex: 1; }
@@ -805,7 +1021,7 @@
 
   /* Episode sidebar */
   & .panel { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; }
-  & .col-eps { display: flex; flex-direction: column; max-height: calc(100vh - 148px); overflow: hidden; }
+  & .col-eps { display: flex; flex-direction: column; max-height: calc(100dvh - 148px); overflow: hidden; }
   & .eps-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--border);
     font-weight: 600; font-size: 14px; }
   & .eps-head .badge { margin-left: auto; font-family: var(--font-mono); font-size: 11px; font-weight: 500;
@@ -880,7 +1096,10 @@
   & .cmt-del { margin-left: auto; flex: none; align-self: center; border: none; background: transparent;
     color: var(--fg-subtle); cursor: pointer; padding: 3px; border-radius: 5px; opacity: 0.55;
     transition: opacity .12s, color .12s, background .12s; }
-  & .cmt:hover .cmt-del { opacity: 1; }
+  @media (hover: hover) { & .cmt:hover .cmt-del { opacity: 1; } }
+  /* No hover on a phone — a delete button that only appears on hover is a
+     button that does not exist there. Show it outright on coarse pointers. */
+  @media (hover: none) { & .cmt-del { opacity: 1; } }
   & .cmt-del:hover { color: oklch(0.72 0.17 25); background: var(--bg-hover); }
   & .cmt-body { margin: 4px 0 0; font-size: 13.5px; line-height: 1.55; color: var(--fg);
     white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -902,17 +1121,56 @@
      right-aligning via the spacer. The back-link + SxEy chip + title get
      their own uncramped .subbar row. */
   @media (max-width: 760px) {
-    & .topbar { padding: 0 12px; gap: 10px;
+    & .topbar { padding: 0 calc(12px + var(--safe-right)) 0 calc(12px + var(--safe-left)); gap: 10px;
       grid-template-columns: auto minmax(0, 1fr) auto; }
     & .topbar .brand .label { display: none; }
-    & .subbar { padding: 8px 12px; }
+    & .subbar { padding: 8px calc(12px + var(--safe-right)) 8px calc(12px + var(--safe-left)); }
     & .subbar .back { max-width: 45vw; }
-    & .wrap { padding: 12px; gap: 14px; }
+    /* The player shell also carries the phone tab bar, so the last episode row
+       has to clear it. */
+    & .wrap { padding: 12px calc(12px + var(--safe-right)) calc(12px + var(--mobnav-space)) calc(12px + var(--safe-left));
+      gap: 14px; }
     & .pbar { gap: 6px; }
     & .pbar .spacer { display: none; }
-    & .pctl, & .pmenu > summary { height: 36px; padding: 0 10px; }
     & .pmenu > summary .pmlabel { max-width: 96px; }
-    & .pmenu .pop { max-width: calc(100vw - 40px); }
+  }
+  /* Under 640px the search collapses to an icon (see the .kagura phone header),
+     which frees the room the brand label needs — so give it back. */
+  @media (max-width: 640px) {
+    & .topbar .brand .label { display: block; }
+  }
+
+  /* ── Track pickers as bottom sheets ────────────────────────────────────
+     A dropdown anchored to a 44px trigger at the bottom of a phone screen is
+     the worst case for a thumb: the list opens upward into the video, the rows
+     are 13px, and the whole thing is pinned to whichever edge the trigger sits
+     on. Same <details> markup, presented as a sheet instead. */
+  & .pmenu-scrim { display: none; }
+  @media (max-width: 640px) {
+    & .pmenu[open] .pmenu-scrim {
+      display: block; position: fixed; inset: 0; z-index: 150;
+      background: oklch(0 0 0 / 55%); animation: suggest-fade .12s ease;
+    }
+    & .pmenu .pop {
+      position: fixed; z-index: 160; inset: auto 0 0 0; top: auto;
+      min-width: 0; max-width: none; max-height: 72dvh;
+      padding: 0 8px calc(10px + var(--safe-bottom));
+      border-radius: 18px 18px 0 0; border-left: none; border-right: none; border-bottom: none;
+      background: var(--bg-elev-2);
+      animation: sheet-up .22s cubic-bezier(0.32, 0.72, 0, 1);
+    }
+    /* Grabber — the affordance that says "this drags/dismisses". */
+    & .pmenu .pop::before {
+      content: ""; display: block; width: 40px; height: 4px; margin: 10px auto 4px;
+      border-radius: 999px; background: var(--border-strong);
+    }
+    & .pmenu .pop-head { font-size: 12px; padding: 6px 12px 10px; text-align: center; }
+    & .popitem {
+      align-items: center; min-height: 52px; padding: 12px 14px; font-size: 15px;
+      border-radius: 10px;
+    }
+    & .popitem .pi-detail { font-size: 12px; }
+    & .popitem:active { background: var(--bg-hover); }
   }
 }
 
@@ -939,7 +1197,11 @@ body.theater .player .comments { display: none; }
 body.theater .player .vds-player { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; aspect-ratio: auto !important; }
 body.theater .player video { position: absolute; inset: 0; max-height: none; height: 100%; width: 100%; object-fit: contain; }
 body.theater .player .vds-player[data-controls] .vds-overlay-btns { bottom: 96px; }
-body.theater .player .pbar { margin: 0; padding: 10px 16px; gap: 8px;
+/* Theater fills the viewport, so the control bar owns the bottom edge and has to
+   clear the home indicator itself. */
+body.theater .player .pbar { margin: 0; gap: 8px;
+  padding: 10px calc(16px + env(safe-area-inset-right, 0px))
+           calc(10px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px));
   background: oklch(0.145 0.008 285 / 94%); border-top: 1px solid var(--border); }
 
 /* Pseudo-fullscreen: last-resort fallback when neither element fullscreen nor
@@ -951,9 +1213,17 @@ body.fs .player .pbar { display: none; }
 body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 
 @keyframes suggest-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sheet-up { from { transform: translateY(100%); } }
+
+/* The fixed version badge sits at z-index 9999, above everything. Take it out
+   while a sheet or modal owns the screen so it can't print itself over them. */
+body:has(.pmenu[open]) .app-version,
+body:has(.suggest-overlay) .app-version { display: none; }
 @keyframes skel-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 0.9; } }
 @keyframes skel-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
+
 
 /* Next-episode chase status (Title + Watch episode rows) */
 .kagura .ep-status,
@@ -1023,9 +1293,11 @@ body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 .player .eprow.watched {
   opacity: 0.45;
 }
-.kagura .eprow.watched:hover,
-.player .eprow.watched:hover {
-  opacity: 1;
+@media (hover: hover) {
+  .kagura .eprow.watched:hover,
+  .player .eprow.watched:hover {
+    opacity: 1;
+  }
 }
 .kagura .eprow .epprog,
 .player .eprow .epprog {
@@ -1067,6 +1339,14 @@ body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 .kagura .eprow .epwatch.on,
 .player .eprow .epwatch.on {
   opacity: 1;
+}
+/* Same reasoning as .cmt-del: without hover the mark-watched toggle is invisible
+   at 0.35, so surface it permanently on touch. */
+@media (hover: none) {
+  .kagura .eprow .epwatch,
+  .player .eprow .epwatch {
+    opacity: 0.8;
+  }
 }
 .kagura .eprow .epwatch:hover,
 .player .eprow .epwatch:hover {
@@ -1130,3 +1410,81 @@ body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
   }
 }
 
+/* ─────────────────── Phone sizing: type + touch targets ───────────────────
+ * Two rules of thumb, applied across both scopes because the player reuses the
+ * portal's search bar and menus:
+ *   1. Any focusable field under 16px makes iOS Safari zoom the whole page in
+ *      on focus, and it never zooms back out. Every portal input is 13–14px, so
+ *      each one has to be lifted on phones.
+ *   2. Icon-only controls sized for a mouse (28–34px) are below the 44px touch
+ *      target everyone's thumb expects. Grow the box, not the glyph.
+ */
+@media (max-width: 767px), (pointer: coarse) {
+  .kagura .searchbar .search-input,
+  .player .searchbar .search-input,
+  .kagura .cat-bar .cat-filter input,
+  .kagura .suggest-textarea,
+  .kagura .comments .cmt-input,
+  .player .comments .cmt-input {
+    font-size: 16px;
+  }
+
+  /* Backstop for fields the list above doesn't name. Portal pages styled with
+     utility classes rather than Kagura component classes (the profile form's
+     display-name input) still zoom iOS on focus, and enumerating them means the
+     next field added silently regresses. Kept alongside the explicit rules
+     because those component selectors outweigh this one: a media query adds no
+     specificity, so this can't override them on its own.
+     Types with no rendered text are excluded: sizing them does nothing. */
+  .kagura input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  .kagura textarea,
+  .kagura select,
+  .player input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  .player textarea,
+  .player select {
+    font-size: 16px;
+  }
+
+  /* The bar keeps its visual height; only the text grows. */
+  .kagura .searchbar,
+  .player .searchbar { height: 44px; }
+  .kagura .cat-filter { height: 44px; }
+  .kagura .cat-sort select { height: 44px; font-size: 16px; }
+  .kagura .cat-tags-toggle { height: 44px; font-size: 14px; }
+
+  .kagura .chip { height: 36px; padding: 0 14px; font-size: 13px; }
+
+  /* Row-level icon buttons: the episode play chevron and the watched toggle. */
+  .kagura .eprow .go,
+  .player .eprow .go,
+  .kagura .eprow .epwatch,
+  .player .eprow .epwatch { width: 40px; height: 40px; }
+
+  .kagura .suggest-close { width: 40px; height: 40px; }
+
+  /* An inline link inside a sentence can't become a 40px block without breaking
+     the line. Vertical padding on an inline box extends the hit area without
+     affecting line layout, which is enough to make it thumb-safe. */
+  .kagura .cmt-signin a,
+  .player .cmt-signin a { padding: 9px 3px; }
+
+  /* Inline text links in the header rows are only as tall as their text. Give
+     them a 40px box so they're actually hittable; they still read as links. */
+  .kagura .chrome .crumb,
+  .player .topbar .crumb,
+  .player .subbar .back,
+  .player .subbar .manage-link { min-height: 40px; }
+  .kagura .chrome-suggest { width: 40px; height: 40px; }
+
+  /* Player control bar: 36px was already a mobile override — take it to 44. */
+  .player .pctl,
+  .player .pmenu > summary { height: 44px; padding: 0 13px; font-size: 13.5px; }
+
+  /* Carousel dots are 8px of paint. Keep the dot exactly as drawn and hang an
+     invisible 44px-tall hit area off it, rather than inflating the visual. */
+  .kagura .feat-dot { position: relative; }
+  .kagura .feat-dot::after {
+    content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 28px; height: 44px;
+  }
+}

@@ -119,19 +119,28 @@ function DetailShell({
         <CrossfadeBackdrop src={backdrop ?? backdropUrl(id)} />
         <div className="scrim" />
       </div>
+      {/* .series-top is display:contents on desktop, so poster and title block
+          land in .series-head's two grid columns exactly as before. On phones
+          .series-head becomes a flex column and .series-top a real row: a small
+          poster with the title beside it, and everything after it full width
+          instead of trapped in a ~200px column. */}
       <div className="series-head">
-        <div className="series-poster">
-          <div className="poster-fallback" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', fontFamily: 'var(--font-mono)', color: 'oklch(1 0 0 / 55%)' }}>
-            {initials(name)}
+        <div className="series-top">
+          <div className="series-poster">
+            <div className="poster-fallback" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', fontFamily: 'var(--font-mono)', color: 'oklch(1 0 0 / 55%)' }}>
+              {initials(name)}
+            </div>
+            <PosterImg src={poster ?? imgUrl(id)} fallback={imgUrl(id)} />
           </div>
-          <PosterImg src={poster ?? imgUrl(id)} fallback={imgUrl(id)} />
+          <div className="series-titleblock">
+            {badges ? <div className="series-meta-row">{badges}</div> : null}
+            <h1 className="series-name">{name}</h1>
+            {seasonLine ? <p className="series-season">{seasonLine}</p> : null}
+          </div>
         </div>
         <div className="series-info">
-          {badges ? <div className="series-meta-row">{badges}</div> : null}
-          <h1 className="series-name">{name}</h1>
-          {seasonLine ? <p className="series-season">{seasonLine}</p> : null}
           {sub && <div className="series-sub">{sub}</div>}
-          <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div className="series-actions">
             {user && (
               <button className={`btn ${isSaved ? 'btn-secondary' : 'btn-primary'}`} onClick={toggleSave} disabled={saving}>
                 <Icon name="bookmark" size={15} fill={isSaved ? 'currentColor' : 'none'} />
