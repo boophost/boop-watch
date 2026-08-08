@@ -14,6 +14,9 @@ import {
   isPortalSection, type PortalSection,
 } from './portalDb.js'
 import { sectionConfigs, sectionProvider } from './sections.js'
+import {
+  listConfig, setConfig, clearConfig, isKnownConfigKey, configKeyConfigured,
+} from './config.js'
 import { clientForSection } from './metadata/index.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
@@ -201,6 +204,53 @@ function animeSeriesOr(
 app.use('/api/flows', requireAuth, requireAdmin)
 app.use('/api/schedules', requireAuth, requireAdmin)
 app.use(flowRouter)
+
+// --- App configuration (/manage/settings) --------------------------------
+// Admin-only: these are the app's credentials and paths. Secret *values* never
+// leave the server — listConfig() omits them entirely rather than masking, so
+// there is no code path here that can serialise one.
+
+app.get('/api/config', requireAuth, requireAdmin, (_req, res) => {
+  res.json({
+    config: listConfig(),
+    /** Without this, secrets can be read but not written — the UI says so. */
+    configKeyConfigured: configKeyConfigured(),
+  })
+})
+
+app.put('/api/config/:key', requireAuth, requireAdmin, (req, res) => {
+  const key = String(req.params.key)
+  if (!isKnownConfigKey(key)) {
+    // Refuse unknown keys rather than storing them: a typo'd key would sit in
+    // the table forever, read by nothing, looking like it had taken effect.
+    res.status(400).json({ error: `Unknown setting: ${key}` })
+    return
+  }
+  const raw = (req.body as { value?: unknown })?.value
+  if (typeof raw !== 'string') {
+    res.status(400).json({ error: 'value must be a string' })
+    return
+  }
+  try {
+    setConfig(key, raw, String(res.locals.email || res.locals.username || 'admin'))
+  } catch (e) {
+    // The common case is a missing CONFIG_KEY on a secret — that message names
+    // the variable and says how to generate one, so pass it through verbatim.
+    res.status(400).json({ error: e instanceof Error ? e.message : 'Could not save setting' })
+    return
+  }
+  res.json({ config: listConfig().find((c) => c.key === key) ?? null })
+})
+
+app.delete('/api/config/:key', requireAuth, requireAdmin, (req, res) => {
+  const key = String(req.params.key)
+  if (!isKnownConfigKey(key)) {
+    res.status(400).json({ error: `Unknown setting: ${key}` })
+    return
+  }
+  clearConfig(key)
+  res.json({ config: listConfig().find((c) => c.key === key) ?? null })
+})
 
 app.get('/api/users', requireAuth, requireAdmin, async (_req, res) => {
   try {

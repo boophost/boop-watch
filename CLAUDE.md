@@ -330,6 +330,11 @@ Admin (JWT, `requireAuth`): `POST /api/login`, `/api/logout`, `GET /api/me`,
 `GET /api/sections`, `GET /api/search?section=&q=`, `GET|POST /api/series`,
 `GET /api/series/:id/detail`, `/api/series/:id/episodes`, `DELETE /api/series/:id`.
 
+Admin-only (`requireAuth + requireAdmin`): `GET /api/config`, `PUT|DELETE /api/config/:key` —
+the settings page. `GET` returns every `CONFIG_SPEC` key with its **source** (`env` / `database` /
+`default`); secret rows carry no `value` property at all. Unknown keys are refused rather than
+stored, so a typo can't sit in the table looking like it took effect.
+
 The manage APIs are **section-scoped**: `?section=anime|tv|movies` on `/api/search` and
 `/api/series` (absent ⇒ anime for search, the whole catalog for the list). `POST /api/series` takes
 `{ section, source_id }` and fills title/synopsis/poster/`imdb_id` from that section's provider when

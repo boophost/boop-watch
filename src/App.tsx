@@ -9,6 +9,7 @@ import Flows from './pages/manage/Flows'
 import Schedules from './pages/manage/Schedules'
 import Activity from './pages/manage/Activity'
 import Users from './pages/manage/Users'
+import Settings from './pages/manage/Settings'
 import Suggestions from './pages/manage/Suggestions'
 import AdminSeriesDetail from './pages/SeriesDetail'
 
@@ -105,6 +106,7 @@ export default function App() {
             <Route path="series/:seriesId" element={<AdminSeriesDetail />} />
             <Route path="activity" element={<Activity />} />
             <Route path="users" element={<Users />} />
+            <Route path="settings" element={<Settings />} />
             <Route path="suggestions" element={<Suggestions />} />
             <Route path="flows" element={<Flows />} />
             <Route path="schedules" element={<Schedules />} />
