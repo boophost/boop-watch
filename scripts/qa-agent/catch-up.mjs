@@ -2,14 +2,38 @@
 import { execFileSync } from 'node:child_process'
 import { extractSection, splitIncludedByPr, findUncheckedInLines } from '../lib/promotion-checklist.mjs'
 import { filterCredentials, getEarliestReset, credentialPool } from './cooldown.mjs'
+import { ghApi } from './gh.mjs'
 
-function sh(cmd, args) {
-  return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim()
+// This runs on the self-hosted k3s-cp runner, which has **no `gh` CLI** — only
+// ubuntu-latest ships one. Everything here goes through the REST helper the
+// other self-hosted steps already use. Shelling out to `gh` fails ENOENT on the
+// first call and takes the whole job with it, which is what hid the fact that
+// catch-up QA had never run at all.
+const REPO = process.env.GITHUB_REPOSITORY || process.env.QA_REPO
+
+/** PR body, or '' when the PR can't be read. */
+const prBody = async (pr) => (await ghApi('GET', `/repos/${REPO}/pulls/${pr}`)).body || ''
+
+/** Post a marked comment, editing the existing one when it's already there. */
+async function upsertComment(pr, marker, body) {
+  const comments = await ghApi('GET', `/repos/${REPO}/issues/${pr}/comments`)
+  const existing = comments.find((c) => c.body && c.body.includes(marker))
+  if (existing) await ghApi('PATCH', `/repos/${REPO}/issues/comments/${existing.id}`, { body })
+  else await ghApi('POST', `/repos/${REPO}/issues/${pr}/comments`, { body })
 }
 
-function shJson(cmd, args) {
-  return JSON.parse(sh(cmd, args))
+/** Convert a PR back to a draft. REST needs the node id + GraphQL for this. */
+async function toDraft(pr) {
+  const { node_id: id } = await ghApi('GET', `/repos/${REPO}/pulls/${pr}`)
+  await ghApi('POST', '/graphql', {
+    query: 'mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id}){clientMutationId}}',
+    variables: { id },
+  })
 }
+
+/** Fire a workflow_dispatch. */
+const dispatch = (workflow, ref, inputs) =>
+  ghApi('POST', `/repos/${REPO}/actions/workflows/${workflow}/dispatches`, { ref, inputs })
 
 async function main() {
   const prNumber = process.argv[2]
@@ -18,8 +42,8 @@ async function main() {
     process.exit(2)
   }
 
-  const pr = shJson('gh', ['pr', 'view', prNumber, '--json', 'body'])
-  const incLines = extractSection(pr.body, '## Included changes')
+  const body = await prBody(prNumber)
+  const incLines = extractSection(body, '## Included changes')
   const uncheckedPrs = []
 
   if (incLines) {
@@ -30,7 +54,7 @@ async function main() {
     }
   }
 
-  const prodLines = extractSection(pr.body, '## Production promotion checklist')
+  const prodLines = extractSection(body, '## Production promotion checklist')
   const prodUnchecked = (prodLines ? findUncheckedInLines(prodLines) : []).filter(t => !/^post-merge:/i.test(t))
   
   const commentMarker = '<!-- promotion-qa-trigger -->'
@@ -39,14 +63,10 @@ async function main() {
     console.log('No unchecked items. Promotion ready.')
     const commentBody = `${commentMarker}\n### ✅ All items verified\n\nNothing to QA — ok to merge if gate green.`
     try {
-      const comments = shJson('gh', ['api', `/repos/{owner}/{repo}/issues/${prNumber}/comments`])
-      const existing = comments.find(c => c.body && c.body.includes(commentMarker))
-      if (existing) {
-        sh('gh', ['api', '-X', 'PATCH', `/repos/{owner}/{repo}/issues/comments/${existing.id}`, '-f', `body=${commentBody}`])
-      } else {
-        sh('gh', ['pr', 'comment', prNumber, '-b', commentBody])
-      }
-    } catch (e) {}
+      await upsertComment(prNumber, commentMarker, commentBody)
+    } catch (e) {
+      console.error('Failed to comment:', e.message)
+    }
     process.exit(0)
   }
 
@@ -56,20 +76,14 @@ async function main() {
     const earliest = getEarliestReset(creds) || 'unknown'
     console.log('All credentials cooling down until ' + earliest)
     const commentBody = `${commentMarker}\n### ⚠️ QA paused\n\nQA paused — all credentials rate limited until ${earliest} (UTC). This PR is converted back to a draft.`
-    
-    // Convert to draft
-    try { sh('gh', ['pr', 'ready', prNumber, '--undo']) } catch (e) {}
-    
+
+    try { await toDraft(prNumber) } catch (e) { console.error('Failed to draft:', e.message) }
     try {
-      const comments = shJson('gh', ['api', `/repos/{owner}/{repo}/issues/${prNumber}/comments`])
-      const existing = comments.find(c => c.body && c.body.includes(commentMarker))
-      if (existing) {
-        sh('gh', ['api', '-X', 'PATCH', `/repos/{owner}/{repo}/issues/comments/${existing.id}`, '-f', `body=${commentBody}`])
-      } else {
-        sh('gh', ['pr', 'comment', prNumber, '-b', commentBody])
-      }
-    } catch (e) {}
-    
+      await upsertComment(prNumber, commentMarker, commentBody)
+    } catch (e) {
+      console.error('Failed to comment:', e.message)
+    }
+
     process.exit(0) // Successful job exit
   }
 
@@ -101,19 +115,21 @@ async function main() {
     // After all PRs are QA'd, trigger the promotion refresh manually once.
     console.log('Triggering promotion refresh...')
     try {
-      sh('gh', ['workflow', 'run', 'rolling-dev-main-pr.yml', '-f', 'ref=dev'])
+      // `ref` is the git ref the workflow runs on (its default branch), and the
+      // `ref` *input* is the branch it summarises — they are not the same thing.
+      await dispatch('rolling-dev-main-pr.yml', 'main', { ref: 'dev' })
     } catch (e) {
       console.error('Failed to trigger refresh:', e.message)
     }
 
     if (hasFailures) {
       console.log('Some catch-up QA had failures. Converting to draft.')
-      try { sh('gh', ['pr', 'ready', prNumber, '--undo']) } catch (e) {}
+      try { await toDraft(prNumber) } catch (e) { console.error('Failed to draft:', e.message) }
     }
   } else {
     // If only production checklist items are unchecked (like manual steps), we still convert to draft
     console.log('Only production checklist items remain. Converting to draft.')
-    try { sh('gh', ['pr', 'ready', prNumber, '--undo']) } catch (e) {}
+    try { await toDraft(prNumber) } catch (e) { console.error('Failed to draft:', e.message) }
   }
 }
 
