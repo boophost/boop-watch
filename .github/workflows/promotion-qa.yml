@@ -56,12 +56,20 @@ jobs:
       # fails the whole job before it has tested anything (it did, on #321).
       # Same address catch-up.mjs uses, so we can't verify one target and then
       # QA a different one.
+      #
+      # That address is staging's *IngressRoute*, not its in-cluster Service
+      # DNS: this runner is a process on the k3s node rather than a pod, so it
+      # has no CoreDNS resolver and boop-watch-dev.link-apps.svc.cluster.local
+      # resolves to nothing. The preflight reached a verdict and still failed on
+      # exactly that, every promotion PR, until #339.
       - name: Verify the QA browser really works
         env:
-          BASE_URL: http://boop-watch-dev.link-apps.svc.cluster.local
+          BASE_URL: ${{ vars.QA_STAGING_URL || 'https://dev-watch.boopurno.es' }}
         run: node scripts/qa-agent/verify-browser.mjs
 
       - name: Run Catch-up QA
+        env:
+          QA_STAGING_URL: ${{ vars.QA_STAGING_URL || 'https://dev-watch.boopurno.es' }}
         run: |
           export KUBECONFIG="$HOME/.kube/boop-watch-deployer.yaml"
           export JWT_SECRET="$(kubectl -n link-apps get secret boop-watch-dev-secret -o jsonpath='{.data.JWT_SECRET}' | base64 -d)"
