@@ -38,6 +38,7 @@ server/                 # Express backend (TypeScript, ESM)
   watch.ts, schedule.ts # player stream-info; animeschedule scraper + library matcher
   db.ts, jikan.ts       # series.sqlite + Jikan/MAL client (the /manage admin)
   config.ts             # DB-backed app config (CONFIG_SPEC + cfg()); read this before process.env
+  configRefs.ts         # {{config.KEY}} in node config + the run-report secret redactor
   sections.ts           # per-section registry: metadata provider, library root, path template
   tmdb.ts, metadata/    # TMDB client (TV+movies) + the MetadataClient interface over mal/tmdb
 Dockerfile              # multi-stage node:22-alpine; builds dist + dist-server
@@ -226,6 +227,24 @@ never read as "unset", or a key rotation looks like an unconfigured provider.
 `DATABASE_PATH`, `PORT`, `NODE_ENV`, `JWT_SECRET`, `SUPABASE_*`, `CONFIG_KEY` — each is needed
 before the database, or before the login guarding the settings page, exists.
 
+**Flows read config two ways, and the difference is about secrets** (`server/configRefs.ts`):
+
+- **`{{config.KEY}}` inside any node's config field.** Resolved centrally in `flowExecutor.ts`
+  immediately before `impl.run(...)` — the one point every node's config passes through, so all
+  node types support it with no per-node code. **This is the secret-safe path**: the value is
+  substituted at the moment of use and never becomes an item, so it cannot reach
+  `NodeReport.samples`, which the editor renders and the run API returns. An unknown key is left
+  **verbatim** rather than blanked (a silently-empty typo reads as "the provider is
+  unauthenticated"); the run report notes which keys were used, unknown, or empty.
+- **The `value.config` node** puts a setting on the canvas as a text value. It **refuses secrets** —
+  they aren't even listed in its dropdown — and routes them to a `blocked` output naming the
+  reference syntax instead, because a value on the canvas is an item and items get rendered.
+
+**Redaction is a backstop, not the protection.** `redactSecrets()` scrubs live secret values out of
+run reports before they leave the executor, for the case where a node *echoes* a credential (an HTTP
+node naming the URL it called). Verified to fire: a graph that deliberately pushes a secret into an
+item reports `{"apiKey":"«redacted»"}`. Don't rely on it in place of `{{config.KEY}}`.
+
 ### Environment variables
 
 `CONFIG_KEY` — 32 random bytes, base64 (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`).
@@ -387,6 +406,10 @@ was its identity. It now holds all three sections, so:
   code should use `series_id`. Converging them is future cleanup, not an invitation to do it inline.
 - **Per-section facts come from `sectionConfig()`** in `server/sections.ts` (provider, library root,
   import path template) — never from `process.env` at the call site.
+- **Section-aware flow nodes.** `enrich.indexer-match`, `enrich.metadata`, `source.jellyfin` and
+  `sink.library-import` each take a `section` config, **defaulting to `anime`** so existing saved
+  graphs are unaffected. The indexer-match one is load-bearing: unscoped, a TV release can
+  token-match an anime row and the import files a real video into the wrong library, silently.
 - **Metadata goes through `clientForSection()`** (`server/metadata/`), not a direct AniList/Jikan or
   TMDB call. `mal.ts` also owns `resolveCatalog()` — `enrich.metadata` in `flowNodes.ts` imports it
   from there, so there is one anime-metadata path, not two.

@@ -7,9 +7,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
+import { jfJson, jfUrl, jellyfinConfigured, sectionCollections, JfItem } from './jellyfin.js'
 import {
   listSeries,
+  findBySource,
+  updateSeriesMetadataById,
   listAnimeSeries,
   findByMalId,
   upsertSeriesMetadata,
@@ -42,18 +44,19 @@ import {
 import { fetchAniListAiring } from './anilist.js'
 import { refreshEpisodeCache, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
+import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
 import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
+import { clientForSection } from './metadata/index.js'
 import { blacklistedHashes } from './blacklist.js'
 import { qbitList, qbitToItem, qbitConfigured, parseTorrentTags } from './qbit.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
 import { deriveInterface, buildSpecResolver } from './flowComponents.js'
-import { cfgSafe, cfgNum } from './config.js'
-import { sectionLibraryRoot } from './sections.js'
+import { cfgSafe, cfgNum, CONFIG_SPEC, isKnownConfigKey, isSecretKey } from './config.js'
+import { sectionLibraryRoot, sectionConfig } from './sections.js'
 
 const execFileP = promisify(execFile)
 
@@ -342,10 +345,30 @@ const jellyfinSource: NodeImpl = {
     type: 'source.jellyfin',
     label: 'Get Jellyfin titles',
     category: 'source',
-    description: 'Fetches titles from the Public Jellyfin collection.',
+    description:
+      'Fetches titles from a Jellyfin collection. Defaults to the anime section’s collection (WATCH_COLLECTION_ID); pick another section, or paste a collection id, to source from a different library.',
     inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+        ],
+        default: 'anime',
+        help: 'Which section’s collection to read. Ignored when a collection id is set below.',
+      },
+      {
+        key: 'collectionId',
+        label: 'Collection id (override)',
+        kind: 'text',
+        default: '',
+        help: 'Read this BoxSet instead of the section’s configured one.',
+      },
       {
         key: 'itemTypes',
         label: 'Item types',
@@ -359,12 +382,27 @@ const jellyfinSource: NodeImpl = {
       },
     ],
   },
-  async run(_inputs, config) {
-    if (!jellyfinConfigured() || !defaultCollectionId()) {
-      throw new Error('Jellyfin is not configured (JELLYFIN_API_KEY / WATCH_COLLECTION_ID)')
+  async run(_inputs, config, ctx) {
+    // Explicit id wins; otherwise the chosen section's collection. Naming the
+    // section in the error matters — "Jellyfin is not configured" sent people
+    // to the API key when the actual gap was an unset WATCH_COLLECTION_ID_TV.
+    const section = (str(config, 'section', 'anime') || 'anime') as PortalSection
+    const override = str(config, 'collectionId', '')
+    const collection =
+      override ||
+      sectionCollections().find((c) => c.section === section)?.collectionId ||
+      ''
+    if (!jellyfinConfigured()) {
+      throw new Error('Jellyfin is not configured (JELLYFIN_URL / JELLYFIN_API_KEY)')
     }
+    if (!collection) {
+      throw new Error(
+        `No Jellyfin collection for the ${section} section — set its collection id in /manage/settings, or paste one into this node.`,
+      )
+    }
+    ctx.notes.push(override ? `collection ${override} (override)` : `${section} collection`)
     const res = await jfJson<{ Items?: JfItem[] }>('/Items', {
-      ParentId: defaultCollectionId(),
+      ParentId: collection,
       Recursive: 'true',
       IncludeItemTypes: str(config, 'itemTypes', 'Movie,Series'),
       Fields:
@@ -1131,6 +1169,68 @@ const jsonValue = valueLiteral(
     }
   },
 )
+
+/**
+ * Emit an app setting onto the canvas as a text value.
+ *
+ * The visual half of flow config access: wire a managed setting into any text
+ * input and see it as a wire, rather than hiding it inside a node's config.
+ *
+ * **Refuses secrets, deliberately.** A value on the canvas becomes an item,
+ * and items land in `NodeReport.samples` — which the editor renders and the
+ * run API returns. Putting an API key on a wire would print it there. Secrets
+ * use `{{config.KEY}}` inside a node's own config instead, which is
+ * substituted at the moment of use and never becomes an item. The `blocked`
+ * output says so rather than failing the run, so a graph built this way is
+ * self-explaining rather than mysteriously broken.
+ */
+const configValue: NodeImpl = {
+  spec: {
+    type: 'value.config',
+    label: 'Setting',
+    category: 'value',
+    description:
+      'Emits one app setting (from /manage/settings) as a text value. Non-secret settings only — reference a secret with {{config.KEY}} inside the node that needs it, so it is never rendered on the canvas.',
+    inputs: [],
+    outputs: [
+      { id: 'value', label: 'text', dataType: 'text' },
+      { id: 'blocked', label: 'blocked', dataType: 'text' },
+    ],
+    config: [
+      {
+        key: 'key',
+        label: 'Setting',
+        kind: 'select',
+        options: CONFIG_SPEC.filter((f) => !f.secret).map((f) => ({
+          value: f.key,
+          label: `${f.label} (${f.key})`,
+        })),
+        default: '',
+        help: 'Secrets are absent from this list on purpose — use {{config.KEY}} in the consuming node instead.',
+      },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const key = str(config, 'key', '')
+    if (!key) {
+      ctx.notes.push('no setting selected')
+      return { value: [], blocked: [] }
+    }
+    if (!isKnownConfigKey(key)) {
+      ctx.notes.push(`unknown setting "${key}"`)
+      return { value: [], blocked: asValueItems([`unknown setting: ${key}`]) }
+    }
+    if (isSecretKey(key)) {
+      ctx.notes.push(
+        `"${key}" is a secret and will not be put on the canvas — use {{config.${key}}} in the node that needs it`,
+      )
+      return { value: [], blocked: asValueItems([`secret withheld: ${key}`]) }
+    }
+    const v = cfgSafe(key)
+    ctx.notes.push(v === '' ? `${key} is empty` : `${key} = ${v}`)
+    return { value: asValueItems([v]), blocked: [] }
+  },
+}
 
 const urlValue = valueLiteral(
   'value.url',
@@ -2345,6 +2445,19 @@ const indexerMatch: NodeImpl = {
       },
       { key: 'threshold', label: 'Min word overlap (0-1)', kind: 'number', default: 0.6, help: 'Tokens mode: fraction of a catalog title’s distinctive words the release must contain.' },
       { key: 'seasonField', label: 'Season field', kind: 'text', default: '', help: 'Tokens mode: item field holding a numeric season (e.g. from Parse season). When present, only catalog rows whose tvdb_season matches are considered, so a file routes to the right season of a same-title franchise. Empty = title-only matching.' },
+      {
+        key: 'section',
+        label: 'Match within section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+          { value: '', label: 'Any section' },
+        ],
+        default: 'anime',
+        help: 'Which catalog rows are candidates. Defaults to anime — the historical behaviour, and the safe one: a TV release loose-matched against an anime row lands a file in the wrong library.',
+      },
     ],
   },
   async run(inputs, config, ctx) {
@@ -2354,7 +2467,11 @@ const indexerMatch: NodeImpl = {
     const mode = str(config, 'matchMode', 'exact')
     const threshold = num(config, 'threshold', 0.6)
     const seasonField = str(config, 'seasonField', '')
-    const catalog = listAnimeSeries()
+    // Scope the candidate rows. Left unscoped, a TV release could token-match
+    // an anime row (or vice versa) and the import would file it under the wrong
+    // library — the failure is silent and lands real files in the wrong place.
+    const sectionCfg = str(config, 'section', 'anime')
+    const catalog = sectionCfg === '' ? listSeries() : listSeries(sectionCfg as PortalSection)
     // When the release's season is known, a matching tvdb_season is strong
     // evidence, so we accept a lower title overlap than the general threshold
     // (the franchise name alone is enough to disambiguate within one season).
@@ -4395,7 +4512,7 @@ const trimAudioTracks: NodeImpl = {
 const metadataEnrich: NodeImpl = {
   spec: {
     type: 'enrich.metadata',
-    label: 'Fetch metadata (AniList)',
+    label: 'Fetch metadata',
     category: 'enrich',
     description:
       'Pulls full catalog metadata by mal_id (titles, year, episodes, status, score, studios, genres) into our own catalog DB, and sets those fields on the item (e.g. production_year for the import path). AniList-primary (current + auth-free); falls back to MyAnimeList/Jikan only when AniList can’t answer.',
@@ -4405,7 +4522,19 @@ const metadataEnrich: NodeImpl = {
       { id: 'skipped', label: 'skipped' },
     ],
     config: [
-      { key: 'malField', label: 'MAL id field', kind: 'text', default: 'mal_id' },
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime (AniList / MAL)' },
+          { value: 'tv', label: 'TV (TMDB)' },
+          { value: 'movies', label: 'Movies (TMDB)' },
+        ],
+        default: 'anime',
+        help: 'Decides the provider and the id field. Anime resolves cours to TVDB seasons; TV and movies do not need that — a TMDB season already is the library season.',
+      },
+      { key: 'malField', label: 'Id field', kind: 'text', default: 'mal_id', help: 'Anime: the mal_id field. TV/movies: the TMDB id field (usually source_id).' },
       { key: 'writeDb', label: 'Write to catalog DB', kind: 'boolean', default: true, help: 'Upsert the metadata into our series catalog (the Jellyfin-independent source of truth).' },
       { key: 'maxItems', label: 'Max lookups', kind: 'number', default: 25, help: '0 = unlimited. Jikan is rate-limited.' },
     ],
@@ -4415,6 +4544,58 @@ const metadataEnrich: NodeImpl = {
     const writeDb = bool(config, 'writeDb', true)
     const maxItems = num(config, 'maxItems', 25)
     const items = allInputs(inputs)
+    const section = (str(config, 'section', 'anime') || 'anime') as PortalSection
+
+    // TV/movies resolve through TMDB and take a much simpler path: there is no
+    // cour-to-season mapping to do, because a TMDB season already *is* the
+    // library season. Kept as its own branch so the anime path below is
+    // untouched — that path carries the whole sourcing pipeline.
+    if (section !== 'anime') {
+      const idField = str(config, 'malField', 'source_id')
+      const client = clientForSection(section)
+      if (!client.configured) throw new Error(client.unconfiguredReason)
+      const enrichedTmdb: FlowItem[] = []
+      const skippedTmdb: FlowItem[] = []
+      const memoT = new Map<number, Awaited<ReturnType<typeof client.detail>>>()
+      let lookedT = 0
+      for (const item of items) {
+        const id = Number(item[idField])
+        if (!Number.isFinite(id) || id <= 0 || (!memoT.has(id) && maxItems > 0 && lookedT >= maxItems)) {
+          skippedTmdb.push(item)
+          continue
+        }
+        if (!memoT.has(id)) lookedT++
+        try {
+          let d = memoT.get(id)
+          if (!d) {
+            d = await client.detail(section, id)
+            memoT.set(id, d)
+          }
+          if (writeDb && !ctx.dryRun) {
+            const row = findBySource(section, 'tmdb', id)
+            if (row) updateSeriesMetadataById(row.id, d.metadata)
+          }
+          enrichedTmdb.push({
+            ...item,
+            title: item.title ?? d.title,
+            title_english: d.metadata.title_english,
+            episodes_total: d.episodes,
+            score: d.metadata.score,
+            imdb_id: d.imdb_id,
+            ...(d.tvdb_id != null ? { tvdb_id: d.tvdb_id } : {}),
+            ...(d.year != null ? { production_year: d.year, year: d.year } : {}),
+          })
+        } catch (e) {
+          ctx.notes.push(`tmdb ${id}: ${e instanceof Error ? e.message : String(e)}`)
+          skippedTmdb.push(item)
+        }
+      }
+      ctx.notes.push(
+        `${ctx.dryRun ? 'dry run — ' : ''}resolved ${memoT.size} ${section} record(s) via TMDB` +
+          (ctx.dryRun ? ' (not written)' : ''),
+      )
+      return { enriched: enrichedTmdb, skipped: skippedTmdb }
+    }
     const enriched: FlowItem[] = []
     const skipped: FlowItem[] = []
     // A library-import run feeds this node one item per FILE, so the same
@@ -4938,7 +5119,19 @@ const libraryImport: NodeImpl = {
     ],
     config: [
       { key: 'fileField', label: 'Video file field', kind: 'text', default: 'file_path' },
-      { key: 'libraryRoot', label: 'Library root', kind: 'text', default: '', help: 'Destination library dir. Empty = LIBRARY_DIR env (/library).' },
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+        ],
+        default: 'anime',
+        help: 'Picks the destination library and the default path layout for that section (movies get a flat folder, no Season NN).',
+      },
+      { key: 'libraryRoot', label: 'Library root (override)', kind: 'text', default: '', help: 'Empty = the section’s configured library path from /manage/settings.' },
       {
         key: 'pathTemplate',
         label: 'Path template',
@@ -4965,10 +5158,14 @@ const libraryImport: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const fileField = str(config, 'fileField', 'file_path')
-    const root = str(config, 'libraryRoot', '') || LIBRARY_DIR()
-    // Keep this fallback identical to the spec's pathTemplate default so a node
-    // that doesn't set it still gets the full Jellyfin layout.
-    const tpl = str(config, 'pathTemplate', '{show} ({production_year})/Season {season:2}/{show} - S{season:2}E{torrent_episode:2}')
+    // Explicit override wins; otherwise the section's own root. Reading it per
+    // run (not at import) is what lets /manage/settings change it live.
+    const importSection = (str(config, 'section', 'anime') || 'anime') as PortalSection
+    const root = str(config, 'libraryRoot', '') || sectionLibraryRoot(importSection)
+    // Fall back to the *section's* layout, not a hardcoded one: a movie has no
+    // Season NN level, and defaulting it into one would bury every film a
+    // folder deep and hide it from Jellyfin's movie scanner.
+    const tpl = str(config, 'pathTemplate', '') || sectionConfig(importSection).pathTemplate
     const showField = str(config, 'showField', 'title')
     const defaultSeason = num(config, 'defaultSeason', 1)
     const method = str(config, 'method', 'hardlink')
@@ -5897,6 +6094,7 @@ const triggerFire: NodeImpl = {
 }
 
 const IMPLS: NodeImpl[] = [
+  configValue,
   triggerStart,
   triggerNewItem,
   triggerNewPortalItem,
