@@ -37,6 +37,9 @@ server/                 # Express backend (TypeScript, ESM)
   publicRoutes.ts       # public portal routes + JSON APIs (no auth)
   watch.ts, schedule.ts # player stream-info; animeschedule scraper + library matcher
   db.ts, jikan.ts       # series.sqlite + Jikan/MAL client (the /manage admin)
+  config.ts             # DB-backed app config (CONFIG_SPEC + cfg()); read this before process.env
+  sections.ts           # per-section registry: metadata provider, library root, path template
+  tmdb.ts, metadata/    # TMDB client (TV+movies) + the MetadataClient interface over mal/tmdb
 Dockerfile              # multi-stage node:22-alpine; builds dist + dist-server
 public/robots.txt       # Disallow: / (the portal is unlisted)
 ```
@@ -197,7 +200,39 @@ and this is a deliberate choice (no tooling for it yet — see below), not a bug
 No import/export or diff tooling exists for this yet (discussed and deliberately deferred — this stays
 a manual process for now).
 
+### Configuration lives in the DB — `server/config.ts`, not `process.env`
+
+Most settings are rows in `app_config` (in `series.sqlite`), edited from **`/manage/settings`**, not
+env vars set in `link`. Read them with **`cfg('KEY')`** / `cfgNum` / `cfgBool` / `cfgSafe`, never
+`process.env` — `CONFIG_SPEC` in `server/config.ts` is the registry of every manageable key, and
+adding one there is what puts it on the settings page.
+
+**Precedence — a *present* env var wins over the database, even when its value is empty.** The test
+is `key in process.env`, not truthiness. This looks odd and it is load-bearing: `preview-env.mjs`
+and `agent-env.mjs` both disable the flow sink by injecting **explicit empty** `QBIT_*`/`LIBRARY_DIR`
+env vars over the inherited ones, while previews *seed their DB from dev*. If the database won,
+every preview would inherit dev's real qBittorrent credentials and could queue into the shared
+instance. Don't "fix" this to `??` or `||`.
+
+It also makes migration safe: set a value in the page, confirm the row reads **database**, *then*
+remove it from `link`. Putting it back in `link` overrides the DB again.
+
+**Secrets** (`secret: true` in the spec) are AES-256-GCM at rest under `CONFIG_KEY`, and the API
+never returns them — `listConfig()` omits the `value` property entirely rather than masking it. A
+missing or rotated `CONFIG_KEY` throws a specific error and surfaces on the settings row; it must
+never read as "unset", or a key rotation looks like an unconfigured provider.
+
+**Bootstrap vars stay in env** and are deliberately absent from `CONFIG_SPEC`: `DATA_DIR`,
+`DATABASE_PATH`, `PORT`, `NODE_ENV`, `JWT_SECRET`, `SUPABASE_*`, `CONFIG_KEY` — each is needed
+before the database, or before the login guarding the settings page, exists.
+
 ### Environment variables
+
+`CONFIG_KEY` — 32 random bytes, base64 (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`).
+Required before any secret can be stored; losing it means re-entering every secret.
+
+The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can now be set from
+`/manage/settings` instead, and env is the override rather than the source.
 - `JELLYFIN_URL` — base URL (default `http://jellyfin:8096`)
 - `JELLYFIN_API_KEY` — admin key, server-side only. **Required** for the public portal; if unset the
   portal routes 503 (the app still boots so `/manage` works).
@@ -219,12 +254,21 @@ a manual process for now).
   so a dev instance sharing qBit with prod never queues into prod's `anime` category.
 - `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
-- `LIBRARY_DIR` — where the **library-import** flow places files (default `/library`);
-  point at the Jellyfin media library dir mounted into the pod (see below)
+- `LIBRARY_DIR` — where the **library-import** flow places the **anime** section's files
+  (default `/library`); point at the Jellyfin media library dir mounted into the pod (see below).
+  Keeps its historical meaning — it was the only library when the import sink was written.
+- `LIBRARY_DIR_TV`, `LIBRARY_DIR_MOVIES` — the same, for the **TV** and **Movies** sections
+  (defaults `/library-tv` / `/library-movies`). Read through `sectionConfig()` in
+  `server/sections.ts`, never off `process.env` at the call site.
 - `JIMAKU_API_KEY`, `JIMAKU_URL` — external subtitle fallback (`enrich.fetch-subs`);
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free
   personal key); unset ⇒ that source no-ops, the other three still gather
+- `TMDB_API_KEY` — themoviedb.org credential, the metadata source for the **TV** and **Movies**
+  sections (anime stays on AniList/Jikan). Accepts either a v3 API key (sent as `api_key`) or a v4
+  read access token (sent as a `Bearer` header) — the client sniffs which. Unset ⇒ TV/movie search
+  and add report themselves unavailable with a message naming this var; anime is unaffected.
+  `TMDB_URL` overrides the base (default `https://api.themoviedb.org/3`).
 - `JIKAN_URL` — Jikan base for all **id-based** MAL routes; default is the public
   `https://api.jikan.moe/v4` (see `k8s/jikan/` for self-hosting). `JIKAN_SEARCH_URL` — base for
   `/anime?q=` searches only, default public: a self-hosted instance without a search index will
@@ -283,8 +327,23 @@ guard):
 | `GET /health` | `ok` |
 
 Admin (JWT, `requireAuth`): `POST /api/login`, `/api/logout`, `GET /api/me`,
-`GET /api/search/anime`, `GET|POST /api/series`, `GET /api/series/:id/detail`,
-`/api/series/:id/episodes`, `DELETE /api/series/:id`.
+`GET /api/sections`, `GET /api/search?section=&q=`, `GET|POST /api/series`,
+`GET /api/series/:id/detail`, `/api/series/:id/episodes`, `DELETE /api/series/:id`.
+
+Admin-only (`requireAuth + requireAdmin`): `GET /api/config`, `PUT|DELETE /api/config/:key` —
+the settings page. `GET` returns every `CONFIG_SPEC` key with its **source** (`env` / `database` /
+`default`); secret rows carry no `value` property at all. Unknown keys are refused rather than
+stored, so a typo can't sit in the table looking like it took effect.
+
+The manage APIs are **section-scoped**: `?section=anime|tv|movies` on `/api/search` and
+`/api/series` (absent ⇒ anime for search, the whole catalog for the list). `POST /api/series` takes
+`{ section, source_id }` and fills title/synopsis/poster/`imdb_id` from that section's provider when
+they aren't supplied — `{ mal_id, title }` still works and still means anime.
+`GET /api/sections` is the registry the UI reads (provider, whether it's configured, library root,
+path template, counts, and a best-effort cross-check against Jellyfin's own `/Library/VirtualFolders`).
+`GET /api/search/anime` is a **back-compat alias pinned to anime** — it ignores `?section=`.
+Anime-only routes (`episodes`, `banners`, `season-titles`, `mapping`, downloads, blacklist,
+research, retrigger) **409** on a TV/movie id via `animeSeriesOr()`, naming the section.
 
 Every public content route runs through the **scope guard**: it 403s/404s unless the id is in the
 Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
@@ -306,6 +365,31 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
   `req.params.splat`) — not the v4 bare `*` / `req.params[0]`.
 - **TypeScript is strict** (and the app build runs `noUnusedLocals`/`noUnusedParameters`). Use
   `import type` for type-only imports (verbatimModuleSyntax).
+
+## The catalog is sectioned — `mal_id` is not universal
+
+`series.sqlite`'s `series` table used to *be* the anime catalog: `mal_id INTEGER NOT NULL UNIQUE`
+was its identity. It now holds all three sections, so:
+
+- **Identity is the `(section, source, source_id)` triple**, enforced by `uq_series_source`.
+  `section` is the same `PortalSection` the portal uses; `source` is `'mal'` (anime) or `'tmdb'`
+  (TV/movies); `source_id` is that provider's id. Look titles up with `findBySource()`.
+- **`mal_id` is nullable** and identifies anime rows only. It keeps its own partial unique index
+  (`uq_series_mal`) and remains what the whole sourcing pipeline speaks — torrent search, wants,
+  torrents, library_files, episode caches. It is *not* being phased out; it is just not universal.
+- **Anime-only code takes `AnimeSeriesRow`**, not `SeriesRow` — it narrows `mal_id` to `number`.
+  Get rows from `listAnimeSeries()` / `findByMalId()` (both already typed that way), or narrow with
+  `isAnimeSeries()`. **Don't** add null checks to anime-only code to make the types pass; that
+  hides the section bug instead of catching it. In `server/index.ts`, anime-only routes go through
+  `animeSeriesOr(res, id, what)`, which 409s a TV/movie id with an explanatory message.
+- **`wants` / `torrents` / `library_files` carry both `mal_id` and `series_id`.** The anime
+  pipeline still keys on `mal_id` (unchanged, deliberately — that path works); new section-agnostic
+  code should use `series_id`. Converging them is future cleanup, not an invitation to do it inline.
+- **Per-section facts come from `sectionConfig()`** in `server/sections.ts` (provider, library root,
+  import path template) — never from `process.env` at the call site.
+- **Metadata goes through `clientForSection()`** (`server/metadata/`), not a direct AniList/Jikan or
+  TMDB call. `mal.ts` also owns `resolveCatalog()` — `enrich.metadata` in `flowNodes.ts` imports it
+  from there, so there is one anime-metadata path, not two.
 
 ## Data-source gotchas (load-bearing — don't relearn the hard way)
 

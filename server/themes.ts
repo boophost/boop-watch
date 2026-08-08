@@ -4,8 +4,9 @@
 // widget renders structured rows. Keyed by mal_id — the portal resolves the
 // right cour per Jellyfin season, so each season shows its own songs.
 import { limitedFetch } from './httpQueue.js'
+import { cfgSafe } from './config.js'
 
-const JIKAN = process.env.JIKAN_URL || 'https://api.jikan.moe/v4'
+const jikanBase = (): string => cfgSafe('JIKAN_URL')
 // Themes almost never change once aired; airing shows gain one per cour at
 // most, so a day-long positive TTL is plenty. Empty/failed answers may be an
 // upstream blip (public Jikan 504s regularly) — retry those hourly.
@@ -184,7 +185,7 @@ export async function themesForMal(malId: number): Promise<ThemeSong[]> {
     // Jikan caller (aniskip's chain-walk, the /manage page) instead of
     // bursting past the ~3 req/s limit. Short timeout — the widget is
     // cosmetic and must not stall the title page.
-    const res = await limitedFetch('jikan', `${JIKAN}/anime/${malId}/themes`, {
+    const res = await limitedFetch('jikan', `${jikanBase()}/anime/${malId}/themes`, {
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(5000),
     })

@@ -19,7 +19,7 @@ import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fetchAniListArt } from './anilist.js'
 import { fetchFanartArt, FanartImage } from './fanart.js'
-import { addBanner, getSelectedBanner, lastFetchAttempt, listBanners, listSeries, recordFetchAttempt, selectBanner, setBannerLocalFile, ArtKind, BannerRow, SeriesRow } from './db.js'
+import { addBanner, getSelectedBanner, lastFetchAttempt, listBanners, listAnimeSeries, recordFetchAttempt, selectBanner, setBannerLocalFile, ArtKind, BannerRow, SeriesRow } from './db.js'
 import { limitedFetch } from './httpQueue.js'
 import { getSeriesSeasons, jellyfinConfigured, jfRemoteImages, jfSeriesIdByTvdb } from './jellyfin.js'
 
@@ -140,7 +140,7 @@ async function gatherProviderArt(row: SeriesRow, tvdbId: number): Promise<Candid
   const season = row.tvdb_season
   const out: Candidate[] = []
 
-  if (jellyfinConfigured) {
+  if (jellyfinConfigured()) {
     try {
       const seriesId = await jfSeriesIdByTvdb(tvdbId)
       if (seriesId) {
@@ -285,7 +285,7 @@ export async function cacheSelectedBanner(mal_id: number, kind: ArtKind = 'banne
  * selection is never reassigned. Returns the banner candidates.
  */
 export async function ensureSeriesBanners(mal_id: number): Promise<BannerRow[]> {
-  const row = listSeries().find((s) => s.mal_id === mal_id)
+  const row = listAnimeSeries().find((s) => s.mal_id === mal_id)
   const tvdbId = row?.tvdb_id ?? null
 
   // `due` records the attempt, so it must be reached only when we'd really try.
@@ -315,7 +315,7 @@ export async function ensureSeriesBanners(mal_id: number): Promise<BannerRow[]> 
  */
 export async function ensureFranchiseBanners(mal_id: number): Promise<void> {
   await ensureSeriesBanners(mal_id)
-  const rows = listSeries()
+  const rows = listAnimeSeries()
   const seed = rows.find((s) => s.mal_id === mal_id)
   if (seed?.tvdb_id == null) return
   for (const sibling of rows) {

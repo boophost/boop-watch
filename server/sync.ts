@@ -4,7 +4,7 @@ import {
   type PortalSection,
 } from './portalDb.js'
 import {
-  listSeries, SeriesRow,
+  listAnimeSeries, AnimeSeriesRow,
   countCachedEpisodes, getEpisodeTitles,
   lastFetchAttempt, recordFetchAttempt,
 } from './db.js'
@@ -18,7 +18,7 @@ const stripYear = (s: string) => s.replace(/\s*\(\d{4}\)\s*$/, '')
 
 // Match a Jellyfin item to a catalog series by any of its title variants
 // (romaji / english / japanese), so we can borrow the catalog's clean names.
-function matchCatalog(it: JfItem, catalog: SeriesRow[]): SeriesRow | undefined {
+function matchCatalog(it: JfItem, catalog: AnimeSeriesRow[]): AnimeSeriesRow | undefined {
   const cands = [norm(stripYear(it.Name || '')), norm(it.OriginalTitle || '')].filter(Boolean)
   if (cands.length === 0) return undefined
   return catalog.find((s) => {
@@ -129,7 +129,7 @@ async function syncSection(
   })
 
   const items = children.Items || []
-  const dbSeries = section === 'anime' ? listSeries() : []
+  const dbSeries = section === 'anime' ? listAnimeSeries() : []
 
   for (const it of items) {
     keepIds.add(it.Id)

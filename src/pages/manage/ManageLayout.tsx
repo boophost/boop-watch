@@ -7,6 +7,7 @@ import {
   Lightbulb,
   LogOut,
   Map as MapIcon,
+  SlidersHorizontal,
   Users,
   Workflow,
 } from 'lucide-react'
@@ -35,6 +36,7 @@ const NAV_ITEMS: {
   { to: '/manage/activity', label: 'Activity', icon: Activity },
   { to: '/manage/users', label: 'Users', icon: Users },
   { to: '/manage/suggestions', label: 'Suggestions', icon: Lightbulb },
+  { to: '/manage/settings', label: 'Settings', icon: SlidersHorizontal },
 ]
 
 export default function ManageLayout() {

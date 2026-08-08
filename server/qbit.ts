@@ -3,7 +3,9 @@
 // show progress and remove torrents. The flow sink node has its own inline
 // client because its connection is configurable per-node.
 
-const base = (): string => (process.env.QBIT_URL ?? '').replace(/\/$/, '')
+import { cfgSafe } from './config.js'
+
+const base = (): string => cfgSafe('QBIT_URL').replace(/\/$/, '')
 
 export function qbitConfigured(): boolean {
   return Boolean(base())
@@ -71,14 +73,23 @@ async function login(): Promise<string> {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      username: process.env.QBIT_USERNAME ?? 'admin',
-      password: process.env.QBIT_PASSWORD ?? '',
+      username: cfgSafe('QBIT_USERNAME') || 'admin',
+      password: cfgSafe('QBIT_PASSWORD'),
     }),
     signal: AbortSignal.timeout(15_000),
   })
   const cookie = res.headers.get('set-cookie')?.split(';')[0]
-  if (!res.ok || !cookie || !(await res.text()).includes('Ok')) {
-    throw new Error('qBittorrent login failed')
+  // A credentialed login answers 200 "Ok."; a request that qBittorrent accepts
+  // via its WebUI subnet whitelist answers 204 with an EMPTY body. Demanding
+  // "Ok." rejected the second case, so a correctly-bypassed client reported
+  // "login failed" while holding a perfectly good session cookie. The cookie is
+  // the thing we actually need, so require that — and only insist on "Ok." when
+  // there is a body to inspect.
+  const body = await res.text()
+  if (!res.ok || !cookie || (body.trim() !== '' && !body.includes('Ok'))) {
+    throw new Error(
+      `qBittorrent login failed (HTTP ${res.status}${body.trim() ? `: ${body.trim().slice(0, 80)}` : ''})`,
+    )
   }
   return cookie
 }

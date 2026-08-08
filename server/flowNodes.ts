@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
 import {
   listSeries,
+  listAnimeSeries,
   findByMalId,
   upsertSeriesMetadata,
   recordLibraryFile,
@@ -38,18 +39,21 @@ import {
   type WantKind,
   type WantStatus,
 } from './db.js'
-import { fetchAniListAiring, fetchAniListMedia, type AniListMedia } from './anilist.js'
+import { fetchAniListAiring } from './anilist.js'
 import { refreshEpisodeCache, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
-import { searchAnime, pickPosterUrl, fetchAnimeFull, type JikanAnimeFull } from './jikan.js'
+import { searchAnime, pickPosterUrl } from './jikan.js'
+import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
 import { blacklistedHashes } from './blacklist.js'
 import { qbitList, qbitToItem, qbitConfigured, parseTorrentTags } from './qbit.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
 import { deriveInterface, buildSpecResolver } from './flowComponents.js'
+import { cfgSafe, cfgNum } from './config.js'
+import { sectionLibraryRoot } from './sections.js'
 
 const execFileP = promisify(execFile)
 
@@ -303,7 +307,8 @@ function digPath(doc: unknown, path: string): unknown {
   return cur
 }
 
-const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
+/** The anime section's collection — the historical WATCH_COLLECTION_ID. */
+const defaultCollectionId = (): string => cfgSafe('WATCH_COLLECTION_ID')
 
 /** Maps a Jellyfin item to the flow-item shape (superset of PortalItem). */
 function fromJellyfin(it: JfItem): FlowItem {
@@ -355,11 +360,11 @@ const jellyfinSource: NodeImpl = {
     ],
   },
   async run(_inputs, config) {
-    if (!jellyfinConfigured || !COLLECTION_ID) {
+    if (!jellyfinConfigured() || !defaultCollectionId()) {
       throw new Error('Jellyfin is not configured (JELLYFIN_API_KEY / WATCH_COLLECTION_ID)')
     }
     const res = await jfJson<{ Items?: JfItem[] }>('/Items', {
-      ParentId: COLLECTION_ID,
+      ParentId: defaultCollectionId(),
       Recursive: 'true',
       IncludeItemTypes: str(config, 'itemTypes', 'Movie,Series'),
       Fields:
@@ -857,19 +862,25 @@ async function qbitLogin(base: string, username: string, password: string): Prom
     signal: AbortSignal.timeout(15_000),
   })
   const cookie = login.headers.get('set-cookie')?.split(';')[0]
-  if (!login.ok || !cookie || !(await login.text()).includes('Ok')) {
-    throw new Error('qBittorrent login failed')
+  // Mirrors server/qbit.ts: a whitelisted (bypassed) login answers 204 with an
+  // empty body, not 200 "Ok.". The cookie is what we need; only check the body
+  // when there is one. See that file for the full explanation.
+  const body = await login.text()
+  if (!login.ok || !cookie || (body.trim() !== '' && !body.includes('Ok'))) {
+    throw new Error(
+      `qBittorrent login failed (HTTP ${login.status}${body.trim() ? `: ${body.trim().slice(0, 80)}` : ''})`,
+    )
   }
   return cookie
 }
 
 function qbitCreds(config: Record<string, unknown>): { base: string; user: string; pass: string } {
-  const base = (str(config, 'url', '') || process.env.QBIT_URL || '').replace(/\/$/, '')
+  const base = (str(config, 'url', '') || cfgSafe('QBIT_URL')).replace(/\/$/, '')
   if (!base) throw new Error('qBittorrent URL is not set (node config or QBIT_URL env)')
   return {
     base,
-    user: str(config, 'username', '') || process.env.QBIT_USERNAME || 'admin',
-    pass: str(config, 'password', '') || process.env.QBIT_PASSWORD || '',
+    user: str(config, 'username', '') || cfgSafe('QBIT_USERNAME') || 'admin',
+    pass: str(config, 'password', '') || cfgSafe('QBIT_PASSWORD'),
   }
 }
 
@@ -2343,7 +2354,7 @@ const indexerMatch: NodeImpl = {
     const mode = str(config, 'matchMode', 'exact')
     const threshold = num(config, 'threshold', 0.6)
     const seasonField = str(config, 'seasonField', '')
-    const catalog = listSeries()
+    const catalog = listAnimeSeries()
     // When the release's season is known, a matching tvdb_season is strong
     // evidence, so we accept a lower title overlap than the general threshold
     // (the franchise name alone is enough to disambiguate within one season).
@@ -2524,8 +2535,8 @@ const jikanEnrich: NodeImpl = {
 }
 
 // Torrent index base URLs, overridable for mirrors/self-hosted proxies.
-const TOSHO_URL = process.env.TORRENT_TOSHO_URL ?? 'https://feed.animetosho.xyz'
-const TSUKI_URL = process.env.TORRENT_TSUKI_URL ?? 'https://api.tsukihime.org'
+const toshoUrl = (): string => cfgSafe('TORRENT_TOSHO_URL')
+const tsukiUrl = (): string => cfgSafe('TORRENT_TSUKI_URL')
 
 // Trackers appended when building a magnet from a bare info-hash (TsukiHime
 // results carry `btih` but no magnet). Same set Anime Tosho magnets embed.
@@ -2893,7 +2904,7 @@ const torrentSearch: NodeImpl = {
     const provider = str(config, 'provider', 'animetosho')
     const base =
       str(config, 'baseUrl', '').replace(/\/$/, '') ||
-      (provider === 'tsukihime' ? TSUKI_URL : TOSHO_URL)
+      (provider === 'tsukihime' ? tsukiUrl() : toshoUrl())
     const queryField = str(config, 'queryField', 'torrent_query')
     const episodeField = str(config, 'episodeField', '')
     const configMode = str(config, 'mode', 'auto')
@@ -3101,7 +3112,7 @@ const animeStatus: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const malField = str(config, 'malField', 'mal_id')
-    const base = str(config, 'baseUrl', '').replace(/\/$/, '') || TSUKI_URL
+    const base = str(config, 'baseUrl', '').replace(/\/$/, '') || tsukiUrl()
     const maxItems = num(config, 'maxItems', 25)
     const ttlMs = Math.max(0, num(config, 'cacheTtlHours', 24)) * 3600_000
     const out: FlowItem[] = []
@@ -3599,8 +3610,12 @@ const VIDEO_EXTS_DEFAULT = 'mkv,mp4,avi,m4v,mov'
 // environment that *runs* flows) refuses to start when this resolves to a
 // volume below WORK_MIN_GIB — so a forgotten WORK_DIR fails loudly at deploy
 // instead of silently filling the node PVC and evicting the pod at 3am.
+// Managed from /manage/settings (see #224: a live-set WORK_DIR env var is
+// reverted by a link redeploy, silently putting scratch back on the node PVC).
+// DATA_DIR stays the fallback and stays env-only — it is where the DB itself
+// lives, so it cannot be read from the DB.
 const WORK_DIR = () =>
-  process.env.WORK_DIR ?? process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
+  cfgSafe('WORK_DIR') || process.env.DATA_DIR || path.join(process.cwd(), 'data')
 
 // Boot guard: the library-import flow writes GB-sized intermediates, so scratch
 // must never land on the small node PVC (see WORK_DIR above — that's what took
@@ -3618,7 +3633,7 @@ const WORK_DIR = () =>
 // is forgotten it falls back to DATA_DIR (the node PVC), a different device from
 // the library NFS, and we refuse to start. When there's no LIBRARY_DIR to
 // compare against, fall back to a best-effort capacity floor (WORK_MIN_GIB).
-export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB ?? 10)): void {
+export function assertScratchVolumeSafe(minGiB = cfgNum('WORK_MIN_GIB', 10)): void {
   const workDir = WORK_DIR()
   // stat needs an existing path; walk up to the nearest ancestor that exists
   // (the `work` subdir is created lazily by the nodes on first write).
@@ -3638,7 +3653,7 @@ export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB
     try { libDev = fs.statSync(libDir).dev } catch { /* fall through to floor */ }
     if (workDev != null && libDev != null) {
       if (workDev !== libDev) {
-        const src = process.env.WORK_DIR ? 'WORK_DIR' : process.env.DATA_DIR ? 'DATA_DIR' : 'the default'
+        const src = cfgSafe('WORK_DIR') ? 'WORK_DIR' : process.env.DATA_DIR ? 'DATA_DIR' : 'the default'
         throw new Error(
           `flow scratch dir "${workDir}" (from ${src}) is on a different filesystem than the media library ` +
           `"${libDir}". Scratch has fallen back to the small node PVC instead of the media NFS; the ` +
@@ -3683,7 +3698,7 @@ export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB
 // filled the node's disk, and kubelet evicted prod (an outage). Prune entries
 // older than WORK_TTL_HOURS (default 24h) so scratch is self-limiting. The age
 // cutoff means an in-progress job (touched within the window) is never touched.
-export function pruneWorkDir(ttlHours = Number(process.env.WORK_TTL_HOURS ?? 24)): { removed: number; freedMB: number } {
+export function pruneWorkDir(ttlHours = cfgNum('WORK_TTL_HOURS', 24)): { removed: number; freedMB: number } {
   const workDir = path.join(WORK_DIR(), 'work')
   const cutoff = Date.now() - ttlHours * 3600_000
   let removed = 0
@@ -4031,7 +4046,7 @@ const extractSubs: NodeImpl = {
 // embedded sub in the target language. Keys on AniList id when available, else a
 // title query. Needs JIMAKU_API_KEY; without it the node passes items straight
 // to "missed" so the graph can route them elsewhere.
-const JIMAKU_URL = process.env.JIMAKU_URL ?? 'https://jimaku.cc/api'
+const jimakuUrl = (): string => cfgSafe('jimakuUrl()') || 'https://jimaku.cc/api'
 
 const fetchSubs: NodeImpl = {
   spec: {
@@ -4057,8 +4072,8 @@ const fetchSubs: NodeImpl = {
     ],
   },
   async run(inputs, config, ctx) {
-    const apiKey = str(config, 'apiKey', '') || process.env.JIMAKU_API_KEY || ''
-    const base = (str(config, 'baseUrl', '') || JIMAKU_URL).replace(/\/$/, '')
+    const apiKey = str(config, 'apiKey', '') || cfgSafe('JIMAKU_API_KEY')
+    const base = (str(config, 'baseUrl', '') || jimakuUrl()).replace(/\/$/, '')
     const anilistField = str(config, 'anilistField', 'anilist_id')
     const queryField = str(config, 'queryField', 'title')
     const episodeField = str(config, 'episodeField', 'torrent_episode')
@@ -4374,91 +4389,8 @@ const trimAudioTracks: NodeImpl = {
   },
 }
 
-// A normalized catalog record, produced from either AniList (primary) or Jikan
-// (fallback), so the enrich node's write/emit logic is source-agnostic.
-type CatalogRecord = {
-  base: { title: string; synopsis: string | null; image_url: string | null; url: string }
-  meta: {
-    title_english: string | null
-    title_japanese: string | null
-    type: string | null
-    episodes: number | null
-    status: string | null
-    score: number | null
-    year: number | null
-    season: string | null
-    aired: string | null
-    studios: string
-    genres: string
-    broadcast: string | null
-  }
-}
-
-function aniListToCatalog(a: AniListMedia, mal: number): CatalogRecord {
-  return {
-    base: {
-      title: a.title,
-      synopsis: a.synopsis,
-      image_url: a.coverImage,
-      url: `https://myanimelist.net/anime/${mal}`,
-    },
-    meta: {
-      title_english: a.titleEnglish,
-      title_japanese: a.titleNative,
-      type: a.type,
-      episodes: a.totalEpisodes,
-      status: a.status,
-      score: a.score,
-      year: a.year,
-      season: a.season,
-      aired: a.airedString,
-      studios: JSON.stringify(a.studios),
-      genres: JSON.stringify(a.genres),
-      broadcast: a.broadcast ? JSON.stringify(a.broadcast) : null,
-    },
-  }
-}
-
-function jikanToCatalog(a: JikanAnimeFull): CatalogRecord {
-  return {
-    base: {
-      title: a.title,
-      synopsis: a.synopsis ?? null,
-      image_url: pickPosterUrl(a as unknown as Parameters<typeof pickPosterUrl>[0]),
-      url: a.url,
-    },
-    meta: {
-      title_english: a.title_english ?? null,
-      title_japanese: a.title_japanese ?? null,
-      type: a.type ?? null,
-      episodes: a.episodes ?? null,
-      status: a.status ?? null,
-      score: a.score ?? null,
-      year: a.year ?? null,
-      season: a.season ?? null,
-      aired: a.aired?.string ?? null,
-      studios: JSON.stringify((a.studios ?? []).map((s) => s.name)),
-      genres: JSON.stringify((a.genres ?? []).map((g) => g.name)),
-      broadcast: a.broadcast
-        ? JSON.stringify({
-            day: a.broadcast.day ?? null,
-            time: a.broadcast.time ?? null,
-            timezone: a.broadcast.timezone ?? null,
-            string: a.broadcast.string ?? null,
-          })
-        : null,
-    },
-  }
-}
-
-/** Resolve a catalog record for a mal_id — AniList first (current, not
- * rate-limit-prone), Jikan only if AniList can't answer. Returns the record and
- * which source produced it (for observability). Throws only if both fail. */
-async function resolveCatalog(mal: number): Promise<{ record: CatalogRecord; source: 'anilist' | 'jikan' }> {
-  const al = await fetchAniListMedia(mal)
-  if (al) return { record: aniListToCatalog(al, mal), source: 'anilist' }
-  return { record: jikanToCatalog(await fetchAnimeFull(mal)), source: 'jikan' }
-}
+// CatalogRecord / resolveCatalog live in server/metadata/mal.ts — the admin
+// API resolves anime metadata through the same code, and one copy is the point.
 
 const metadataEnrich: NodeImpl = {
   spec: {
@@ -4880,7 +4812,7 @@ function sanitizeSegments(rel: string): string {
     .join('/')
 }
 
-const LIBRARY_DIR = () => process.env.LIBRARY_DIR ?? '/library'
+const LIBRARY_DIR = () => sectionLibraryRoot('anime')
 
 /** Strip cour/season suffixes from a MAL title so multi-season imports land in
  * the franchise folder ("… as a Slime Season 4" → "… as a Slime") when we have
@@ -5067,7 +4999,7 @@ const libraryImport: NodeImpl = {
 
     // One catalog read per run, not per item.
     let catalogRows: ReturnType<typeof listSeries> | null = null
-    const catalog = () => (catalogRows ??= listSeries())
+    const catalog = () => (catalogRows ??= listAnimeSeries())
 
     /** True when this mal_id is one cour of a multi-season franchise (siblings
      * share its tvdb_id). Guessing Season 1 for such a file buries a later
@@ -5374,7 +5306,7 @@ const jellyfinScan: NodeImpl = {
       ctx.notes.push('dry run — would trigger a Jellyfin library scan')
       return { items }
     }
-    if (!jellyfinConfigured) {
+    if (!jellyfinConfigured()) {
       ctx.notes.push('Jellyfin not configured — scan skipped')
       return { items }
     }
@@ -5464,7 +5396,7 @@ const jellyfinCollection: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const items = allInputs(inputs)
-    const collectionId = str(config, 'collectionId', '') || COLLECTION_ID || ''
+    const collectionId = str(config, 'collectionId', '') || defaultCollectionId()
     const nameField = str(config, 'nameField', 'title_english')
     const itemType = str(config, 'itemType', 'Series')
     const threshold = num(config, 'threshold', 0.6)
@@ -5482,7 +5414,7 @@ const jellyfinCollection: NodeImpl = {
       return { added: [], pending: items }
     }
     if (!collectionId) throw new Error('No collection id (config or WATCH_COLLECTION_ID env)')
-    if (!jellyfinConfigured) throw new Error('Jellyfin is not configured')
+    if (!jellyfinConfigured()) throw new Error('Jellyfin is not configured')
 
     // Resolve each unique show to a Jellyfin id, polling for the async scan.
     const resolved = new Map<string, { id: string; name: string }>()

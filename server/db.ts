@@ -2,6 +2,8 @@ import Database from 'better-sqlite3'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { type PortalSection } from './portalDb.js'
+import { sectionProvider, type MetadataProvider } from './sections.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -10,7 +12,25 @@ const dbPath = process.env.DATABASE_PATH ?? path.join(dataDir, 'series.sqlite')
 
 export interface SeriesRow {
   id: number
-  mal_id: number
+  /**
+   * MyAnimeList id — the anime identity, and NULL for every TV/movie row.
+   * It stays the key the sourcing pipeline speaks (torrent search, wants,
+   * torrents, library_files, episode caches all key off it), so it is not
+   * being replaced; it is simply no longer universal. Code that needs it
+   * should take an `AnimeSeriesRow`, which guarantees it.
+   */
+  mal_id: number | null
+  /**
+   * Which portal section this title is managed under. Every pre-section row is
+   * anime — that was the only catalog there was.
+   */
+  section: PortalSection
+  /** Catalog that owns this row's identity: 'mal' for anime, 'tmdb' otherwise. */
+  source: MetadataProvider
+  /** The provider's own id. Equal to mal_id on anime rows. */
+  source_id: number
+  /** `tt…`, when the provider knew it. Informational — never an identity. */
+  imdb_id: string | null
   title: string
   synopsis: string | null
   image_url: string | null
@@ -102,16 +122,23 @@ export function getDb(): Database.Database {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true })
   const instance = new Database(dbPath)
   instance.exec(`
+    -- mal_id is nullable and NOT unique-by-column: it identifies anime rows
+    -- only, and TV/movie rows have none. Identity is the
+    -- (section, source, source_id) triple — see the indexes below, which are
+    -- created after the migration block so they exist on old DBs too.
     CREATE TABLE IF NOT EXISTS series (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      mal_id INTEGER NOT NULL UNIQUE,
+      mal_id INTEGER,
+      section TEXT NOT NULL DEFAULT 'anime',
+      source TEXT NOT NULL DEFAULT 'mal',
+      source_id INTEGER,
+      imdb_id TEXT,
       title TEXT NOT NULL,
       synopsis TEXT,
       image_url TEXT,
       url TEXT,
       added_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    CREATE INDEX IF NOT EXISTS idx_series_mal_id ON series(mal_id);
 
     CREATE TABLE IF NOT EXISTS saved_animes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,6 +280,20 @@ export function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_library_files_ep ON library_files(mal_id, tvdb_season, episode);
     CREATE INDEX IF NOT EXISTS idx_library_files_hash ON library_files(torrent_hash);
+    -- App configuration that used to be deployment env vars. Managed from
+    -- /manage/settings; read through server/config.ts, which resolves
+    -- env-then-database-then-default (see the precedence note there — a present
+    -- env var wins even when empty, and that is what keeps PR previews from
+    -- inheriting dev's qBittorrent credentials via their seeded DB).
+    -- Secret values are AES-256-GCM ciphertext, never plaintext.
+    CREATE TABLE IF NOT EXISTS app_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      is_secret INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_by TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS fetch_attempts (
       kind TEXT NOT NULL,
       key TEXT NOT NULL,
@@ -323,6 +364,101 @@ export function getDb(): Database.Database {
   for (const [name, type] of SERIES_EXTRA_COLUMNS) {
     if (!existing.has(name)) instance.exec(`ALTER TABLE series ADD COLUMN ${name} ${type}`)
   }
+
+  // Sections migration. `series` was created as `mal_id INTEGER NOT NULL
+  // UNIQUE` — an anime-only catalog. TV and movie titles have no MAL id, so
+  // that constraint has to go, and SQLite cannot drop NOT NULL/UNIQUE with
+  // ALTER TABLE. Hence the full 12-step rebuild: new table, copy, drop,
+  // rename. It runs exactly once (guarded on `section` existing) and is a
+  // no-op on a freshly created DB, whose CREATE TABLE above is already the
+  // post-migration shape.
+  //
+  // The new column definitions are derived from PRAGMA table_info rather than
+  // written out, because `series` has ~30 columns accreted through
+  // SERIES_EXTRA_COLUMNS and a hand-maintained copy of that list would drift
+  // out of sync on the next addition — silently dropping a column's data.
+  const seriesCols = instance.prepare(`PRAGMA table_info(series)`).all() as {
+    name: string
+    type: string
+    notnull: number
+    dflt_value: string | null
+    pk: number
+  }[]
+  if (!seriesCols.some((c) => c.name === 'section')) {
+    const defs = seriesCols.map((c) => {
+      if (c.name === 'id') return 'id INTEGER PRIMARY KEY AUTOINCREMENT'
+      // The whole point of the rebuild: mal_id loses NOT NULL and UNIQUE.
+      if (c.name === 'mal_id') return 'mal_id INTEGER'
+      let def = `${c.name} ${c.type || 'TEXT'}`
+      if (c.notnull) def += ' NOT NULL'
+      // Always parenthesised: table_info reports an expression default as the
+      // bare expression (`datetime('now')`), and SQLite only accepts a
+      // function call as a default when it is wrapped. Parens are legal around
+      // literal defaults too, so this needs no special-casing.
+      if (c.dflt_value !== null) def += ` DEFAULT (${c.dflt_value})`
+      return def
+    })
+    const names = seriesCols.map((c) => c.name).join(', ')
+    // foreign_keys can only be toggled outside a transaction.
+    instance.pragma('foreign_keys = OFF')
+    instance.transaction(() => {
+      instance.exec(`
+        CREATE TABLE series_new (
+          ${defs.join(',\n          ')},
+          section TEXT NOT NULL DEFAULT 'anime',
+          source TEXT NOT NULL DEFAULT 'mal',
+          source_id INTEGER,
+          imdb_id TEXT
+        );
+        INSERT INTO series_new (${names}) SELECT ${names} FROM series;
+        -- Every pre-section row is an anime title from the MAL catalog, which
+        -- is exactly what the column defaults say; only source_id has to be
+        -- derived, and mal_id is non-null on all of them by the old constraint.
+        UPDATE series_new SET source_id = mal_id;
+        DROP TABLE series;
+        ALTER TABLE series_new RENAME TO series;
+      `)
+    })()
+    instance.pragma('foreign_keys = ON')
+  }
+
+  // Created here, not in the schema block: on a migrated DB the table was just
+  // dropped and recreated (taking its indexes with it), and on a pre-migration
+  // DB `section` did not exist when the schema block ran.
+  instance.exec(`
+    CREATE INDEX IF NOT EXISTS idx_series_mal_id ON series(mal_id);
+    CREATE INDEX IF NOT EXISTS idx_series_section ON series(section);
+    -- mal_id keeps its uniqueness where it means anything. Partial, so the
+    -- many NULLs on TV/movie rows don't collide with each other.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_series_mal
+      ON series(mal_id) WHERE mal_id IS NOT NULL;
+    -- The real identity. Sectioned because tv and movies share the tmdb
+    -- namespace and a TMDB id is only unique within one of them.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_series_source
+      ON series(section, source, source_id) WHERE source_id IS NOT NULL;
+  `)
+
+  // Sourcing ledgers gain a catalog-row reference. The anime pipeline keeps
+  // using mal_id exactly as before — this is additive, and nothing reads
+  // series_id yet — but TV/movie rows have no mal_id to key on, so the new
+  // paths need a key that works for every section. Backfilled from mal_id so
+  // the two agree on existing rows.
+  for (const table of ['wants', 'torrents', 'library_files'] as const) {
+    const cols = new Set(
+      (instance.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name),
+    )
+    if (!cols.has('series_id')) {
+      instance.exec(`ALTER TABLE ${table} ADD COLUMN series_id INTEGER`)
+      instance.exec(`
+        UPDATE ${table} SET series_id = (
+          SELECT s.id FROM series s WHERE s.mal_id = ${table}.mal_id
+        ) WHERE mal_id IS NOT NULL
+      `)
+    }
+  }
+  instance.exec(`CREATE INDEX IF NOT EXISTS idx_wants_series ON wants(series_id)`)
+  instance.exec(`CREATE INDEX IF NOT EXISTS idx_torrents_series ON torrents(series_id)`)
+  instance.exec(`CREATE INDEX IF NOT EXISTS idx_library_files_series ON library_files(series_id)`)
 
   // Additive migration: the suggestions kanban `status` column landed after the
   // table already existed on some deployments. Add it, then backfill from the
@@ -424,6 +560,25 @@ export function upsertSeriesMetadata(
     b_url: base.url ?? null,
   })
   return findByMalId(base.mal_id)!
+}
+
+/**
+ * Set metadata on an existing row by its catalog id.
+ *
+ * The counterpart to upsertSeriesMetadata for rows that have no mal_id to
+ * upsert on — i.e. every TV and movie title. It only ever updates: a TMDB row
+ * is created by the add route, which knows the section and source, and
+ * inventing one here from a metadata refresh would be a way to get a row with
+ * no section.
+ */
+export function updateSeriesMetadataById(id: number, meta: SeriesMetadata): SeriesRow | undefined {
+  const cols = Object.keys(meta).filter((k) => (meta as Record<string, unknown>)[k] !== undefined)
+  if (cols.length === 0) return getSeriesById(id)
+  const assignments = [...cols.map((c) => `${c} = @${c}`), `metadata_updated_at = datetime('now')`]
+  getDb()
+    .prepare(`UPDATE series SET ${assignments.join(', ')} WHERE id = @id`)
+    .run({ ...meta, id })
+  return getSeriesById(id)
 }
 
 /**
@@ -719,20 +874,69 @@ export function setUserProfileAdmin(user_id: string, is_admin: boolean): void {
     .run(is_admin ? 1 : 0, user_id)
 }
 
-export function listSeries(): SeriesRow[] {
+/**
+ * A catalog row from the anime section, where `mal_id` is guaranteed present.
+ *
+ * This exists so the large anime-only surface (sourcing, chases, banners,
+ * aniskip, episode caches — all of which key on a MAL id) keeps a non-null
+ * `mal_id` after the column became nullable, instead of sprouting a hundred
+ * null checks for a case that cannot reach it. Take this type when the code
+ * genuinely only works for anime; take `SeriesRow` when it is section-agnostic.
+ */
+export interface AnimeSeriesRow extends SeriesRow {
+  mal_id: number
+  section: 'anime'
+}
+
+export const isAnimeSeries = (s: SeriesRow): s is AnimeSeriesRow =>
+  s.section === 'anime' && s.mal_id !== null
+
+/** Catalog rows, newest first. Pass a section to scope to one. */
+export function listSeries(section?: PortalSection): SeriesRow[] {
+  const db = getDb()
+  return section
+    ? (db
+        .prepare('SELECT * FROM series WHERE section = ? ORDER BY added_at DESC')
+        .all(section) as SeriesRow[])
+    : (db.prepare('SELECT * FROM series ORDER BY added_at DESC').all() as SeriesRow[])
+}
+
+/**
+ * The anime catalog only. Anime-only callers should use this rather than
+ * filtering `listSeries()` themselves — it is also the guard that stops a TV
+ * release being title-matched against an anime row (and vice versa).
+ */
+export function listAnimeSeries(): AnimeSeriesRow[] {
   return getDb()
-    .prepare('SELECT * FROM series ORDER BY added_at DESC')
-    .all() as SeriesRow[]
+    .prepare(
+      "SELECT * FROM series WHERE section = 'anime' AND mal_id IS NOT NULL ORDER BY added_at DESC",
+    )
+    .all() as AnimeSeriesRow[]
 }
 
 export function insertSeries(
-  row: Pick<SeriesRow, 'mal_id' | 'title' | 'synopsis' | 'image_url' | 'url'>,
+  row: Pick<SeriesRow, 'mal_id' | 'title' | 'synopsis' | 'image_url' | 'url'> &
+    Partial<Pick<SeriesRow, 'section' | 'source' | 'source_id' | 'imdb_id'>>,
 ): SeriesRow {
+  // Defaults keep every existing caller (all of which add anime by mal_id)
+  // working unchanged: an anime row's source_id *is* its mal_id.
+  const section = row.section ?? 'anime'
+  const source = row.source ?? sectionProvider(section)
+  const source_id = row.source_id ?? row.mal_id
+  if (source_id == null) {
+    throw new Error(`Cannot add a ${section} title without a ${source} id`)
+  }
   const stmt = getDb().prepare(`
-    INSERT INTO series (mal_id, title, synopsis, image_url, url)
-    VALUES (@mal_id, @title, @synopsis, @image_url, @url)
+    INSERT INTO series (mal_id, section, source, source_id, imdb_id, title, synopsis, image_url, url)
+    VALUES (@mal_id, @section, @source, @source_id, @imdb_id, @title, @synopsis, @image_url, @url)
   `)
-  const info = stmt.run(row)
+  const info = stmt.run({
+    ...row,
+    section,
+    source,
+    source_id,
+    imdb_id: row.imdb_id ?? null,
+  })
   const id = Number(info.lastInsertRowid)
   return getDb().prepare('SELECT * FROM series WHERE id = ?').get(id) as SeriesRow
 }
@@ -742,10 +946,35 @@ export function deleteSeries(id: number): boolean {
   return r.changes > 0
 }
 
-export function findByMalId(mal_id: number): SeriesRow | undefined {
+export function findByMalId(mal_id: number): AnimeSeriesRow | undefined {
   return getDb().prepare('SELECT * FROM series WHERE mal_id = ?').get(mal_id) as
-    | SeriesRow
+    | AnimeSeriesRow
     | undefined
+}
+
+/**
+ * Look a title up by its provider identity. This is the section-aware
+ * counterpart to findByMalId, and the "is it already in the catalog?" check
+ * the add-title UI needs for TV and movies.
+ */
+export function findBySource(
+  section: PortalSection,
+  source: MetadataProvider,
+  source_id: number,
+): SeriesRow | undefined {
+  return getDb()
+    .prepare('SELECT * FROM series WHERE section = ? AND source = ? AND source_id = ?')
+    .get(section, source, source_id) as SeriesRow | undefined
+}
+
+/** Per-section row counts, for the manage UI's section cards. */
+export function countSeriesBySection(): Record<PortalSection, number> {
+  const rows = getDb()
+    .prepare('SELECT section, COUNT(*) AS n FROM series GROUP BY section')
+    .all() as { section: PortalSection; n: number }[]
+  const counts = { anime: 0, tv: 0, movies: 0 } as Record<PortalSection, number>
+  for (const r of rows) if (r.section in counts) counts[r.section] = r.n
+  return counts
 }
 
 export function getSeriesById(id: number): SeriesRow | undefined {

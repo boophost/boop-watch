@@ -115,14 +115,27 @@ if (rateLimited) {
 
 const toolCalls = []
 let finalResult = ''
+// Whether *claude itself* failed, as opposed to running fine without a browser.
+// Without this the two are indistinguishable downstream, and they have opposite
+// fixes — see the failure branch below.
+let agentError = ''
 for (const line of raw.split('\n')) {
   if (!line.trim()) continue
   let ev
   try { ev = JSON.parse(line) } catch { continue }
   if (ev.type === 'assistant') {
     for (const b of ev.message?.content ?? []) if (b.type === 'tool_use') toolCalls.push(b.name)
+    if (ev.is_api_error_message || ev.error) {
+      const text = (ev.message?.content ?? []).find((b) => b.type === 'text')?.text ?? ''
+      agentError = [ev.error, text].filter(Boolean).join(': ')
+    }
   }
-  if (ev.type === 'result') finalResult = ev.result ?? ''
+  if (ev.type === 'result') {
+    finalResult = ev.result ?? ''
+    if (ev.is_error && !agentError) {
+      agentError = [ev.api_error_status && `HTTP ${ev.api_error_status}`, ev.result].filter(Boolean).join(': ')
+    }
+  }
 }
 
 const usedBrowser = toolCalls.some((t) => t.startsWith('mcp__playwright'))
@@ -134,7 +147,23 @@ console.log('used browser:', usedBrowser)
 console.log('verdict:', JSON.stringify(verdict))
 
 if (!usedBrowser) {
-  console.error('\n❌ The agent never called a browser tool — the Playwright MCP is not loading.')
+  // "No browser tool" has two very different causes and they were previously
+  // reported identically. An expired CLAUDE_CODE_OAUTH_TOKEN produces the exact
+  // same three lines as a genuinely broken MCP — and the old message sent you
+  // debugging Chromium and npx while the real fix was `claude setup-token`.
+  // If the agent never got off the ground, say so and stop guessing.
+  if (agentError) {
+    console.error(`\n❌ The agent could not run at all: ${agentError}`)
+    console.error('   This is NOT a browser problem — claude never reached the point of calling a tool.')
+    if (/not logged in|authentication|unauthor/i.test(agentError)) {
+      console.error('   Fix: mint a fresh token with `claude setup-token` and update the')
+      console.error('   CLAUDE_CODE_OAUTH_TOKEN repo secret (and _2/_3 if you pool accounts).')
+    }
+    process.exit(1)
+  }
+  console.error('\n❌ The agent ran but never called a browser tool — the Playwright MCP is not loading.')
+  console.error('   Check: `npx -y @playwright/mcp@latest --headless` starts and advertises browser_* tools,')
+  console.error('   and that ~/.cache/ms-playwright has the chromium build it expects.')
   if (verdict?.status === 'pass') console.error('   Worse: it PASSED a UI item anyway. That is a false pass.')
   process.exit(1)
 }

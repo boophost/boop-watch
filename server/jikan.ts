@@ -1,15 +1,19 @@
 import { limitedFetch } from './httpQueue.js'
+import { cfgSafe } from './config.js'
 
 // Base URL of the Jikan (MyAnimeList proxy) API. Defaults to the public
 // instance, but in production we point it at our own self-hosted jikan-rest
 // (JIKAN_URL) — the public api.jikan.moe is chronically overloaded and 504s,
 // which used to surface as a hard 502 on the episodes API. See k8s/jikan/.
-const JIKAN_BASE = process.env.JIKAN_URL || 'https://api.jikan.moe/v4'
+const jikanBase = (): string => cfgSafe('JIKAN_URL')
 
 // The self-hosted instance deliberately runs without Typesense, so the indexed
 // `/anime?q=` search 500s there — id-based routes only. Searches go to their
 // own base (JIKAN_SEARCH_URL), which stays the public API unless overridden.
-export const JIKAN_SEARCH_BASE = process.env.JIKAN_SEARCH_URL || 'https://api.jikan.moe/v4'
+// Search falls back to the id-base when unset: a self-hosted Jikan without a
+// Typesense index 500s on /anime?q=, so the two can legitimately differ.
+export const jikanSearchBase = (): string =>
+  cfgSafe('JIKAN_SEARCH_URL') || cfgSafe('JIKAN_URL')
 
 // Jikan allows ~3 req/s; the shared 'jikan' queue serializes every caller
 // (search + detail + episodes on one page load, plus aniskip's chain-walk) so
@@ -57,7 +61,7 @@ export async function searchAnime(
   const q = query.trim()
   if (!q) return []
 
-  const u = new URL(`${JIKAN_SEARCH_BASE}/anime`)
+  const u = new URL(`${jikanSearchBase()}/anime`)
   u.searchParams.set('q', q)
   u.searchParams.set('limit', String(limit))
   u.searchParams.set('order_by', 'popularity')
@@ -129,7 +133,7 @@ function jikanFetchError(res: Response): Error {
 }
 
 export async function fetchAnimeFull(malId: number): Promise<JikanAnimeFull> {
-  const res = await jikanGet(`${JIKAN_BASE}/anime/${malId}/full`)
+  const res = await jikanGet(`${jikanBase()}/anime/${malId}/full`)
   if (!res.ok) throw jikanFetchError(res)
   const json = (await res.json()) as { data?: JikanAnimeFull }
   if (!json.data) throw new Error('No anime data from Jikan')
@@ -140,7 +144,7 @@ export async function fetchAnimeEpisodesPage(
   malId: number,
   page = 1,
 ): Promise<{ episodes: JikanEpisodeRow[]; pagination: JikanEpisodesPagination }> {
-  const u = new URL(`${JIKAN_BASE}/anime/${malId}/episodes`)
+  const u = new URL(`${jikanBase()}/anime/${malId}/episodes`)
   u.searchParams.set('page', String(page))
   const res = await jikanGet(u)
   if (!res.ok) throw jikanFetchError(res)
