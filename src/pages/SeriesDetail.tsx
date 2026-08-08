@@ -566,6 +566,10 @@ export default function SeriesDetail() {
   const id = Number(seriesId)
 
   const [series, setSeries] = useState<SeriesEntry | null>(null)
+  // Anime-only surfaces below (art picker, season mapping, sourcing, MAL
+  // labels) hang off this. The server 409s these routes for a TV/movie row —
+  // rendering them would just produce a page of failed requests.
+  const isAnime = series == null || series.section == null || series.section === 'anime'
   const [mal, setMal] = useState<MalDetail | null>(null)
   const [malError, setMalError] = useState('')
   const [detailLoading, setDetailLoading] = useState(true)
@@ -883,7 +887,7 @@ export default function SeriesDetail() {
 
             {mal?.score != null ? (
               <p className="text-sm">
-                <span className="font-medium text-foreground">MAL score:</span>{' '}
+                <span className="font-medium text-foreground">{isAnime ? 'MAL score:' : 'Score:'}</span>{' '}
                 {mal.score}
               </p>
             ) : null}
@@ -921,24 +925,26 @@ export default function SeriesDetail() {
             ) : null}
 
             <div className="flex flex-wrap gap-2 pt-1">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void retriggerSearch()}
-                disabled={retriggerBusy}
-                title="Re-run the Show-added flow: mint wants for aired-but-missing episodes and chase them"
-              >
-                {retriggerBusy ? (
-                  <Loader2 className="mr-1 size-3.5 animate-spin" />
-                ) : (
-                  <Search className="mr-1 size-3.5 opacity-70" />
-                )}
-                Search now
-              </Button>
+              {isAnime ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void retriggerSearch()}
+                  disabled={retriggerBusy}
+                  title="Re-run the Show-added flow: mint wants for aired-but-missing episodes and chase them"
+                >
+                  {retriggerBusy ? (
+                    <Loader2 className="mr-1 size-3.5 animate-spin" />
+                  ) : (
+                    <Search className="mr-1 size-3.5 opacity-70" />
+                  )}
+                  Search now
+                </Button>
+              ) : null}
               {(mal?.url ?? series.url) ? (
                 <Button variant="outline" size="sm" asChild>
                   <a href={mal?.url ?? series.url!} target="_blank" rel="noreferrer">
-                    MyAnimeList
+                    {isAnime ? 'MyAnimeList' : 'TMDB'}
                     <ExternalLink className="ml-1 size-3.5 opacity-70" />
                   </a>
                 </Button>
@@ -985,10 +991,12 @@ export default function SeriesDetail() {
           ) : null}
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-2">
-          <ArtPicker seriesId={id} kind="banner" />
-          <ArtPicker seriesId={id} kind="poster" />
-        </div>
+        {isAnime ? (
+          <div className="grid gap-6 lg:grid-cols-2">
+            <ArtPicker seriesId={id} kind="banner" />
+            <ArtPicker seriesId={id} kind="poster" />
+          </div>
+        ) : null}
 
         <section>
           <div className="mb-4">
@@ -1088,7 +1096,11 @@ export default function SeriesDetail() {
           ) : null}
 
           {/* Multi-season placement: which Jellyfin season this cour's episodes
-              land in, and the offset added to each release's episode number. */}
+              land in, and the offset added to each release's episode number.
+              Anime only — it maps MAL cours onto TVDB seasons, and its PATCH
+              route 409s for a TV/movie row, whose TMDB seasons already are the
+              library's seasons. */}
+          {isAnime ? (
           <div className="mt-4 rounded-md border border-border bg-muted/20 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-medium text-muted-foreground">Season mapping</h3>
@@ -1168,8 +1180,9 @@ export default function SeriesDetail() {
             )}
             {mapMsg ? <p className="mt-1.5 text-[11px] text-muted-foreground">{mapMsg}</p> : null}
           </div>
+          ) : null}
 
-          <SeasonTitlesPanel id={id} />
+          {isAnime ? <SeasonTitlesPanel id={id} /> : null}
 
           {dl && dl.blacklist.length > 0 ? (
             <div className="mt-4">

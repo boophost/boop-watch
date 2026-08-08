@@ -3,10 +3,15 @@ import { fetchAuth } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Plus, Trash2 } from 'lucide-react'
 import { adminChaseChipLabel, type EpisodeChase } from '@/lib/chase'
+import type { PortalSection } from '@/lib/sections'
 
 export interface SeriesEntry {
   id: number
-  mal_id: number
+  /** Anime only — null for TV and movies. Render via the id badge below. */
+  mal_id: number | null
+  section?: PortalSection
+  source?: 'mal' | 'tmdb'
+  source_id?: number
   title: string
   synopsis: string | null
   image_url: string | null
@@ -23,6 +28,8 @@ export interface SeriesEntry {
 }
 
 interface SeriesListProps {
+  /** Which section is being shown — decides the empty-state wording. */
+  section?: PortalSection
   /** The loaded catalog (owned by the parent so the search bar shares it). */
   series: SeriesEntry[]
   loading: boolean
@@ -32,7 +39,7 @@ interface SeriesListProps {
   onAddClick: () => void
 }
 
-export function SeriesList({ series, loading, onChanged, onAddClick }: SeriesListProps) {
+export function SeriesList({ section = 'anime', series, loading, onChanged, onAddClick }: SeriesListProps) {
   const navigate = useNavigate()
 
   const remove = async (id: number) => {
@@ -52,7 +59,9 @@ export function SeriesList({ series, loading, onChanged, onAddClick }: SeriesLis
         className="flex h-full min-h-[7rem] w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-3 text-muted-foreground outline-none transition-colors hover:border-primary hover:bg-primary/5 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
       >
         <Plus className="size-7" />
-        <span className="text-sm font-medium">Add a series</span>
+        <span className="text-sm font-medium">
+          {section === 'movies' ? 'Add a movie' : section === 'tv' ? 'Add a show' : 'Add a series'}
+        </span>
       </button>
     </li>
   )
@@ -119,7 +128,7 @@ export function SeriesList({ series, loading, onChanged, onAddClick }: SeriesLis
             </div>
             <div className="mt-auto flex items-center justify-between gap-2">
               <span className="text-[10px] text-muted-foreground">
-                MAL #{s.mal_id}
+                {s.mal_id != null ? `MAL #${s.mal_id}` : s.source_id != null ? `TMDB #${s.source_id}` : ''}
               </span>
               <Button
                 type="button"

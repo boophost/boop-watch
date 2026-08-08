@@ -11,11 +11,19 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import type { PortalSection } from '@/lib/sections'
 
-/** A search hit from /api/search/anime (AniList-primary; Jikan fallback fills
- * the extra fields with null). */
-export interface AnimeSearchHit {
-  mal_id: number
+/**
+ * A search hit from `/api/search?section=…`.
+ *
+ * Identity is `(section, source, source_id)` — `mal_id` is anime-only and null
+ * for TV and movies, so everything here keys on `source_id`. For anime the two
+ * are the same number, which is why the anime path keeps working unchanged.
+ */
+export interface TitleSearchHit {
+  source: 'mal' | 'tmdb'
+  source_id: number
+  mal_id: number | null
   title: string
   synopsis: string
   image_url: string | null
@@ -28,6 +36,8 @@ export interface AnimeSearchHit {
 }
 
 interface AddSeriesModalProps {
+  /** Which catalog section to search and add into. */
+  section: PortalSection
   open: boolean
   onOpenChange: (open: boolean) => void
   /** Called after each successful add so the catalog can refresh behind the modal. */
@@ -36,14 +46,14 @@ interface AddSeriesModalProps {
   initialQuery?: string
 }
 
-export function AddSeriesModal({ open, onOpenChange, onAdded, initialQuery = '' }: AddSeriesModalProps) {
+export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQuery = '' }: AddSeriesModalProps) {
   const [q, setQ] = useState(initialQuery)
-  const [results, setResults] = useState<AnimeSearchHit[]>([])
+  const [results, setResults] = useState<TitleSearchHit[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [selectedMal, setSelectedMal] = useState<number | null>(null)
-  const [addedMals, setAddedMals] = useState<Set<number>>(new Set())
-  const [addingMal, setAddingMal] = useState<number | null>(null)
+  const [selectedId, setSelectedMal] = useState<number | null>(null)
+  const [addedIds, setAddedMals] = useState<Set<number>>(new Set())
+  const [addingId, setAddingMal] = useState<number | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Reset transient state each time the modal opens; seed the query.
@@ -74,14 +84,14 @@ export function AddSeriesModal({ open, onOpenChange, onAdded, initialQuery = '' 
         setLoading(true)
         setError('')
         try {
-          const r = await fetchAuth(`/api/search/anime?q=${encodeURIComponent(t)}`)
-          const raw = await parseAuthJson<{ results?: AnimeSearchHit[]; error?: string }>(r)
+          const r = await fetchAuth(`/api/search?section=${section}&q=${encodeURIComponent(t)}`)
+          const raw = await parseAuthJson<{ results?: TitleSearchHit[]; error?: string }>(r)
           if (!r.ok) throw new Error(raw.error ?? 'Search failed')
           const hits = raw.results ?? []
           setResults(hits)
           // Auto-select the first addable hit so the detail panel isn't empty.
           setSelectedMal((cur) =>
-            cur != null && hits.some((h) => h.mal_id === cur) ? cur : (hits[0]?.mal_id ?? null),
+            cur != null && hits.some((h) => h.source_id === cur) ? cur : (hits[0]?.source_id ?? null),
           )
         } catch (e) {
           setError(e instanceof Error ? e.message : 'Search failed')
@@ -92,16 +102,16 @@ export function AddSeriesModal({ open, onOpenChange, onAdded, initialQuery = '' 
       })()
     }, 380)
     return () => window.clearTimeout(id)
-  }, [q, open])
+  }, [q, open, section])
 
   const selected = useMemo(
-    () => results.find((h) => h.mal_id === selectedMal) ?? null,
-    [results, selectedMal],
+    () => results.find((h) => h.source_id === selectedId) ?? null,
+    [results, selectedId],
   )
 
-  const isAdded = (h: AnimeSearchHit) => h.inCatalog || addedMals.has(h.mal_id)
+  const isAdded = (h: TitleSearchHit) => h.inCatalog || addedIds.has(h.source_id)
 
-  const addSeries = async (hit: AnimeSearchHit) => {
+  const addSeries = async (hit: TitleSearchHit) => {
     if (isAdded(hit)) return
     setAddingMal(hit.mal_id)
     setError('')
@@ -110,7 +120,8 @@ export function AddSeriesModal({ open, onOpenChange, onAdded, initialQuery = '' 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mal_id: hit.mal_id,
+          section,
+          source_id: hit.source_id,
           title: hit.title,
           synopsis: hit.synopsis,
           image_url: hit.image_url,
@@ -120,11 +131,11 @@ export function AddSeriesModal({ open, onOpenChange, onAdded, initialQuery = '' 
       const raw = await parseAuthJson<{ error?: string }>(r)
       if (r.status === 409) {
         // Already added elsewhere — treat as added.
-        setAddedMals((s) => new Set(s).add(hit.mal_id))
+        setAddedMals((s) => new Set(s).add(hit.source_id))
         return
       }
       if (!r.ok) throw new Error(raw.error ?? 'Could not add')
-      setAddedMals((s) => new Set(s).add(hit.mal_id))
+      setAddedMals((s) => new Set(s).add(hit.source_id))
       onAdded?.()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not add')
@@ -133,7 +144,7 @@ export function AddSeriesModal({ open, onOpenChange, onAdded, initialQuery = '' 
     }
   }
 
-  const meta = (h: AnimeSearchHit) =>
+  const meta = (h: TitleSearchHit) =>
     [h.year, h.type, h.episodes != null ? `${h.episodes} ep` : null].filter(Boolean).join(' · ')
 
   return (
@@ -180,17 +191,17 @@ export function AddSeriesModal({ open, onOpenChange, onAdded, initialQuery = '' 
                 {results.map((h) => {
                   const added = isAdded(h)
                   return (
-                    <li key={h.mal_id}>
+                    <li key={h.source_id}>
                       <button
                         type="button"
                         onClick={() => setSelectedMal(h.mal_id)}
                         className={cn(
                           'group relative block w-full overflow-hidden rounded-md border text-left transition-colors',
-                          selectedMal === h.mal_id
+                          selectedId === h.source_id
                             ? 'border-primary ring-2 ring-primary'
                             : 'border-border hover:border-muted-foreground',
                         )}
-                        aria-pressed={selectedMal === h.mal_id}
+                        aria-pressed={selectedId === h.source_id}
                         title={h.title}
                       >
                         <div className="aspect-[2/3] w-full bg-muted">
@@ -256,9 +267,9 @@ export function AddSeriesModal({ open, onOpenChange, onAdded, initialQuery = '' 
                       type="button"
                       className="w-full gap-1"
                       onClick={() => void addSeries(selected)}
-                      disabled={addingMal === selected.mal_id}
+                      disabled={addingId === selected.mal_id}
                     >
-                      {addingMal === selected.mal_id ? (
+                      {addingId === selected.mal_id ? (
                         <Loader2 className="size-4 animate-spin" />
                       ) : (
                         <Plus className="size-4" />
