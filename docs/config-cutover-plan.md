@@ -72,9 +72,8 @@ Same as prod except: `JELLYFIN_URL=http://jellyfin-dev.link-apps`, `LIBRARY_DIR=
 - **Prod has no `QBIT_USERNAME` / `QBIT_PASSWORD`.** It authenticates only via qBittorrent's subnet
   whitelist. That is what made #327 a total outage when the whitelist stopped matching. Setting real
   credentials removes the single point of failure.
-- **`LIBRARY_DIR_TV` / `LIBRARY_DIR_MOVIES` are unset everywhere**, falling back to `/library-tv` and
-  `/library-movies`, which do not exist. `/api/sections` reports `jellyfinMatch: null` for both.
-  Sections Phase 6 needs these.
+- ~~`LIBRARY_DIR_TV` / `LIBRARY_DIR_MOVIES` are unset everywhere~~ — **done 2026-08-08**, and they
+  are the first two values to live in the database rather than in `link`. See "Library layout" below.
 - **Prod and staging share one `CONFIG_KEY`** (fingerprint `f0a27b5e6f8f`). Works, but the
   environments are not cryptographically isolated — a leaked dev key decrypts prod's secrets.
   Rotating prod to its own key is a good idea; see "Rotating CONFIG_KEY" below.
@@ -179,3 +178,34 @@ Losing the key without re-entering means every stored secret is unrecoverable. K
 - The public portal serves normally, and `/manage/settings` shows no decrypt errors.
 - Changing a value on the page takes effect **without a redeploy** — demonstrate it once, because
   that is the entire point of the exercise.
+
+
+## Library layout (settled 2026-08-08)
+
+Each section has **its own Jellyfin library**. Confirmed against both servers, and the section
+collections were checked by *membership*, not by name — dev’s are labelled oddly ("TV Broadcast
+Prohibited", "Motu Patlu Movies") but contain exactly the right titles, so the labels are cosmetic.
+
+| | prod library | prod path | staging library | staging path |
+|---|---|---|---|---|
+| anime | `Anime` (tvshows) | `/data/anime` | `Shows` (tvshows) | `/data/anime-dev` |
+| tv | `Shows` (tvshows) | `/data/tv` | *(none yet)* | `/data/tv-dev` |
+| movies | `Movies` (movies) | `/data/movies` | `Movies` (movies) | `/data/movies-dev` |
+
+Prod also has an **`Anime Movies`** library at `/data/anime-movies`, which no section maps to today.
+
+`LIBRARY_DIR_TV` and `LIBRARY_DIR_MOVIES` are now set **in the database** on both environments, and
+`/api/sections` matches all three prod sections to a real library by `basis: "path"`.
+
+**Staging shares the same media NFS as production.** `/data/tv` and `/data/movies` are visible from
+the staging pod, so pointing staging at them would make a staging import write into production’s
+library. Staging therefore uses the `-dev` convention throughout; `/data/tv-dev` was created for
+this (it did not exist), mirroring `anime-dev` and `movies-dev`.
+
+**Outstanding:** staging’s Jellyfin has no library pointing at `/data/tv-dev`, so `/api/sections`
+reports `jellyfin: null` for its TV section and Jellyfin will not serve anything imported there.
+Add one (type: Shows) before testing a TV import end to end on staging. Prod needs nothing.
+
+Verified after the change: prod’s anime import dry run is unchanged (still resolves
+`mal 59970 → tvdb 352408 S4`, matches an indexer title, expands a file), and the public portal
+serves 37 items across all three sections.
