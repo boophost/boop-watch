@@ -85,7 +85,10 @@ async function main() {
           stdio: 'inherit',
           env: {
             ...process.env,
-            BASE_URL: 'http://boop-watch-dev.link-apps.svc.cluster.local',
+            // The runner is a process on the k3s node, not a pod, so it has no
+            // CoreDNS resolver and *.svc.cluster.local resolves to nothing.
+            // Staging's own IngressRoute is reachable from anywhere.
+            BASE_URL: process.env.QA_STAGING_URL || 'https://dev-watch.boopurno.es',
             QA_REFRESH_PROMOTION: '0' // don't refresh after each PR, we do it at the end
           }
         })
