@@ -32,7 +32,7 @@ import { listAnimeSeries, markTorrentsCompleted } from './db.js'
 import { sourcingReconcile, sourcingSweep, qbitReconcileUnsafe } from './sourcing.js'
 import { getAllPortalItems } from './portalDb.js'
 import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
-import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
+import { scheduleTz, libraryAirings } from './schedule.js'
 import type { FlowItem, TriggerKind } from './flowNodes.js'
 
 const DAY_INDEX: Record<WeekDay, number> = {
@@ -44,7 +44,7 @@ const DAY_INDEX: Record<WeekDay, number> = {
 // stable regardless of the runtime's own timezone.
 function localParts(date: Date) {
   const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone: SCHEDULE_TZ,
+    timeZone: scheduleTz(),
     hourCycle: 'h23',
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   })

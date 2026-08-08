@@ -12,6 +12,11 @@
 // only wants to know a section's metadata provider (db.ts, for one, which
 // jellyfin.ts already depends on transitively via sync.ts).
 import { PORTAL_SECTIONS, type PortalSection } from './portalDb.js'
+// Import cycle, deliberate and safe: db.ts → sections.ts → config.ts → db.ts.
+// It resolves because `getDb` is a hoisted function *declaration* and nothing
+// here calls it during module evaluation. Keep it that way — a top-level
+// cfg()/getDb() call in any of these three modules would break the cycle.
+import { cfgSafe } from './config.js'
 
 /**
  * Which external catalog owns a title's identity in a section.
@@ -50,10 +55,13 @@ const MOVIE_TEMPLATE = '{show} ({production_year})/{show} ({production_year})'
 // of it rather than to /library, because in practice all three libraries live
 // on the same media NFS and a wrong default that *looks* plausible is worse
 // than one that is obviously unset.
+// Read through cfg() so /manage/settings can own these, and read *per call* so
+// a change takes effect without a pod roll. cfgSafe falls back to the spec
+// default rather than throwing on a hot path.
 const LIBRARY_ROOTS: Record<PortalSection, () => string> = {
-  anime: () => process.env.LIBRARY_DIR ?? '/library',
-  tv: () => process.env.LIBRARY_DIR_TV ?? '/library-tv',
-  movies: () => process.env.LIBRARY_DIR_MOVIES ?? '/library-movies',
+  anime: () => cfgSafe('LIBRARY_DIR'),
+  tv: () => cfgSafe('LIBRARY_DIR_TV'),
+  movies: () => cfgSafe('LIBRARY_DIR_MOVIES'),
 }
 
 const SECTION_DEFS: Record<PortalSection, Omit<SectionConfig, 'libraryRoot'>> = {

@@ -10,12 +10,15 @@
 // TMDB does not publish a hard rate limit any more (the old 40 req/10s cap was
 // retired) but it does still 429; the queue's Retry-After handling covers it.
 import { limitedFetch } from './httpQueue.js'
+import { cfgSafe } from './config.js'
 
-const TMDB_URL = (process.env.TMDB_URL || 'https://api.themoviedb.org/3').replace(/\/+$/, '')
-const KEY = process.env.TMDB_API_KEY ?? ''
+// Read per call, not once at import: these are editable from /manage/settings,
+// and a module-scope constant would pin whatever was set when the pod started.
+const tmdbBase = (): string => cfgSafe('TMDB_URL').replace(/\/+$/, '')
+const key = (): string => cfgSafe('TMDB_API_KEY')
 
 /** Unset ⇒ every TV/movie metadata route reports itself unavailable, loudly. */
-export const tmdbConfigured = Boolean(KEY)
+export const tmdbConfigured = (): boolean => key() !== ''
 
 // TMDB serves images off a separate CDN host, sized by path segment. w500 is
 // the poster size the /manage grid renders at; original would be ~10x the bytes
@@ -30,7 +33,7 @@ export const tmdbBackdrop = (p: string | null | undefined, size = 'w1280'): stri
 export type TmdbKind = 'tv' | 'movie'
 
 function tmdbUrl(path: string, query: Record<string, string | number | undefined> = {}): URL {
-  const u = new URL(TMDB_URL + (path.startsWith('/') ? path : '/' + path))
+  const u = new URL(tmdbBase() + (path.startsWith('/') ? path : '/' + path))
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null && v !== '') u.searchParams.set(k, String(v))
   }
@@ -38,18 +41,21 @@ function tmdbUrl(path: string, query: Record<string, string | number | undefined
   // token as a Bearer header. Accept whichever the operator pasted in rather
   // than making them care which page of the TMDB settings they copied from:
   // v4 tokens are JWTs, v3 keys are 32 hex chars.
-  if (!isBearerToken()) u.searchParams.set('api_key', KEY)
+  if (!isBearerToken()) u.searchParams.set('api_key', key())
   return u
 }
 
-const isBearerToken = (): boolean => KEY.startsWith('ey') && KEY.split('.').length === 3
+const isBearerToken = (): boolean => {
+  const k = key()
+  return k.startsWith('ey') && k.split('.').length === 3
+}
 
 async function tmdbJson<T>(path: string, query: Record<string, string | number | undefined> = {}): Promise<T> {
-  if (!tmdbConfigured) {
+  if (!tmdbConfigured()) {
     throw new Error('TMDB is not configured — set TMDB_API_KEY to manage the TV and Movies sections')
   }
   const headers: Record<string, string> = { Accept: 'application/json' }
-  if (isBearerToken()) headers.Authorization = `Bearer ${KEY}`
+  if (isBearerToken()) headers.Authorization = `Bearer ${key()}`
   const res = await limitedFetch('tmdb', tmdbUrl(path, query), { headers })
   if (!res.ok) {
     // TMDB puts a human-readable reason in status_message; surfacing it turns

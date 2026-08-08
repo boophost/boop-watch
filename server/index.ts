@@ -47,6 +47,8 @@ import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
 import { posthogUiHostEffective } from './posthogConfig.js'
 import { deleteUser, listAllUsers, setUserAdmin, isAdminViaEnv, isAdminForUserId } from './users.js'
+import { cfgSafe } from './config.js'
+import { sectionLibraryRoot } from './sections.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -57,8 +59,8 @@ const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
 // The qBittorrent category the code-built research flow queues into. Saved flows
 // carry their own category; this is for the one graph we construct in code, so a
 // dev instance sharing qBit with prod doesn't queue into prod's category. Set
-// QBIT_CATEGORY=anime-dev on staging; default 'anime' is prod-correct.
-const QBIT_CATEGORY = process.env.QBIT_CATEGORY || 'anime'
+// qbitCategory()=anime-dev on staging; default 'anime' is prod-correct.
+const qbitCategory = (): string => cfgSafe('qbitCategory()') || 'anime'
 const AUTH_USERNAME = process.env.AUTH_USERNAME ?? 'admin'
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD ?? 'changeme'
 // .trim() guards against stray whitespace in the env value — untrimmed, a
@@ -893,7 +895,7 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
 // `missing` rows point at a file that is gone; `rewritten` ones at a file whose
 // inode changed under us (a trim/mux re-encode landing as a copy).
 app.get('/api/library/ledger', requireAuth, requireAdmin, (_req, res) => {
-  const root = process.env.LIBRARY_DIR ?? '/library'
+  const root = sectionLibraryRoot('anime')
   const rows = seriesDb.listLibraryFiles()
   const onDisk = new Set<string>()
   const walk = (dir: string) => {
@@ -1099,7 +1101,7 @@ function buildResearchGraph(seriesId: number, query: string): FlowGraph {
       { id: 'tpl', type: 'transform.template', position: { x: 520, y: 0 }, config: { field: 'torrent_query', template: query } },
       { id: 'st', type: 'enrich.anime-status', position: { x: 780, y: 0 }, config: { malField: 'mal_id', maxItems: 0 } },
       { id: 'tor', type: 'enrich.torrent-search', position: { x: 1040, y: 0 }, config: { provider: 'tsukihime', queryField: 'torrent_query', mode: 'auto', resolution: '1080p', requireResolution: false, maxResolution: '1080p', preferDualAudio: true, requireDualAudio: false, excludeCodecs: 'av1', minSeeders: 0, minTitleMatch: 0.4, maxEpisodes: 26, maxItems: 0 } },
-      { id: 'qb', type: 'sink.qbittorrent', position: { x: 1300, y: 0 }, config: { urlField: 'torrent_magnet', category: QBIT_CATEGORY, savepath: '', paused: false } },
+      { id: 'qb', type: 'sink.qbittorrent', position: { x: 1300, y: 0 }, config: { urlField: 'torrent_magnet', category: qbitCategory(), savepath: '', paused: false } },
     ],
     edges: [
       { id: 'e1', source: 'idx', sourceHandle: 'items', target: 'pick', targetHandle: 'in' },
@@ -1636,7 +1638,7 @@ app.get('/config.js', (req, res) => {
   res.send(`window.ENV = {
     SUPABASE_URL: ${JSON.stringify(SUPABASE_URL)},
     SUPABASE_ANON_KEY: ${JSON.stringify(SUPABASE_ANON_KEY)},
-    POSTHOG_KEY: ${JSON.stringify(process.env.POSTHOG_KEY || '')},
+    POSTHOG_KEY: ${JSON.stringify(cfgSafe('POSTHOG_KEY'))},
     POSTHOG_UI_HOST: ${JSON.stringify(posthogUiHostEffective())}
   };`)
 })

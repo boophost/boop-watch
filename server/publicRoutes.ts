@@ -168,7 +168,7 @@ publicRouter.get('/health', (_req, res) => { res.type('text').send('ok') })
 
 // Fail every portal route cleanly (not at boot) when Jellyfin isn't configured.
 function ensureConfigured(res: Response): boolean {
-  if (jellyfinConfigured) return true
+  if (jellyfinConfigured()) return true
   res.status(503).json({ error: 'Jellyfin not configured' })
   return false
 }

@@ -156,7 +156,7 @@ async function fetchJellyfinEpisodeTitles(
     episode_offset?: number | null
   },
 ): Promise<{ number: number; title: string; title_japanese: string | null }[]> {
-  if (!jellyfinConfigured) return []
+  if (!jellyfinConfigured()) return []
   try {
     const jfSeriesId = await resolveJfSeriesId(series)
     if (!jfSeriesId) return []

@@ -3,7 +3,9 @@
 // show progress and remove torrents. The flow sink node has its own inline
 // client because its connection is configurable per-node.
 
-const base = (): string => (process.env.QBIT_URL ?? '').replace(/\/$/, '')
+import { cfgSafe } from './config.js'
+
+const base = (): string => cfgSafe('QBIT_URL').replace(/\/$/, '')
 
 export function qbitConfigured(): boolean {
   return Boolean(base())
@@ -71,8 +73,8 @@ async function login(): Promise<string> {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      username: process.env.QBIT_USERNAME ?? 'admin',
-      password: process.env.QBIT_PASSWORD ?? '',
+      username: cfgSafe('QBIT_USERNAME') || 'admin',
+      password: cfgSafe('QBIT_PASSWORD'),
     }),
     signal: AbortSignal.timeout(15_000),
   })

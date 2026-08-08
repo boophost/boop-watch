@@ -5,11 +5,13 @@
 // Needs a free personal API key (FANART_API_KEY). Unset ⇒ every lookup is a
 // no-op, exactly like JIMAKU_API_KEY: the other banner sources still work.
 import { limitedFetch } from './httpQueue.js'
+import { cfgSafe } from './config.js'
 
-const FANART_URL = (process.env.FANART_URL || 'https://webservice.fanart.tv/v3').replace(/\/+$/, '')
-const KEY = process.env.FANART_API_KEY
+const fanartBase = (): string =>
+  (cfgSafe('FANART_URL') || 'https://webservice.fanart.tv/v3').replace(/\/+$/, '')
+const fanartKey = (): string => cfgSafe('FANART_API_KEY')
 
-export const fanartConfigured = Boolean(KEY)
+export const fanartConfigured = (): boolean => fanartKey() !== ''
 
 export interface FanartImage {
   url: string
@@ -66,9 +68,9 @@ const EMPTY: FanartArtSets = { backgrounds: [], seasonThumbs: [], posters: [], s
  * yields empty sets rather than throwing.
  */
 export async function fetchFanartArt(tvdbId: number): Promise<FanartArtSets> {
-  if (!KEY) return EMPTY
+  if (!fanartKey()) return EMPTY
   try {
-    const res = await limitedFetch('fanart', `${FANART_URL}/tv/${tvdbId}?api_key=${encodeURIComponent(KEY)}`, {
+    const res = await limitedFetch('fanart', `${fanartBase()}/tv/${tvdbId}?api_key=${encodeURIComponent(fanartKey())}`, {
       headers: { Accept: 'application/json' },
     })
     if (!res.ok) return EMPTY
