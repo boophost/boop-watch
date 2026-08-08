@@ -3,6 +3,8 @@
 // are actually configured via /api/catalog's `sections`.
 
 export type Section = 'anime' | 'tv' | 'movies'
+/** Server-side spelling; same union. */
+export type PortalSection = Section
 
 export const SECTION_LABELS: Record<Section, string> = {
   anime: 'Anime',
@@ -24,3 +26,7 @@ export function sectionFromPath(pathname: string): Section | null {
   if (pathname === '/movies') return 'movies'
   return null
 }
+
+/** Narrow an arbitrary string (a URL param) to a Section. */
+export const isSection = (s: string): s is Section =>
+  s === 'anime' || s === 'tv' || s === 'movies'
