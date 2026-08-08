@@ -79,8 +79,17 @@ async function login(): Promise<string> {
     signal: AbortSignal.timeout(15_000),
   })
   const cookie = res.headers.get('set-cookie')?.split(';')[0]
-  if (!res.ok || !cookie || !(await res.text()).includes('Ok')) {
-    throw new Error('qBittorrent login failed')
+  // A credentialed login answers 200 "Ok."; a request that qBittorrent accepts
+  // via its WebUI subnet whitelist answers 204 with an EMPTY body. Demanding
+  // "Ok." rejected the second case, so a correctly-bypassed client reported
+  // "login failed" while holding a perfectly good session cookie. The cookie is
+  // the thing we actually need, so require that — and only insist on "Ok." when
+  // there is a body to inspect.
+  const body = await res.text()
+  if (!res.ok || !cookie || (body.trim() !== '' && !body.includes('Ok'))) {
+    throw new Error(
+      `qBittorrent login failed (HTTP ${res.status}${body.trim() ? `: ${body.trim().slice(0, 80)}` : ''})`,
+    )
   }
   return cookie
 }
