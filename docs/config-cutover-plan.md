@@ -188,9 +188,19 @@ Prohibited", "Motu Patlu Movies") but contain exactly the right titles, so the l
 
 | | prod library | prod path | staging library | staging path |
 |---|---|---|---|---|
-| anime | `Anime` (tvshows) | `/data/anime` | `Shows` (tvshows) | `/data/anime-dev` |
-| tv | `Shows` (tvshows) | `/data/tv` | *(none yet)* | `/data/tv-dev` |
+| anime | `Anime` (tvshows) | `/data/anime` | `Anime` (tvshows) | `/data/anime-dev` |
+| tv | `Shows` (tvshows) | `/data/tv` | `Shows` (tvshows) | `/data/tv-dev` |
 | movies | `Movies` (movies) | `/data/movies` | `Movies` (movies) | `/data/movies-dev` |
+
+The two environments now mirror each other, name for name. Staging previously had **no TV library**
+and called its *anime* library `Shows` — the same name prod uses for **TV**, which is precisely the
+kind of inconsistency that makes someone debug the wrong library. Fixed 2026-08-08 by renaming
+staging's `Shows` → `Anime` and creating a new `Shows` at `/data/tv-dev`.
+
+**The rename was the risky half** — if Jellyfin had re-scanned and re-issued item ids, the section
+BoxSets would have lost their members and the portal would have emptied. Membership was snapshotted
+before and after: anime 2, tv 1, movies 6, **identical item ids either side**. Both operations
+returned 204 and needed no restart.
 
 Prod also has an **`Anime Movies`** library at `/data/anime-movies`, which no section maps to today.
 
@@ -202,9 +212,8 @@ the staging pod, so pointing staging at them would make a staging import write i
 library. Staging therefore uses the `-dev` convention throughout; `/data/tv-dev` was created for
 this (it did not exist), mirroring `anime-dev` and `movies-dev`.
 
-**Outstanding:** staging’s Jellyfin has no library pointing at `/data/tv-dev`, so `/api/sections`
-reports `jellyfin: null` for its TV section and Jellyfin will not serve anything imported there.
-Add one (type: Shows) before testing a TV import end to end on staging. Prod needs nothing.
+All six sections across both environments now report `jellyfinMatch: "path"` — a real library at a
+real path, matched on the path rather than guessed from the collection type.
 
 Verified after the change: prod’s anime import dry run is unchanged (still resolves
 `mal 59970 → tvdb 352408 S4`, matches an indexer title, expands a file), and the public portal
