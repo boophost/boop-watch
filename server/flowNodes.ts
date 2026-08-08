@@ -56,7 +56,7 @@ import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
 import { deriveInterface, buildSpecResolver } from './flowComponents.js'
 import { cfgSafe, cfgNum, CONFIG_SPEC, isKnownConfigKey, isSecretKey } from './config.js'
-import { sectionLibraryRoot } from './sections.js'
+import { sectionLibraryRoot, sectionConfig } from './sections.js'
 
 const execFileP = promisify(execFile)
 
@@ -5119,7 +5119,19 @@ const libraryImport: NodeImpl = {
     ],
     config: [
       { key: 'fileField', label: 'Video file field', kind: 'text', default: 'file_path' },
-      { key: 'libraryRoot', label: 'Library root', kind: 'text', default: '', help: 'Destination library dir. Empty = LIBRARY_DIR env (/library).' },
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+        ],
+        default: 'anime',
+        help: 'Picks the destination library and the default path layout for that section (movies get a flat folder, no Season NN).',
+      },
+      { key: 'libraryRoot', label: 'Library root (override)', kind: 'text', default: '', help: 'Empty = the section’s configured library path from /manage/settings.' },
       {
         key: 'pathTemplate',
         label: 'Path template',
@@ -5146,10 +5158,14 @@ const libraryImport: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const fileField = str(config, 'fileField', 'file_path')
-    const root = str(config, 'libraryRoot', '') || LIBRARY_DIR()
-    // Keep this fallback identical to the spec's pathTemplate default so a node
-    // that doesn't set it still gets the full Jellyfin layout.
-    const tpl = str(config, 'pathTemplate', '{show} ({production_year})/Season {season:2}/{show} - S{season:2}E{torrent_episode:2}')
+    // Explicit override wins; otherwise the section's own root. Reading it per
+    // run (not at import) is what lets /manage/settings change it live.
+    const importSection = (str(config, 'section', 'anime') || 'anime') as PortalSection
+    const root = str(config, 'libraryRoot', '') || sectionLibraryRoot(importSection)
+    // Fall back to the *section's* layout, not a hardcoded one: a movie has no
+    // Season NN level, and defaulting it into one would bury every film a
+    // folder deep and hide it from Jellyfin's movie scanner.
+    const tpl = str(config, 'pathTemplate', '') || sectionConfig(importSection).pathTemplate
     const showField = str(config, 'showField', 'title')
     const defaultSeason = num(config, 'defaultSeason', 1)
     const method = str(config, 'method', 'hardlink')
