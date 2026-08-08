@@ -31,9 +31,9 @@ async function toDraft(pr) {
   })
 }
 
-/** Fire a workflow_dispatch. */
-const dispatch = (workflow, ref, inputs) =>
-  ghApi('POST', `/repos/${REPO}/actions/workflows/${workflow}/dispatches`, { ref, inputs })
+/** Fire a workflow_dispatch on a branch. */
+const dispatch = (workflow, ref) =>
+  ghApi('POST', `/repos/${REPO}/actions/workflows/${workflow}/dispatches`, { ref })
 
 async function main() {
   const prNumber = process.argv[2]
@@ -115,9 +115,11 @@ async function main() {
     // After all PRs are QA'd, trigger the promotion refresh manually once.
     console.log('Triggering promotion refresh...')
     try {
-      // `ref` is the git ref the workflow runs on (its default branch), and the
-      // `ref` *input* is the branch it summarises — they are not the same thing.
-      await dispatch('rolling-dev-main-pr.yml', 'main', { ref: 'dev' })
+      // rolling-dev-main-pr.yml declares a bare `workflow_dispatch` with no
+      // inputs, so `ref` here is the git ref to run on — dev, the branch it
+      // summarises. Passing an input named `ref` (as the old `gh workflow run
+      // -f ref=dev` did) is a 422: "Unexpected inputs provided: [\"ref\"]".
+      await dispatch('rolling-dev-main-pr.yml', 'dev')
     } catch (e) {
       console.error('Failed to trigger refresh:', e.message)
     }
