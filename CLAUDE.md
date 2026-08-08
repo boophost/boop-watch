@@ -406,6 +406,10 @@ was its identity. It now holds all three sections, so:
   code should use `series_id`. Converging them is future cleanup, not an invitation to do it inline.
 - **Per-section facts come from `sectionConfig()`** in `server/sections.ts` (provider, library root,
   import path template) — never from `process.env` at the call site.
+- **Section-aware flow nodes.** `enrich.indexer-match`, `enrich.metadata`, `source.jellyfin` and
+  `sink.library-import` each take a `section` config, **defaulting to `anime`** so existing saved
+  graphs are unaffected. The indexer-match one is load-bearing: unscoped, a TV release can
+  token-match an anime row and the import files a real video into the wrong library, silently.
 - **Metadata goes through `clientForSection()`** (`server/metadata/`), not a direct AniList/Jikan or
   TMDB call. `mal.ts` also owns `resolveCatalog()` — `enrich.metadata` in `flowNodes.ts` imports it
   from there, so there is one anime-metadata path, not two.
