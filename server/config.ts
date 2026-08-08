@@ -113,6 +113,17 @@ export const CONFIG_SPEC: ConfigFieldSpec[] = [
   // --- Scheduling -----------------------------------------------------------
   { key: 'SCHEDULE_TZ', label: 'Schedule timezone', group: 'Scheduling',
     help: 'Defaults to TZ, else America/New_York.' },
+
+  // --- Flow scratch ---------------------------------------------------------
+  // Managing WORK_DIR here is the fix for #224: a live-set env var gets
+  // reverted by a link redeploy, silently putting multi-GB scratch back on the
+  // small node PVC. A database row survives the redeploy.
+  { key: 'WORK_DIR', label: 'Flow scratch directory', group: 'Flow scratch',
+    help: 'Must be on the media NFS (e.g. /data/.boopwork), not the node PVC — extract/mux write multi-GB files here. Empty falls back to DATA_DIR.' },
+  { key: 'WORK_MIN_GIB', label: 'Minimum free space (GiB)', group: 'Flow scratch', default: '10',
+    help: 'Startup refuses to run scratch-writing flows below this, so a misconfigured scratch dir fails loudly at deploy rather than filling the node.' },
+  { key: 'WORK_TTL_HOURS', label: 'Scratch retention (hours)', group: 'Flow scratch',
+    help: 'How long work directories survive before pruning.' },
 ]
 
 const SPEC_BY_KEY = new Map(CONFIG_SPEC.map((f) => [f.key, f]))
