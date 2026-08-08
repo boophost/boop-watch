@@ -1,0 +1,49 @@
+name: Deploy watchdog
+
+# Safety net for the self-hosted deploy jobs. `deploy` / `deploy-dev` must run
+# on the in-cluster runner (the k3s API is LAN-only), so they depend on
+# GitHub's job broker reaching it. When the broker degrades, the job sits
+# queued and is eventually cancelled — the image was built and pushed, but the
+# Deployment never rolled, and no check goes red. This ticks every 15 minutes
+# and re-runs a deploy job that built an image but never rolled it.
+#
+# Runs on a GitHub-hosted runner on purpose: it only talks to the REST API, so
+# it must not depend on the very runner whose unreachability it exists to
+# repair.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report what it would re-run, without re-running it
+        type: boolean
+        default: false
+
+# Never let two ticks race on re-running the same job.
+concurrency:
+  group: deploy-watchdog
+  cancel-in-progress: false
+
+permissions:
+  actions: write # read run/job state, and re-run a stalled deploy job
+  contents: read
+
+jobs:
+  watchdog:
+    if: github.repository == 'boophost/boop-watch'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check for stalled deploys
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/deploy-watchdog.mjs ${{ inputs.dry_run && '--dry-run' || '' }}
