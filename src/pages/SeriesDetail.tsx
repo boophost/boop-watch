@@ -1096,7 +1096,11 @@ export default function SeriesDetail() {
           ) : null}
 
           {/* Multi-season placement: which Jellyfin season this cour's episodes
-              land in, and the offset added to each release's episode number. */}
+              land in, and the offset added to each release's episode number.
+              Anime only — it maps MAL cours onto TVDB seasons, and its PATCH
+              route 409s for a TV/movie row, whose TMDB seasons already are the
+              library's seasons. */}
+          {isAnime ? (
           <div className="mt-4 rounded-md border border-border bg-muted/20 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-medium text-muted-foreground">Season mapping</h3>
@@ -1176,6 +1180,7 @@ export default function SeriesDetail() {
             )}
             {mapMsg ? <p className="mt-1.5 text-[11px] text-muted-foreground">{mapMsg}</p> : null}
           </div>
+          ) : null}
 
           {isAnime ? <SeasonTitlesPanel id={id} /> : null}
 
