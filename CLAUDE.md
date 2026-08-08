@@ -38,6 +38,7 @@ server/                 # Express backend (TypeScript, ESM)
   watch.ts, schedule.ts # player stream-info; animeschedule scraper + library matcher
   db.ts, jikan.ts       # series.sqlite + Jikan/MAL client (the /manage admin)
   config.ts             # DB-backed app config (CONFIG_SPEC + cfg()); read this before process.env
+  configRefs.ts         # {{config.KEY}} in node config + the run-report secret redactor
   sections.ts           # per-section registry: metadata provider, library root, path template
   tmdb.ts, metadata/    # TMDB client (TV+movies) + the MetadataClient interface over mal/tmdb
 Dockerfile              # multi-stage node:22-alpine; builds dist + dist-server
@@ -225,6 +226,24 @@ never read as "unset", or a key rotation looks like an unconfigured provider.
 **Bootstrap vars stay in env** and are deliberately absent from `CONFIG_SPEC`: `DATA_DIR`,
 `DATABASE_PATH`, `PORT`, `NODE_ENV`, `JWT_SECRET`, `SUPABASE_*`, `CONFIG_KEY` — each is needed
 before the database, or before the login guarding the settings page, exists.
+
+**Flows read config two ways, and the difference is about secrets** (`server/configRefs.ts`):
+
+- **`{{config.KEY}}` inside any node's config field.** Resolved centrally in `flowExecutor.ts`
+  immediately before `impl.run(...)` — the one point every node's config passes through, so all
+  node types support it with no per-node code. **This is the secret-safe path**: the value is
+  substituted at the moment of use and never becomes an item, so it cannot reach
+  `NodeReport.samples`, which the editor renders and the run API returns. An unknown key is left
+  **verbatim** rather than blanked (a silently-empty typo reads as "the provider is
+  unauthenticated"); the run report notes which keys were used, unknown, or empty.
+- **The `value.config` node** puts a setting on the canvas as a text value. It **refuses secrets** —
+  they aren't even listed in its dropdown — and routes them to a `blocked` output naming the
+  reference syntax instead, because a value on the canvas is an item and items get rendered.
+
+**Redaction is a backstop, not the protection.** `redactSecrets()` scrubs live secret values out of
+run reports before they leave the executor, for the case where a node *echoes* a credential (an HTTP
+node naming the URL it called). Verified to fire: a graph that deliberately pushes a secret into an
+item reports `{"apiKey":"«redacted»"}`. Don't rely on it in place of `{{config.KEY}}`.
 
 ### Environment variables
 
