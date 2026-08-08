@@ -862,8 +862,14 @@ async function qbitLogin(base: string, username: string, password: string): Prom
     signal: AbortSignal.timeout(15_000),
   })
   const cookie = login.headers.get('set-cookie')?.split(';')[0]
-  if (!login.ok || !cookie || !(await login.text()).includes('Ok')) {
-    throw new Error('qBittorrent login failed')
+  // Mirrors server/qbit.ts: a whitelisted (bypassed) login answers 204 with an
+  // empty body, not 200 "Ok.". The cookie is what we need; only check the body
+  // when there is one. See that file for the full explanation.
+  const body = await login.text()
+  if (!login.ok || !cookie || (body.trim() !== '' && !body.includes('Ok'))) {
+    throw new Error(
+      `qBittorrent login failed (HTTP ${login.status}${body.trim() ? `: ${body.trim().slice(0, 80)}` : ''})`,
+    )
   }
   return cookie
 }
