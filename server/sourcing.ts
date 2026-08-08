@@ -25,13 +25,15 @@ import {
 } from './db.js'
 import { qbitConfigured, qbitList, parseTorrentTags, type QbitTorrent } from './qbit.js'
 import { refreshEpisodeCache } from './episodes.js'
+import { cfgSafe } from './config.js'
+import { sectionLibraryRoot } from './sections.js'
 
 // qBittorrent is shared between prod and staging; each environment owns one
 // category (QBIT_CATEGORY: prod 'anime', staging 'anime-dev'). Reconciliation
 // must only look at THIS environment's slice, or prod's backfill would adopt
 // dev's torrents into prod's ledger (and each env would report the other's
 // torrents as orphans).
-const ourCategory = () => process.env.QBIT_CATEGORY || 'anime'
+const ourCategory = () => cfgSafe('QBIT_CATEGORY') || 'anime'
 async function qbitListOurs(): Promise<QbitTorrent[]> {
   const cat = ourCategory()
   return (await qbitList()).filter((t) => t.category === cat)
@@ -149,7 +151,7 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
   // toward disk truth instead of rendering "importing" forever. Conservative:
   // only flagged when we can point at a concrete missing path (the want's own
   // library_path, or its episode's library_files row).
-  const root = process.env.LIBRARY_DIR ?? '/library'
+  const root = sectionLibraryRoot('anime')
   const abs = (p: string) => (path.isAbsolute(p) ? p : path.join(root, p))
   const libByEp = new Map<string, string>()
   for (const f of listLibraryFiles()) {
@@ -274,7 +276,7 @@ export async function sourcingBackfill(dryRun: boolean): Promise<BackfillResult>
   // want whose file is missing, correctly reopens it, and the chase downloads a
   // show we already have. That happened on production — 12 episodes of a
   // finished show reopened and queued off stale rows. Verify the path first.
-  const libRoot = process.env.LIBRARY_DIR ?? '/library'
+  const libRoot = sectionLibraryRoot('anime')
   const libAbs = (p: string) => (path.isAbsolute(p) ? p : path.join(libRoot, p))
   const seen = new Set<string>()
   for (const f of libFiles) {
@@ -490,7 +492,7 @@ export async function sourcingReconcile(dryRun: boolean): Promise<ReconcileResul
   // otherwise the dup-guard would refuse the re-queue and the fulfil-on-skip
   // path would just re-fulfil the want against the same phantom.
   const db = getDb()
-  const root = process.env.LIBRARY_DIR ?? '/library'
+  const root = sectionLibraryRoot('anime')
   for (const w of report.fulfilledWantsMissingFile) {
     phantomFulfilledReopened++
     if (dryRun) continue

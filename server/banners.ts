@@ -140,7 +140,7 @@ async function gatherProviderArt(row: SeriesRow, tvdbId: number): Promise<Candid
   const season = row.tvdb_season
   const out: Candidate[] = []
 
-  if (jellyfinConfigured) {
+  if (jellyfinConfigured()) {
     try {
       const seriesId = await jfSeriesIdByTvdb(tvdbId)
       if (seriesId) {

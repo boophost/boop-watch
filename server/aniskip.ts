@@ -10,11 +10,12 @@
 // the library (a missing cour made season-3 episodes resolve to season-2 ids).
 import type { Segment } from './watch.js'
 import { limitedFetch } from './httpQueue.js'
-import { JIKAN_SEARCH_BASE } from './jikan.js'
+import { jikanSearchBase } from './jikan.js'
+import { cfgSafe } from './config.js'
 
 // Same self-hosted-jikan override as server/jikan.ts (JIKAN_URL); defaults to
 // the public instance.
-const JIKAN = process.env.JIKAN_URL || 'https://api.jikan.moe/v4'
+const jikanBase = (): string => cfgSafe('JIKAN_URL')
 const ANISKIP = 'https://api.aniskip.com/v2'
 const CHAIN_TTL = 24 * 60 * 60 * 1000
 const SKIP_TTL = 24 * 60 * 60 * 1000
@@ -48,9 +49,9 @@ const parseMs = (s?: string | null): number | null => {
 // Through the shared 'jikan' queue so the chain-walk coordinates with every other
 // Jikan caller (the /manage page, flows) instead of racing its own gate. Keep the
 // short 5s timeout — a cold walk shouldn't stall the player route.
-// `base` lets searchRoot target JIKAN_SEARCH_BASE — the self-hosted instance
+// `base` lets searchRoot target jikanSearchBase — the self-hosted instance
 // has no search index (see server/jikan.ts).
-async function jikanJson<T>(path: string, base: string = JIKAN): Promise<T> {
+async function jikanJson<T>(path: string, base: string = jikanBase()): Promise<T> {
   const res = await limitedFetch('jikan', `${base}${path}`, {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(5000),
@@ -84,7 +85,7 @@ async function searchRoot(seriesName: string): Promise<number | null> {
   const q = norm(seriesName)
   const { data } = await jikanJson<{ data?: JikanSearchHit[] }>(
     `/anime?q=${encodeURIComponent(seriesName)}&limit=10`,
-    JIKAN_SEARCH_BASE,
+    jikanSearchBase(),
   )
   const hits = (data || []).filter((a) => {
     const t = norm(a.title || '')
