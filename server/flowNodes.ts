@@ -251,6 +251,14 @@ const str = (config: Record<string, unknown>, key: string, fallback: string): st
   return typeof v === 'string' && v.trim() ? v.trim() : fallback
 }
 
+// Like str(), but keeps an explicit empty string. Use it when a blank value is
+// a documented choice (e.g. "empty = no filter"), not the same as unset. Only a
+// missing or non-string value takes the fallback.
+const strRaw = (config: Record<string, unknown>, key: string, fallback: string): string => {
+  const v = config[key]
+  return typeof v === 'string' ? v.trim() : fallback
+}
+
 const num = (config: Record<string, unknown>, key: string, fallback: number): number => {
   const v = Number(config[key])
   return Number.isFinite(v) ? v : fallback
@@ -961,7 +969,7 @@ const qbittorrentSource: NodeImpl = {
       { key: 'url', label: 'qBittorrent URL', kind: 'text', default: '', help: 'Empty = QBIT_URL env.' },
       { key: 'username', label: 'Username', kind: 'text', default: '', help: 'Empty = QBIT_USERNAME env.' },
       { key: 'password', label: 'Password', kind: 'password', default: '', help: 'Empty = QBIT_PASSWORD env.' },
-      { key: 'category', label: 'Category', kind: 'text', default: 'anime', help: 'Empty = all categories.' },
+      { key: 'category', label: 'Category', kind: 'text', default: 'anime', help: 'Empty = all categories. Unset defaults to "anime" — set the category explicitly on a non-anime flow.' },
       { key: 'completedOnly', label: 'Completed only', kind: 'boolean', default: true, help: 'Only emit torrents that finished downloading (ready to import).' },
       { key: 'skipImported', label: 'Skip already imported', kind: 'boolean', default: true, help: 'Drop torrents whose hash is already in the library ledger before the expensive probe/mux nodes, so a fresh download is not starved behind re-processing the backlog. Turn off to force a re-import.' },
       { key: 'newestFirst', label: 'Newest first', kind: 'boolean', default: true, help: 'Emit the most recently completed torrents first, so a just-finished download is processed ahead of older backlog work. Also exposes torrent_completed_on / torrent_added_on for filter.sort.' },
@@ -971,7 +979,7 @@ const qbittorrentSource: NodeImpl = {
   },
   async run(_inputs, config, ctx) {
     const { base, user, pass } = qbitCreds(config)
-    const category = str(config, 'category', 'anime')
+    const category = strRaw(config, 'category', 'anime')
     const completedOnly = bool(config, 'completedOnly', true)
     const skipImported = bool(config, 'skipImported', true)
     const newestFirst = bool(config, 'newestFirst', true)
