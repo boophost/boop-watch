@@ -384,7 +384,7 @@ export async function resolveJfSeriesId(series: {
 /** Media facts for every library episode of a series, keyed for the manage page.
  * Sourced from Jellyfin (one /Shows/{id}/Episodes call with stream fields). */
 export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMedia[]> {
-  if (!jellyfinConfigured) return []
+  if (!jellyfinConfigured()) return []
   const series = getSeriesById(seriesId)
   // resolveJfSeriesId matches on MAL titles, so it only answers for anime rows.
   if (!series || !isAnimeSeries(series)) return []

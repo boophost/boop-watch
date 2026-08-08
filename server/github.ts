@@ -11,15 +11,16 @@
 // configured the caller must 503 rather than silently drop a user's suggestion.
 
 import jwt from 'jsonwebtoken'
+import { cfgSafe } from './config.js'
 
 const API = 'https://api.github.com'
 
-const appId = (): string => (process.env.GITHUB_APP_ID ?? '').trim()
+const appId = (): string => cfgSafe('GITHUB_APP_ID').trim()
 // The private key is a PEM. Env vars can't hold raw newlines in every deploy
 // path, so accept the common `\n`-escaped form too.
-const privateKey = (): string => (process.env.GITHUB_APP_PRIVATE_KEY ?? '').replace(/\\n/g, '\n').trim()
+const privateKey = (): string => cfgSafe('GITHUB_APP_PRIVATE_KEY').replace(/\\n/g, '\n').trim()
 /** owner/repo the bot files issues into. */
-export const githubRepo = (): string => (process.env.GITHUB_REPO ?? 'boophost/boop-watch').trim()
+export const githubRepo = (): string => cfgSafe('GITHUB_REPO').trim()
 
 export function githubConfigured(): boolean {
   return Boolean(appId() && privateKey())

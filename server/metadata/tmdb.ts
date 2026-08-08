@@ -29,10 +29,10 @@ const UNCONFIGURED =
 export const tmdbClient: MetadataClient = {
   provider: 'tmdb',
   get configured() {
-    return tmdbConfigured
+    return tmdbConfigured()
   },
   get unconfiguredReason() {
-    return tmdbConfigured ? '' : UNCONFIGURED
+    return tmdbConfigured() ? '' : UNCONFIGURED
   },
 
   async search(section: PortalSection, query: string, limit = 15): Promise<TitleHit[]> {
