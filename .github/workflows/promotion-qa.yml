@@ -50,7 +50,15 @@ jobs:
           sudo -n env "PATH=$PATH" npx --yes --package=@playwright/mcp@latest -- playwright install-deps chromium
           npx --yes --package=@playwright/mcp@latest -- playwright install chromium
 
+      # A promotion PR has no preview env of its own — catch-up QA runs against
+      # staging, so the preflight must check the browser against staging too.
+      # Without BASE_URL the script prints its usage line and exits 2, which
+      # fails the whole job before it has tested anything (it did, on #321).
+      # Same address catch-up.mjs uses, so we can't verify one target and then
+      # QA a different one.
       - name: Verify the QA browser really works
+        env:
+          BASE_URL: http://boop-watch-dev.link-apps.svc.cluster.local
         run: node scripts/qa-agent/verify-browser.mjs
 
       - name: Run Catch-up QA
