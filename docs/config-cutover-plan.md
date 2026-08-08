@@ -34,6 +34,29 @@ Consequences, and they are the entire method here:
   sink by injecting *explicit empty* `QBIT_*`/`LIBRARY_DIR` vars while seeding their DB from dev. If
   the database won, every PR preview would inherit dev's real qBittorrent credentials.
 
+## Where each variable physically lives
+
+Step 2 says "remove it from `link`", and which *thing* you remove it from differs per key. On both
+deployments the container gets its environment from two places:
+
+- **inline `env:`** on the Deployment — plain values, and what link's app config writes;
+- **`envFrom` → the `<deployment>-secret` Secret** — everything link treats as a secret.
+
+That split does **not** match `CONFIG_SPEC`'s idea of a secret. Notably `FANART_API_KEY`,
+`JIMAKU_API_KEY` and (on staging) `QBIT_PASSWORD` sit in **inline env as plain text** while being
+`secret: true` in the spec — so moving them into the database is a security improvement as well as a
+convenience: `app_config` encrypts them AES-256-GCM under `CONFIG_KEY`.
+
+| Key | prod `boop-watch` | staging `boop-watch-dev` |
+|---|---|---|
+| `GITHUB_REPO`, `SCHEDULE_TZ`, `JIMAKU_URL`, `JIKAN_URL`, `QBIT_CATEGORY`, `GITHUB_APP_ID` | inline env | inline env |
+| `POSTHOG_KEY` | **secret** | **secret** |
+| `LIBRARY_DIR`, `WORK_DIR`, `JELLYFIN_URL` | inline env | inline env |
+| `JELLYFIN_API_KEY`, `WATCH_COLLECTION_ID*`, `TMDB_API_KEY`, `GITHUB_APP_PRIVATE_KEY` | **secret** | **secret** |
+| `FANART_API_KEY`, `JIMAKU_API_KEY` | inline env (plain!) | inline env (plain!) |
+| `QBIT_URL` | inline env | inline env |
+| `QBIT_USERNAME`, `QBIT_PASSWORD` | *absent* — set these | inline env (plain!) |
+
 ## Current state (audited 2026-08-08)
 
 Both environments: **0 settings in the database.** `CONFIG_KEY` valid on both.
@@ -96,6 +119,9 @@ Roll back by putting the variable back in `link` — the DB row stays and is sim
 
 **Group 1 — inert URLs and identifiers.** `GITHUB_REPO`, `SCHEDULE_TZ`, `JIMAKU_URL`, `JIKAN_URL`,
 `QBIT_CATEGORY`, `GITHUB_APP_ID`, `POSTHOG_KEY`.
+*Progress: all seven are **saved in staging's database** as of 2026-08-08 and correctly still report
+`source: env` — the shadow rule doing exactly what it says. They flip to `database` when the
+variables come out of `link`.*
 *Check:* `/api/config` shows `database`; the schedule page still renders; a suggestion still files an
 issue; the Activity page still shows the `jikan` queue serving requests.
 
