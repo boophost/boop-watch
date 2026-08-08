@@ -15,6 +15,7 @@ import {
   type FireRequest,
 } from './flowNodes.js'
 import { executableGraph, isEditorNode } from './flowEditorMeta.js'
+import { resolveConfigRefs, redactSecrets } from './configRefs.js'
 
 export interface FlowNode {
   id: string
@@ -406,7 +407,19 @@ export async function runFlow(
     const nodeT0 = Date.now()
     try {
       const injected = node.type === 'boundary.input' ? injectOutput?.(node) ?? null : null
-      const outputs = injected !== null ? { items: injected } : await impl.run(inputs, node.config ?? {}, ctx)
+      // Resolve `{{config.KEY}}` here — the one place every node's config
+      // passes through — so all node types support it without their own code,
+      // and so a secret is substituted at the moment of use rather than
+      // travelling through the graph as an item (see server/configRefs.ts).
+      const resolved = resolveConfigRefs(node.config ?? {})
+      if (resolved.used.length) ctx.notes.push(`config: ${resolved.used.join(', ')}`)
+      if (resolved.unknown.length) {
+        // Left verbatim in the config on purpose; say so rather than letting it
+        // look like the setting was simply empty.
+        ctx.notes.push(`unknown config key(s), left unresolved: ${resolved.unknown.join(', ')}`)
+      }
+      if (resolved.empty.length) ctx.notes.push(`config key(s) resolved empty: ${resolved.empty.join(', ')}`)
+      const outputs = injected !== null ? { items: injected } : await impl.run(inputs, resolved.config, ctx)
       buffers.set(node.id, outputs)
       active.add(node.id)
       reports[reportKey] = {
@@ -457,5 +470,19 @@ export async function runFlow(
   }
 
   const ok = Object.values(reports).every((r) => r.status !== 'error')
-  return { ok, dryRun, startedAt, durationMs: Date.now() - t0, nodes: reports, finalInputs, fires: fireQueue }
+  // Last line of defence before the report leaves the executor: scrub any live
+  // secret out of samples, notes and errors. `{{config.KEY}}` already keeps
+  // secrets out of the item stream, so this exists for the case where a node
+  // *echoes* one — an HTTP node naming the URL it called, say. Applied to the
+  // reports only: finalInputs feeds sub-flow plumbing, and fires carry queued
+  // work, neither of which is rendered or persisted.
+  return {
+    ok,
+    dryRun,
+    startedAt,
+    durationMs: Date.now() - t0,
+    nodes: redactSecrets(reports),
+    finalInputs,
+    fires: fireQueue,
+  }
 }

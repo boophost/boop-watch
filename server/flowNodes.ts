@@ -52,7 +52,7 @@ import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
 import { deriveInterface, buildSpecResolver } from './flowComponents.js'
-import { cfgSafe, cfgNum } from './config.js'
+import { cfgSafe, cfgNum, CONFIG_SPEC, isKnownConfigKey, isSecretKey } from './config.js'
 import { sectionLibraryRoot } from './sections.js'
 
 const execFileP = promisify(execFile)
@@ -1131,6 +1131,68 @@ const jsonValue = valueLiteral(
     }
   },
 )
+
+/**
+ * Emit an app setting onto the canvas as a text value.
+ *
+ * The visual half of flow config access: wire a managed setting into any text
+ * input and see it as a wire, rather than hiding it inside a node's config.
+ *
+ * **Refuses secrets, deliberately.** A value on the canvas becomes an item,
+ * and items land in `NodeReport.samples` — which the editor renders and the
+ * run API returns. Putting an API key on a wire would print it there. Secrets
+ * use `{{config.KEY}}` inside a node's own config instead, which is
+ * substituted at the moment of use and never becomes an item. The `blocked`
+ * output says so rather than failing the run, so a graph built this way is
+ * self-explaining rather than mysteriously broken.
+ */
+const configValue: NodeImpl = {
+  spec: {
+    type: 'value.config',
+    label: 'Setting',
+    category: 'value',
+    description:
+      'Emits one app setting (from /manage/settings) as a text value. Non-secret settings only — reference a secret with {{config.KEY}} inside the node that needs it, so it is never rendered on the canvas.',
+    inputs: [],
+    outputs: [
+      { id: 'value', label: 'text', dataType: 'text' },
+      { id: 'blocked', label: 'blocked', dataType: 'text' },
+    ],
+    config: [
+      {
+        key: 'key',
+        label: 'Setting',
+        kind: 'select',
+        options: CONFIG_SPEC.filter((f) => !f.secret).map((f) => ({
+          value: f.key,
+          label: `${f.label} (${f.key})`,
+        })),
+        default: '',
+        help: 'Secrets are absent from this list on purpose — use {{config.KEY}} in the consuming node instead.',
+      },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const key = str(config, 'key', '')
+    if (!key) {
+      ctx.notes.push('no setting selected')
+      return { value: [], blocked: [] }
+    }
+    if (!isKnownConfigKey(key)) {
+      ctx.notes.push(`unknown setting "${key}"`)
+      return { value: [], blocked: asValueItems([`unknown setting: ${key}`]) }
+    }
+    if (isSecretKey(key)) {
+      ctx.notes.push(
+        `"${key}" is a secret and will not be put on the canvas — use {{config.${key}}} in the node that needs it`,
+      )
+      return { value: [], blocked: asValueItems([`secret withheld: ${key}`]) }
+    }
+    const v = cfgSafe(key)
+    ctx.notes.push(v === '' ? `${key} is empty` : `${key} = ${v}`)
+    return { value: asValueItems([v]), blocked: [] }
+  },
+}
 
 const urlValue = valueLiteral(
   'value.url',
@@ -5897,6 +5959,7 @@ const triggerFire: NodeImpl = {
 }
 
 const IMPLS: NodeImpl[] = [
+  configValue,
   triggerStart,
   triggerNewItem,
   triggerNewPortalItem,
