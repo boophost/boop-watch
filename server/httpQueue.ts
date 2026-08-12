@@ -90,6 +90,7 @@ type ServiceKey =
   | 'jikan'
   | 'tsukihime'
   | 'tosho'
+  | 'apibay'
   | 'anilist'
   | 'tmdb'
   | 'kitsu'
@@ -105,6 +106,7 @@ const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   jikan: { minGapMs: 400, concurrency: 1, timeoutMs: 10_000, retries: 3 },
   tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
+  apibay: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   anilist: { minGapMs: 350, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   // TMDB retired its published 40-req/10s cap but still 429s under bursts;
   // pace it like AniList and let Retry-After absorb the rest.
@@ -282,6 +284,7 @@ const HOST_KEYS: Array<[RegExp, ServiceKey]> = [
   [/(^|\.)jikan\.moe$/i, 'jikan'],
   [/(^|\.)tsukihime\.org$/i, 'tsukihime'],
   [/(^|\.)animetosho\.\w+$/i, 'tosho'],
+  [/(^|\.)apibay\.org$/i, 'apibay'],
   [/(^|\.)anilist\.co$/i, 'anilist'],
   [/(^|\.)themoviedb\.org$/i, 'tmdb'],
   [/(^|\.)kitsu\.(io|app)$/i, 'kitsu'],
