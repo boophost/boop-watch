@@ -98,6 +98,8 @@ export const CONFIG_SPEC: ConfigFieldSpec[] = [
     help: 'Category the code-built research flow queues into. Use anime-dev on staging so it never lands in prod’s queue.' },
   { key: 'TORRENT_TOSHO_URL', label: 'AnimeTosho URL', group: 'Downloads', default: 'https://feed.animetosho.xyz' },
   { key: 'TORRENT_TSUKI_URL', label: 'TsukiHime URL', group: 'Downloads', default: 'https://api.tsukihime.org' },
+  { key: 'TORRENT_APBAY_URL', label: 'apibay (TPB) URL', group: 'Downloads', default: 'https://apibay.org',
+    help: 'Public Western TV/movie index used by Torrent search’s apibay provider. Anime stays on Tosho/TsukiHime.' },
 
   // --- Analytics + integrations --------------------------------------------
   { key: 'POSTHOG_KEY', label: 'PostHog project token', group: 'Integrations',
