@@ -273,6 +273,8 @@ The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can
   so a dev instance sharing qBit with prod never queues into prod's `anime` category.
 - `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
+- `TORRENT_APBAY_URL` — public Western TV/movie index for `enrich.torrent-search`’s `apibay`
+  provider (default `https://apibay.org`). Anime stays on Tosho/TsukiHime.
 - `LIBRARY_DIR` — where the **library-import** flow places the **anime** section's files
   (default `/library`); point at the Jellyfin media library dir mounted into the pod (see below).
   Keeps its historical meaning — it was the only library when the import sink was written.

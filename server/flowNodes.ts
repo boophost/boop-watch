@@ -44,7 +44,7 @@ import {
 import { fetchAniListAiring } from './anilist.js'
 import { refreshEpisodeCache, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, type PortalSection } from './portalDb.js'
+import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, isPortalSection, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
 import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
@@ -425,13 +425,30 @@ const indexerSource: NodeImpl = {
     type: 'source.indexer',
     label: 'Get Catalog',
     category: 'source',
-    description: 'Reads the /manage catalog (MAL-backed series list).',
+    description: 'Reads the /manage catalog. Scope it to a section so a TV title never enters an anime search.',
     inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
-    config: [],
+    config: [
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+          { value: '', label: 'All sections' },
+        ],
+        default: '',
+        help: 'Which catalog to emit. Empty = every section (historical behaviour). Prefer a section on new graphs.',
+      },
+    ],
   },
-  async run() {
-    return { items: listSeries().map((s) => ({ ...s })) }
+  async run(_inputs, config, ctx) {
+    const sectionCfg = str(config, 'section', '')
+    const rows = isPortalSection(sectionCfg) ? listSeries(sectionCfg) : listSeries()
+    ctx.notes.push(isPortalSection(sectionCfg) ? `${sectionCfg}: ${rows.length} title(s)` : `${rows.length} title(s)`)
+    return { items: rows.map((s) => ({ ...s })) }
   },
 }
 
@@ -2560,19 +2577,29 @@ const indexerMatch: NodeImpl = {
     const matchTag = (item: FlowItem): (typeof catalog)[number] | undefined => {
       const mal = asNumber(item.tag_mal_id)
       const tagged = mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
-      if (!tagged || !seasonField) return tagged
-      const season = Number(item[seasonField])
-      if (!Number.isFinite(season) || tagged.tvdb_season == null || Number(tagged.tvdb_season) === season) {
+      if (tagged) {
+        if (!seasonField) return tagged
+        const season = Number(item[seasonField])
+        if (!Number.isFinite(season) || tagged.tvdb_season == null || Number(tagged.tvdb_season) === season) {
+          return tagged
+        }
+        const corrected = catalog.find(
+          (s) => s.tvdb_id != null && s.tvdb_id === tagged.tvdb_id && Number(s.tvdb_season) === season,
+        )
+        if (corrected) {
+          tagCorrected++
+          return corrected
+        }
         return tagged
       }
-      const corrected = catalog.find(
-        (s) => s.tvdb_id != null && s.tvdb_id === tagged.tvdb_id && Number(s.tvdb_season) === season,
-      )
-      if (corrected) {
-        tagCorrected++
-        return corrected
+      // TV/movies stamp `tmdb:<source_id>` (and optionally `series:<id>`) instead
+      // of `mal:` — one catalog row per show, so there is no cour to correct.
+      const tmdb = asNumber(item.tag_tmdb_id)
+      if (tmdb != null) {
+        return catalog.find((s) => s.source === 'tmdb' && s.source_id === tmdb)
       }
-      return tagged
+      const seriesId = asNumber(item.tag_series_id)
+      return seriesId == null ? undefined : catalog.find((s) => s.id === seriesId)
     }
 
     const matched: FlowItem[] = []
@@ -2662,6 +2689,7 @@ const jikanEnrich: NodeImpl = {
 // Torrent index base URLs, overridable for mirrors/self-hosted proxies.
 const toshoUrl = (): string => cfgSafe('TORRENT_TOSHO_URL')
 const tsukiUrl = (): string => cfgSafe('TORRENT_TSUKI_URL')
+const apibayUrl = (): string => cfgSafe('TORRENT_APBAY_URL')
 
 // Trackers appended when building a magnet from a bare info-hash (TsukiHime
 // results carry `btih` but no magnet). Same set Anime Tosho magnets embed.
@@ -2849,6 +2877,39 @@ async function tsukiCandidates(q: string, base: string): Promise<Candidate[]> {
     })
 }
 
+async function apibayCandidates(q: string, base: string): Promise<Candidate[]> {
+  // apibay is The Pirate Bay's JSON search. It is the public index for Western
+  // TV/movies — AnimeTosho/TsukiHime don't carry them. A miss is a one-element
+  // sentinel with an all-zero hash, not an empty array.
+  const rows = (await fetchJson(`${base}/q.php?q=${encodeURIComponent(q)}`)) as Record<string, unknown>[]
+  const ZERO = '0000000000000000000000000000000000000000'
+  return (Array.isArray(rows) ? rows : [])
+    .filter((r) => {
+      const hash = String(r.info_hash ?? '').toLowerCase()
+      return hash.length >= 32 && hash !== ZERO
+    })
+    .map((r) => {
+      const title = String(r.name ?? '')
+      const hash = String(r.info_hash ?? '')
+      const files = r.num_files != null ? Number(r.num_files) : 0
+      return {
+        name: title || q,
+        magnet: magnetFromHash(hash, title || q),
+        hash,
+        size: r.size != null ? Number(r.size) : null,
+        seeders: r.seeders != null ? Number(r.seeders) : null,
+        resolution: normResolution('', title),
+        dualAudio: titleDualAudio(title),
+        videoCodec: titleCodec(title),
+        isBatch: titleIsBatch(title) || files > 2,
+        episode: parseEpisode(title),
+        aid: null,
+        pinId: null,
+        seriesTitle: null,
+      }
+    })
+}
+
 // Release-name noise that shouldn't count as title words when checking whether
 // a search hit actually matches the show we asked for.
 const QUALITY_TOKENS = new Set([
@@ -2983,6 +3044,7 @@ const torrentSearch: NodeImpl = {
         options: [
           { value: 'animetosho', label: 'Anime Tosho (has seeders)' },
           { value: 'tsukihime', label: 'TsukiHime (no seeders)' },
+          { value: 'apibay', label: 'apibay / The Pirate Bay (TV & movies)' },
         ],
         default: 'animetosho',
       },
@@ -3018,7 +3080,7 @@ const torrentSearch: NodeImpl = {
       { key: 'preferDualAudio', label: 'Prefer dual audio (EN+JP)', kind: 'boolean', default: true },
       { key: 'requireDualAudio', label: 'Require dual audio', kind: 'boolean', default: false, help: 'Drops releases without English+Japanese audio. Many fansubs are sub-only.' },
       { key: 'excludeCodecs', label: 'Exclude codecs', kind: 'text', default: '', help: 'Comma list of video codecs to drop, e.g. "av1". Our Jellyfin GPU (Tesla T4) can’t hardware-decode AV1, so those stall on playback. h264/HEVC are preferred automatically.' },
-      { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho only — TsukiHime reports no seeders).' },
+      { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho and apibay — TsukiHime reports no seeders).' },
       { key: 'minTitleMatch', label: 'Title match (0-1)', kind: 'number', default: 0.5, help: 'Min fraction of the show’s title words a result must contain. Guards against the index returning a different show.' },
       { key: 'maxEpisodes', label: 'Max episodes', kind: 'number', default: 26, help: 'Episode mode: cap on how many recent episodes to queue per show.' },
       { key: 'maxSizeGB', label: 'Max torrent size (GB)', kind: 'number', default: 0, help: 'Drop releases larger than this (per torrent). Keeps season-pack searches from grabbing 80GB+ Blu-ray remuxes over a ~20GB WEB-DL. 0 = no cap.' },
@@ -3027,9 +3089,10 @@ const torrentSearch: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const provider = str(config, 'provider', 'animetosho')
+    const override = str(config, 'baseUrl', '').replace(/\/$/, '')
     const base =
-      str(config, 'baseUrl', '').replace(/\/$/, '') ||
-      (provider === 'tsukihime' ? tsukiUrl() : toshoUrl())
+      override ||
+      (provider === 'tsukihime' ? tsukiUrl() : provider === 'apibay' ? apibayUrl() : toshoUrl())
     const queryField = str(config, 'queryField', 'torrent_query')
     const episodeField = str(config, 'episodeField', '')
     const configMode = str(config, 'mode', 'auto')
@@ -3094,7 +3157,9 @@ const torrentSearch: NodeImpl = {
         const raw =
           provider === 'tsukihime'
             ? await tsukiCandidates(q, base)
-            : await toshoCandidates(q, base)
+            : provider === 'apibay'
+              ? await apibayCandidates(q, base)
+              : await toshoCandidates(q, base)
 
         let relevant: Candidate[]
         // Only trust the pin when the results actually carry ids (a provider can
@@ -3988,6 +4053,42 @@ const parseSeasonNode: NodeImpl = {
     }
     ctx.notes.push(`parsed a season for ${parsed}/${out.length} item(s)`)
     return { out }
+  },
+}
+
+const expandSeasons: NodeImpl = {
+  spec: {
+    type: 'transform.expand-seasons',
+    label: 'Expand seasons',
+    category: 'enrich',
+    description:
+      'Turns each show into one item per season in a range (e.g. 5–9). Sets season and tvdb_season so torrent search and library import know which season to grab and where to file it. Western TV is one catalog row per show, unlike anime cours.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'seasons' }],
+    config: [
+      { key: 'from', label: 'First season', kind: 'number', default: 1, help: 'Inclusive. Overridden per item when First-season field is set and has a number.' },
+      { key: 'to', label: 'Last season', kind: 'number', default: 1, help: 'Inclusive. Overridden per item when Last-season field is set.' },
+      { key: 'fromField', label: 'First-season field', kind: 'text', default: '', help: 'Optional item field holding the start of the range. Empty = use First season.' },
+      { key: 'toField', label: 'Last-season field', kind: 'text', default: '', help: 'Optional item field holding the end of the range. Empty = use Last season.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fromDefault = Math.max(1, Math.floor(num(config, 'from', 1)))
+    const toDefault = Math.max(1, Math.floor(num(config, 'to', 1)))
+    const fromField = str(config, 'fromField', '')
+    const toField = str(config, 'toField', '')
+    const items: FlowItem[] = []
+    for (const item of allInputs(inputs)) {
+      const fromRaw = fromField ? asNumber(item[fromField]) : null
+      const toRaw = toField ? asNumber(item[toField]) : null
+      const from = Math.max(1, fromRaw ?? fromDefault)
+      const to = Math.max(from, toRaw ?? toDefault)
+      for (let season = from; season <= to; season++) {
+        items.push({ ...item, season, tvdb_season: season })
+      }
+    }
+    ctx.notes.push(`${allInputs(inputs).length} show(s) → ${items.length} season(s)`)
+    return { items }
   },
 }
 
@@ -6125,6 +6226,7 @@ const IMPLS: NodeImpl[] = [
   join,
   expandFiles,
   parseSeasonNode,
+  expandSeasons,
   mediaProbe,
   extractSubs,
   fetchSubs,
