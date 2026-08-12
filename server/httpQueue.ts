@@ -250,7 +250,10 @@ export function limitedFetch(
         logRequest({ at: startedAt, key, method, url: logged, status: null, ms: Date.now() - startedAt, error: message })
         throw e
       }
-      if ((res.status === 429 || res.status === 503) && attempt < q.cfg.retries) {
+      // apibay sits behind Cloudflare and 403s the first request of a burst
+      // (observed: Season 5 missed, 6–9 succeeded on the same run). Retry it
+      // like a 429 — a real auth 403 on other services is unchanged.
+      if ((res.status === 429 || res.status === 503 || (key === 'apibay' && res.status === 403)) && attempt < q.cfg.retries) {
         const wait = retryAfterMs(res) ?? 2000 * (attempt + 1)
         q.retried++
         q.lastError = { at: Date.now(), message: `${res.status} from ${hostOf(url)}, retrying` }
