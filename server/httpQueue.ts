@@ -90,6 +90,7 @@ type ServiceKey =
   | 'jikan'
   | 'tsukihime'
   | 'tosho'
+  | 'apibay'
   | 'anilist'
   | 'tmdb'
   | 'kitsu'
@@ -105,6 +106,7 @@ const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   jikan: { minGapMs: 400, concurrency: 1, timeoutMs: 10_000, retries: 3 },
   tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
+  apibay: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   anilist: { minGapMs: 350, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   // TMDB retired its published 40-req/10s cap but still 429s under bursts;
   // pace it like AniList and let Retry-After absorb the rest.
@@ -248,7 +250,10 @@ export function limitedFetch(
         logRequest({ at: startedAt, key, method, url: logged, status: null, ms: Date.now() - startedAt, error: message })
         throw e
       }
-      if ((res.status === 429 || res.status === 503) && attempt < q.cfg.retries) {
+      // apibay sits behind Cloudflare and 403s the first request of a burst
+      // (observed: Season 5 missed, 6–9 succeeded on the same run). Retry it
+      // like a 429 — a real auth 403 on other services is unchanged.
+      if ((res.status === 429 || res.status === 503 || (key === 'apibay' && res.status === 403)) && attempt < q.cfg.retries) {
         const wait = retryAfterMs(res) ?? 2000 * (attempt + 1)
         q.retried++
         q.lastError = { at: Date.now(), message: `${res.status} from ${hostOf(url)}, retrying` }
@@ -282,6 +287,7 @@ const HOST_KEYS: Array<[RegExp, ServiceKey]> = [
   [/(^|\.)jikan\.moe$/i, 'jikan'],
   [/(^|\.)tsukihime\.org$/i, 'tsukihime'],
   [/(^|\.)animetosho\.\w+$/i, 'tosho'],
+  [/(^|\.)apibay\.org$/i, 'apibay'],
   [/(^|\.)anilist\.co$/i, 'anilist'],
   [/(^|\.)themoviedb\.org$/i, 'tmdb'],
   [/(^|\.)kitsu\.(io|app)$/i, 'kitsu'],

@@ -34,6 +34,29 @@ Consequences, and they are the entire method here:
   sink by injecting *explicit empty* `QBIT_*`/`LIBRARY_DIR` vars while seeding their DB from dev. If
   the database won, every PR preview would inherit dev's real qBittorrent credentials.
 
+## Where each variable physically lives
+
+Step 2 says "remove it from `link`", and which *thing* you remove it from differs per key. On both
+deployments the container gets its environment from two places:
+
+- **inline `env:`** on the Deployment — plain values, and what link's app config writes;
+- **`envFrom` → the `<deployment>-secret` Secret** — everything link treats as a secret.
+
+That split does **not** match `CONFIG_SPEC`'s idea of a secret. Notably `FANART_API_KEY`,
+`JIMAKU_API_KEY` and (on staging) `QBIT_PASSWORD` sit in **inline env as plain text** while being
+`secret: true` in the spec — so moving them into the database is a security improvement as well as a
+convenience: `app_config` encrypts them AES-256-GCM under `CONFIG_KEY`.
+
+| Key | prod `boop-watch` | staging `boop-watch-dev` |
+|---|---|---|
+| `GITHUB_REPO`, `SCHEDULE_TZ`, `JIMAKU_URL`, `JIKAN_URL`, `QBIT_CATEGORY`, `GITHUB_APP_ID` | inline env | inline env |
+| `POSTHOG_KEY` | **secret** | **secret** |
+| `LIBRARY_DIR`, `WORK_DIR`, `JELLYFIN_URL` | inline env | inline env |
+| `JELLYFIN_API_KEY`, `WATCH_COLLECTION_ID*`, `TMDB_API_KEY`, `GITHUB_APP_PRIVATE_KEY` | **secret** | **secret** |
+| `FANART_API_KEY`, `JIMAKU_API_KEY` | inline env (plain!) | inline env (plain!) |
+| `QBIT_URL` | inline env | inline env |
+| `QBIT_USERNAME`, `QBIT_PASSWORD` | *absent* — set these | inline env (plain!) |
+
 ## Current state (audited 2026-08-08)
 
 Both environments: **0 settings in the database.** `CONFIG_KEY` valid on both.
@@ -72,9 +95,8 @@ Same as prod except: `JELLYFIN_URL=http://jellyfin-dev.link-apps`, `LIBRARY_DIR=
 - **Prod has no `QBIT_USERNAME` / `QBIT_PASSWORD`.** It authenticates only via qBittorrent's subnet
   whitelist. That is what made #327 a total outage when the whitelist stopped matching. Setting real
   credentials removes the single point of failure.
-- **`LIBRARY_DIR_TV` / `LIBRARY_DIR_MOVIES` are unset everywhere**, falling back to `/library-tv` and
-  `/library-movies`, which do not exist. `/api/sections` reports `jellyfinMatch: null` for both.
-  Sections Phase 6 needs these.
+- ~~`LIBRARY_DIR_TV` / `LIBRARY_DIR_MOVIES` are unset everywhere~~ — **done 2026-08-08**, and they
+  are the first two values to live in the database rather than in `link`. See "Library layout" below.
 - **Prod and staging share one `CONFIG_KEY`** (fingerprint `f0a27b5e6f8f`). Works, but the
   environments are not cryptographically isolated — a leaked dev key decrypts prod's secrets.
   Rotating prod to its own key is a good idea; see "Rotating CONFIG_KEY" below.
@@ -97,6 +119,9 @@ Roll back by putting the variable back in `link` — the DB row stays and is sim
 
 **Group 1 — inert URLs and identifiers.** `GITHUB_REPO`, `SCHEDULE_TZ`, `JIMAKU_URL`, `JIKAN_URL`,
 `QBIT_CATEGORY`, `GITHUB_APP_ID`, `POSTHOG_KEY`.
+*Progress: all seven are **saved in staging's database** as of 2026-08-08 and correctly still report
+`source: env` — the shadow rule doing exactly what it says. They flip to `database` when the
+variables come out of `link`.*
 *Check:* `/api/config` shows `database`; the schedule page still renders; a suggestion still files an
 issue; the Activity page still shows the `jikan` queue serving requests.
 
@@ -179,3 +204,43 @@ Losing the key without re-entering means every stored secret is unrecoverable. K
 - The public portal serves normally, and `/manage/settings` shows no decrypt errors.
 - Changing a value on the page takes effect **without a redeploy** — demonstrate it once, because
   that is the entire point of the exercise.
+
+
+## Library layout (settled 2026-08-08)
+
+Each section has **its own Jellyfin library**. Confirmed against both servers, and the section
+collections were checked by *membership*, not by name — dev’s are labelled oddly ("TV Broadcast
+Prohibited", "Motu Patlu Movies") but contain exactly the right titles, so the labels are cosmetic.
+
+| | prod library | prod path | staging library | staging path |
+|---|---|---|---|---|
+| anime | `Anime` (tvshows) | `/data/anime` | `Anime` (tvshows) | `/data/anime-dev` |
+| tv | `Shows` (tvshows) | `/data/tv` | `Shows` (tvshows) | `/data/tv-dev` |
+| movies | `Movies` (movies) | `/data/movies` | `Movies` (movies) | `/data/movies-dev` |
+
+The two environments now mirror each other, name for name. Staging previously had **no TV library**
+and called its *anime* library `Shows` — the same name prod uses for **TV**, which is precisely the
+kind of inconsistency that makes someone debug the wrong library. Fixed 2026-08-08 by renaming
+staging's `Shows` → `Anime` and creating a new `Shows` at `/data/tv-dev`.
+
+**The rename was the risky half** — if Jellyfin had re-scanned and re-issued item ids, the section
+BoxSets would have lost their members and the portal would have emptied. Membership was snapshotted
+before and after: anime 2, tv 1, movies 6, **identical item ids either side**. Both operations
+returned 204 and needed no restart.
+
+Prod also has an **`Anime Movies`** library at `/data/anime-movies`, which no section maps to today.
+
+`LIBRARY_DIR_TV` and `LIBRARY_DIR_MOVIES` are now set **in the database** on both environments, and
+`/api/sections` matches all three prod sections to a real library by `basis: "path"`.
+
+**Staging shares the same media NFS as production.** `/data/tv` and `/data/movies` are visible from
+the staging pod, so pointing staging at them would make a staging import write into production’s
+library. Staging therefore uses the `-dev` convention throughout; `/data/tv-dev` was created for
+this (it did not exist), mirroring `anime-dev` and `movies-dev`.
+
+All six sections across both environments now report `jellyfinMatch: "path"` — a real library at a
+real path, matched on the path rather than guessed from the collection type.
+
+Verified after the change: prod’s anime import dry run is unchanged (still resolves
+`mal 59970 → tvdb 352408 S4`, matches an indexer title, expands a file), and the public portal
+serves 37 items across all three sections.
