@@ -10,6 +10,7 @@ import express, { Router } from 'express'
 import jwt from 'jsonwebtoken'
 import { getDb } from './db.js'
 import { getPortalItem } from './portalDb.js'
+import { reqOrigin } from './origin.js'
 
 const DISCORD_API = 'https://discord.com/api/v10'
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID ?? ''
@@ -202,18 +203,6 @@ async function killSession(username: string, row: LinkRow) {
 async function endSession(username: string, row: LinkRow) {
   browsingSince.delete(username)
   await killSession(username, row)
-}
-
-/** Public origin of the request, for OAuth redirect URIs and absolute poster
- * URLs in activity assets. The forwarded-proto header can't be trusted here:
- * TLS terminates at the Cloudflare edge and Traefik receives plain HTTP on the
- * `web` entrypoint, so it stamps X-Forwarded-Proto: http even though every
- * public host is https-only. Force https for anything that isn't local. */
-function reqOrigin(req: express.Request): string {
-  const fwdHost = req.headers['x-forwarded-host']
-  const host = (typeof fwdHost === 'string' ? fwdHost.split(',')[0].trim() : '') || req.headers.host || ''
-  const isLocal = /^(localhost|127\.|192\.168\.|10\.)/.test(host)
-  return `${isLocal ? req.protocol : 'https'}://${host}`
 }
 
 const redirectUri = (origin: string) => `${origin}/api/discord/callback`
