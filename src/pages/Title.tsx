@@ -9,6 +9,7 @@ import type { ChaseState } from '@/lib/chase'
 import { useAuth } from '@/lib/AuthContext'
 import { loadProgressMap, type Progress } from '@/lib/progress'
 import { track } from '@/lib/analytics'
+import { setPageTitle } from '@/lib/pageMeta'
 
 const initials = (n: string) =>
   String(n || '?').split(/[^a-z0-9]/i).filter(Boolean).slice(0, 2).map((s) => s[0]).join('').toUpperCase()
@@ -195,6 +196,10 @@ export default function Title() {
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [id, seasonParam])
+
+  useEffect(() => {
+    if (data) setPageTitle(data.name)
+  }, [data])
 
   // Episode-row progress bars (same source as the player sidebar).
   useEffect(() => {
