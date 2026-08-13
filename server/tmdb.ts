@@ -235,3 +235,17 @@ export async function fetchTmdbSeasonEpisodes(id: number, season: number): Promi
     aired: e.air_date || null,
   }))
 }
+
+/** Every non-special episode of a show, tagged with its TMDB season number. */
+export async function fetchTmdbShowEpisodes(
+  id: number,
+): Promise<Array<TmdbEpisode & { season: number }>> {
+  const title = await fetchTmdbTitle('tv', id)
+  const nested = await Promise.all(
+    (title.seasons ?? []).map(async (s) => {
+      const eps = await fetchTmdbSeasonEpisodes(id, s.season)
+      return eps.map((e) => ({ ...e, season: s.season }))
+    }),
+  )
+  return nested.flat()
+}
