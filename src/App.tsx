@@ -1,6 +1,7 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './lib/AuthContext'
+import { setPageTitle } from './lib/pageMeta'
 import { APP_VERSION, APP_COMMIT } from './version'
 import Login from './pages/Login'
 import ManageLayout from './pages/manage/ManageLayout'
@@ -75,9 +76,22 @@ function RequireAdmin() {
   return <Outlet />
 }
 
+function DocumentTitle() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    if (pathname.startsWith('/series/') || pathname.startsWith('/movie/') || pathname.startsWith('/watch/')) return
+    if (pathname === '/schedule') { setPageTitle('Schedule'); return }
+    if (pathname === '/tv') { setPageTitle('TV'); return }
+    if (pathname === '/movies') { setPageTitle('Movies'); return }
+    setPageTitle()
+  }, [pathname])
+  return null
+}
+
 export default function App() {
   return (
     <>
+      <DocumentTitle />
       <Routes>
         {/* Public, no-login portal — one browse page per section */}
         <Route path="/" element={<Browse />} />

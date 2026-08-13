@@ -14,6 +14,7 @@ import { WatchedToggle } from '@/components/WatchedToggle'
 import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
 import { getWatch, getThemes, type Segment, type WatchData, type ThemeSong } from '@/lib/api'
+import { setPageTitle } from '@/lib/pageMeta'
 import {
   loadProgressMap, localProgress, saveLocalProgress, saveAccountProgress, backfillAccountProgress,
   type Progress,
@@ -196,6 +197,11 @@ export default function Watch() {
     resumePos.current = null
     getWatch(id).then(setData).catch((e: Error) => setError(e.message))
   }, [id])
+
+  useEffect(() => {
+    if (!data) return
+    setPageTitle(data.isEpisode ? `${data.title} ${data.epNum}` : data.title)
+  }, [data])
 
   // Load progress for this episode + its siblings (episode-list bars and the
   // resume point). Waits for auth so a logged-in reload reads account rows.
