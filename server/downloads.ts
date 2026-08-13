@@ -3,8 +3,8 @@
 // progress, and which episodes are already live on the public portal.
 
 import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
-import { getAllPortalItems } from './portalDb.js'
-import { getSeriesById, isAnimeSeries } from './db.js'
+import { getAllPortalItems, type PortalSection } from './portalDb.js'
+import { getSeriesById } from './db.js'
 import { jellyfinConfigured, jfJson, type JfItem, type JfMediaStream } from './jellyfin.js'
 
 const norm = (s: unknown): string =>
@@ -94,6 +94,8 @@ export interface SeriesDownload {
   eta: number
   isBatch: boolean
   episode: number | null
+  /** Parsed from the release name when present (Season 7 / S07). */
+  season: number | null
 }
 
 export interface SeriesDownloadStatus {
@@ -164,6 +166,7 @@ function resolvePortalSeriesId(
 export function matchSeriesDownloads(
   series: {
     mal_id?: number | null
+    section?: PortalSection
     title: string
     title_english?: string | null
     title_japanese?: string | null
@@ -182,6 +185,7 @@ export function matchSeriesDownloads(
   // without a season mapping the JF numbers are already this row's own.
   const courLength = season != null && series.episodes != null && series.episodes > 0 ? series.episodes : null
   const siteEpisodes: Record<string, string> = {}
+  const tvShow = series.section === 'tv'
   for (const it of portalItems) {
     if (it.type !== 'Episode' || it.index_number == null) continue
     if (season != null && it.parent_index_number !== season) continue
@@ -189,9 +193,13 @@ export function matchSeriesDownloads(
     // Before this cour starts, or past its end — belongs to a sibling cour.
     if (number < 1) continue
     if (courLength != null && number > courLength) continue
-    if (bestOverlap(it.series_name ?? it.name, variantTokens) >= 0.5) {
-      siteEpisodes[String(number)] = it.id
-    }
+    if (bestOverlap(it.series_name ?? it.name, variantTokens) < 0.5) continue
+    // Western TV is one catalog row per show, so IndexNumber collides across
+    // seasons (S1E1 vs S7E1). Key those as "season:episode"; anime cours stay
+    // on the bare episode number the rest of the chase pipeline already uses.
+    const key =
+      tvShow && it.parent_index_number != null ? `${it.parent_index_number}:${number}` : String(number)
+    siteEpisodes[key] = it.id
   }
   const portalSeriesId = resolvePortalSeriesId(series, portalItems)
 
@@ -226,6 +234,7 @@ export function matchSeriesDownloads(
       eta: t.eta,
       isBatch: isBatch(t.name),
       episode: parseEpisode(t.name),
+      season: parseSeason(t.name),
     }))
     .sort((a, b) => b.progress - a.progress)
 
@@ -336,6 +345,8 @@ export interface EpisodeAudio { lang: string; label: string; codec: string; chan
 export interface EpisodeMedia {
   id: string
   episode: number | null
+  /** Jellyfin ParentIndexNumber — set for TV so S1E1 and S7E1 don't collide. */
+  season: number | null
   resolution: string
   videoCodec: string
   audio: EpisodeAudio[]
@@ -349,7 +360,7 @@ export interface EpisodeMedia {
  * then fall back to a Jellyfin library search — needed when the show is in the
  * media library but not (yet) in the Public collection / portal cache. */
 export async function resolveJfSeriesId(series: {
-  mal_id: number
+  mal_id?: number | null
   title: string
   title_english?: string | null
   title_japanese?: string | null
@@ -386,8 +397,7 @@ export async function resolveJfSeriesId(series: {
 export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMedia[]> {
   if (!jellyfinConfigured()) return []
   const series = getSeriesById(seriesId)
-  // resolveJfSeriesId matches on MAL titles, so it only answers for anime rows.
-  if (!series || !isAnimeSeries(series)) return []
+  if (!series) return []
 
   const jfSeriesId = await resolveJfSeriesId(series)
   if (!jfSeriesId) return []
@@ -433,6 +443,7 @@ export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMe
     return {
       id: ep.Id,
       episode: ep.IndexNumber ?? null,
+      season: series.section === 'tv' ? (ep.ParentIndexNumber ?? null) : null,
       resolution: resLabel(video?.Height, video?.Width),
       videoCodec: (video?.Codec || '').toUpperCase(),
       audio,
