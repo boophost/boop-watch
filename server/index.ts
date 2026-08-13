@@ -18,6 +18,7 @@ import {
   listConfig, setConfig, clearConfig, isKnownConfigKey, configKeyConfigured,
 } from './config.js'
 import { clientForSection } from './metadata/index.js'
+import { fetchTmdbShowEpisodes } from './tmdb.js'
 import { cacheSelectedBanner, ensureSeriesBanners, BANNERS_DIR, EXT_BY_TYPE } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { flowRouter, runFlowAndRecord, acquireFlowLock, releaseFlowLock, fireEvent } from './flowRoutes.js'
@@ -31,7 +32,7 @@ import {
   warmScope, ensureScope, getPlayableIds,
   jfVirtualFolders, sectionCollections, enabledSections, type JfVirtualFolder,
 } from './jellyfin.js'
-import { getSeriesLibraryMedia } from './downloads.js'
+import { getSeriesLibraryMedia, getSeriesDownloadStatus } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import {
   sourcingLedger,
@@ -49,6 +50,8 @@ import { posthogUiHostEffective } from './posthogConfig.js'
 import { deleteUser, listAllUsers, setUserAdmin, isAdminViaEnv, isAdminForUserId } from './users.js'
 import { cfgSafe } from './config.js'
 import { sectionLibraryRoot } from './sections.js'
+import { reqOrigin } from './origin.js'
+import { injectShareMeta, sharePageForPath } from './shareMeta.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -631,8 +634,49 @@ app.get('/api/series/:id/detail', requireAuth, async (req, res) => {
 })
 
 app.get('/api/series/:id/episodes', requireAuth, async (req, res) => {
-  const series = animeSeriesOr(res, Number(req.params.id), 'The episode list')
-  if (!series) return
+  const id = Number(req.params.id)
+  const row = Number.isFinite(id) ? seriesDb.getSeriesById(id) : undefined
+  if (!row) {
+    res.status(404).json({ error: 'Series not found' })
+    return
+  }
+
+  // Movies have no episode list. TV is TMDB seasons; anime stays on AniList/MAL.
+  if (row.section === 'movies') {
+    res.json({
+      episodes: [],
+      pagination: { has_next_page: false, current_page: 1, last_visible_page: 1 },
+      source: 'tmdb',
+    })
+    return
+  }
+  if (!seriesDb.isAnimeSeries(row)) {
+    try {
+      const eps = await fetchTmdbShowEpisodes(row.source_id)
+      const rows = eps.map((e) => ({
+        mal_id: null,
+        season: e.season,
+        url: `https://www.themoviedb.org/tv/${row.source_id}/season/${e.season}/episode/${e.episode}`,
+        title: e.title ?? `Episode ${e.episode}`,
+        title_pending: !e.title,
+        aired: e.aired,
+        filler: false,
+        recap: false,
+        episode: e.episode,
+      }))
+      res.json({
+        episodes: rows,
+        pagination: { has_next_page: false, current_page: 1, last_visible_page: 1 },
+        source: 'tmdb',
+      })
+    } catch (e) {
+      console.error(e)
+      res.status(502).json({ error: e instanceof Error ? e.message : 'Could not load episodes' })
+    }
+    return
+  }
+
+  const series = row
   const malUrl = series.url ?? `https://myanimelist.net/anime/${series.mal_id}`
   // `series_episodes` is the single source of truth: existence + air dates come
   // from AniList (current, unlike MAL), titles from a multi-source merge (see
@@ -866,7 +910,30 @@ app.get('/api/series/:id/downloads', requireAuth, async (req, res) => {
     res.status(400).json({ error: 'Invalid id' })
     return
   }
+  const row = seriesDb.getSeriesById(id)
+  if (!row) {
+    res.status(404).json({ error: 'Series not found' })
+    return
+  }
   try {
+    // Chase chips are the anime sourcing pipeline (MAL air dates, wants). TV
+    // and movies still need live qBit + on-site status for the Downloads panel.
+    if (!seriesDb.isAnimeSeries(row)) {
+      const status = await getSeriesDownloadStatus(id)
+      res.json({
+        qbitConfigured: status.qbitConfigured,
+        qbitError: status.qbitError,
+        torrents: status.torrents,
+        siteEpisodes: status.siteEpisodes,
+        qbitSkipped: status.qbitSkipped,
+        blacklist: blacklist.listBlacklist(id),
+        airedCount: 0,
+        expectedForPipeline: null,
+        nextChase: null,
+        portalSeriesId: status.portalSeriesId,
+      })
+      return
+    }
     // buildSeriesChase already carries the download status (one shared qBit
     // query — previously this route fetched it twice), and skips qBit entirely
     // when every expected episode is on site.
@@ -1645,17 +1712,27 @@ app.get('/config.js', (req, res) => {
 
 if (IS_PROD) {
   const distPath = path.join(__dirname, '../dist')
-  
-  app.use(express.static(distPath))
+  const indexFile = path.join(distPath, 'index.html')
+  let indexHtml = ''
+  const loadIndex = (): string => {
+    if (!indexHtml) indexHtml = fs.readFileSync(indexFile, 'utf8')
+    return indexHtml
+  }
+
+  // index: false so GET / falls through to the injector — otherwise static
+  // would serve the un-personalized dist/index.html and crawlers would never
+  // see per-title Open Graph tags.
+  app.use(express.static(distPath, { index: false }))
   app.use((req, res) => {
     if (
-      req.method === 'GET' &&
+      (req.method === 'GET' || req.method === 'HEAD') &&
       !req.path.startsWith('/api') &&
       !req.path.startsWith('/ingest')
     ) {
-      // root-relative so send()'s dotfile check doesn't 404 when the checkout
-      // itself lives under a dot-directory (e.g. a .claude worktree)
-      res.sendFile('index.html', { root: distPath })
+      const html = injectShareMeta(loadIndex(), sharePageForPath(req.path), reqOrigin(req))
+      res.setHeader('Content-Type', 'text/html; charset=utf-8')
+      res.setHeader('Cache-Control', 'no-cache')
+      res.send(html)
       return
     }
     res.status(404).end()
