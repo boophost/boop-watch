@@ -1,2 +1,21 @@
+# Unlisted: search engines stay out. Preview crawlers (Discord, X, iMessage,
+# Facebook, WhatsApp, Slack, Telegram, …) must be allowed or a pasted URL
+# renders as a bare link with no card.
 User-agent: *
 Disallow: /
+
+User-agent: facebookexternalhit
+User-agent: Facebot
+User-agent: Twitterbot
+User-agent: Discordbot
+User-agent: Slackbot
+User-agent: Slackbot-LinkExpanding
+User-agent: TelegramBot
+User-agent: WhatsApp
+User-agent: LinkedInBot
+User-agent: SkypeUriPreview
+User-agent: Iframely
+User-agent: Redditbot
+User-agent: vkShare
+User-agent: Google-PageRenderer
+Allow: /

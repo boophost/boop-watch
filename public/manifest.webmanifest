@@ -1,7 +1,7 @@
 {
   "name": "boopurnoes · watch",
   "short_name": "boop-watch",
-  "description": "A curated anime library, streamed.",
+  "description": "A curated streaming library.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

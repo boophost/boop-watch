@@ -35,6 +35,7 @@ interface SeriesDownload {
   eta: number
   isBatch: boolean
   episode: number | null
+  season?: number | null
 }
 
 interface BlacklistRow {
@@ -61,15 +62,36 @@ interface DownloadStatus {
   portalSeriesId?: string | null
 }
 
-// The best torrent covering a given episode: a batch (covers all) or a
-// single-episode release matching that number; most-complete wins.
+function mediaKey(
+  season: number | null | undefined,
+  episode: number | null | undefined,
+): string | null {
+  if (episode == null) return null
+  return season != null ? `${season}:${episode}` : String(episode)
+}
+
+// The best torrent covering a given episode: a batch (covers all, or this
+// season when the release is season-tagged) or a single-episode release
+// matching that number; most-complete wins.
 function episodeDownload(
   epNum: number | null,
   torrents: SeriesDownload[],
+  season?: number | null,
 ): SeriesDownload | null {
   if (epNum == null) return null
-  const covering = torrents.filter((t) => t.isBatch || t.episode === epNum)
+  const covering = torrents.filter((t) => {
+    if (season != null && t.season != null && t.season !== season) return false
+    return t.isBatch || t.episode === epNum
+  })
   return covering.sort((a, b) => b.progress - a.progress)[0] ?? null
+}
+
+function formatEpNum(ep: { season?: number | null; episode: number | null }): string {
+  if (ep.episode == null) return '—'
+  if (ep.season != null) {
+    return `S${String(ep.season).padStart(2, '0')}E${String(ep.episode).padStart(2, '0')}`
+  }
+  return String(ep.episode)
 }
 
 function formatBytes(n: number): string {
@@ -150,7 +172,8 @@ interface MalDetail {
 }
 
 interface EpisodeRow {
-  mal_id: number
+  mal_id: number | null
+  season?: number | null
   url: string
   title: string
   /** `title` is a synthesized "Episode N" — no source has named it yet. */
@@ -165,6 +188,7 @@ interface EpisodeAudio { lang: string; label: string; codec: string; channels: s
 interface EpisodeMedia {
   id: string
   episode: number | null
+  season?: number | null
   resolution: string
   videoCodec: string
   audio: EpisodeAudio[]
@@ -594,7 +618,7 @@ export default function SeriesDetail() {
   const [mapMsg, setMapMsg] = useState('')
 
 
-  const [libMedia, setLibMedia] = useState<Map<number, EpisodeMedia>>(new Map())
+  const [libMedia, setLibMedia] = useState<Map<string, EpisodeMedia>>(new Map())
 
   const loadDownloads = useCallback(async () => {
     if (!Number.isFinite(id)) return
@@ -613,7 +637,14 @@ export default function SeriesDetail() {
       const r = await fetchAuth(`/api/series/${id}/library`)
       if (!r.ok) return
       const { episodes } = (await r.json()) as { episodes: EpisodeMedia[] }
-      setLibMedia(new Map(episodes.filter((e) => e.episode != null).map((e) => [e.episode as number, e])))
+      setLibMedia(
+        new Map(
+          episodes.flatMap((e) => {
+            const k = mediaKey(e.season, e.episode)
+            return k ? ([[k, e]] as [string, EpisodeMedia][]) : []
+          }),
+        ),
+      )
     } catch {
       /* leave prior state */
     }
@@ -1045,10 +1076,11 @@ export default function SeriesDetail() {
                           <span>·</span>
                           <span>{t.numSeeds} seeds</span>
                           <span>·</span>
-                          <span>{t.isBatch ? 'Batch' : t.episode != null ? `Ep ${t.episode}` : 'Single'}</span>
+                          <span>{t.isBatch ? (t.season != null ? `S${t.season} batch` : 'Batch') : t.episode != null ? `Ep ${t.episode}` : 'Single'}</span>
                         </p>
                       </div>
                       <div className="flex shrink-0 gap-1">
+                        {isAnime ? (
                         <Button
                           type="button"
                           variant="ghost"
@@ -1063,6 +1095,7 @@ export default function SeriesDetail() {
                             {busy ? 'Working…' : 'Blacklist & replace'}
                           </span>
                         </Button>
+                        ) : null}
                         <Button
                           type="button"
                           variant="ghost"
@@ -1230,7 +1263,7 @@ export default function SeriesDetail() {
             <table className="w-full text-left text-sm">
               <thead className="border-b border-border bg-muted/50">
                 <tr>
-                  <th className="w-14 px-3 py-2 font-medium">Ep</th>
+                  <th className="w-20 px-3 py-2 font-medium">Ep</th>
                   <th className="px-3 py-2 font-medium">Title</th>
                   <th className="w-48 px-3 py-2 font-medium">Library file</th>
                   <th className="w-28 px-3 py-2 font-medium">Aired</th>
@@ -1240,13 +1273,17 @@ export default function SeriesDetail() {
                 </tr>
               </thead>
               <tbody>
-                {episodes.map((ep) => (
+                {episodes.map((ep) => {
+                  const k = mediaKey(ep.season, ep.episode)
+                  const watchId = k ? dl?.siteEpisodes[k] : undefined
+                  const inLibrary = k != null && libMedia.has(k)
+                  return (
                   <tr
-                    key={`${ep.mal_id}-${ep.episode ?? ep.title}`}
+                    key={`${ep.season ?? 'x'}-${ep.episode ?? ep.title}`}
                     className="border-b border-border last:border-b-0"
                   >
-                    <td className="px-3 py-2 align-top text-muted-foreground">
-                      {ep.episode ?? '—'}
+                    <td className="px-3 py-2 align-top whitespace-nowrap text-muted-foreground">
+                      {formatEpNum(ep)}
                     </td>
                     <td className="px-3 py-2 align-top">
                       <span className={ep.title_pending ? 'text-muted-foreground' : 'font-medium'}>
@@ -1276,15 +1313,15 @@ export default function SeriesDetail() {
                       ) : null}
                     </td>
                     <td className="px-3 py-2 align-top">
-                      <MediaCell m={ep.episode != null ? libMedia.get(ep.episode) : undefined} />
+                      <MediaCell m={k ? libMedia.get(k) : undefined} />
                     </td>
                     <td className="px-3 py-2 align-top text-muted-foreground">
                       {formatAired(ep.aired)}
                     </td>
                     <td className="px-3 py-2 align-top">
-                      {dl?.siteEpisodes[String(ep.episode)] ? (
+                      {watchId ? (
                         <a
-                          href={`/watch/${dl.siteEpisodes[String(ep.episode)]}`}
+                          href={`/watch/${watchId}`}
                           className="inline-flex items-center gap-1 text-emerald-600 underline-offset-4 hover:underline dark:text-emerald-500"
                         >
                           <Play className="size-3" />
@@ -1296,12 +1333,12 @@ export default function SeriesDetail() {
                     </td>
                     <td className="px-3 py-2 align-top">
                       {(() => {
-                        const t = episodeDownload(ep.episode, dl?.torrents ?? [])
+                        const t = episodeDownload(ep.episode, dl?.torrents ?? [], ep.season)
                         if (!t) return <span className="text-muted-foreground">—</span>
-                        const onSite = !!dl?.siteEpisodes[String(ep.episode)]
-                        const inLibrary =
-                          ep.episode != null && libMedia.has(ep.episode)
-                        const st = episodeDownloadLabel(t.state, t.progress, { inLibrary, onSite })
+                        const st = episodeDownloadLabel(t.state, t.progress, {
+                          inLibrary,
+                          onSite: !!watchId,
+                        })
                         return (
                           <div className="min-w-0">
                             <span className={`text-xs ${st.tone}`}>
@@ -1326,25 +1363,29 @@ export default function SeriesDetail() {
                         rel="noreferrer"
                         className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
                       >
-                        MAL
+                        {isAnime ? 'MAL' : 'TMDB'}
                         <ExternalLink className="size-3" />
                       </a>
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
 
           <ul className="space-y-3 md:hidden">
-            {episodes.map((ep) => (
+            {episodes.map((ep) => {
+              const k = mediaKey(ep.season, ep.episode)
+              const watchId = k ? dl?.siteEpisodes[k] : undefined
+              return (
               <li
-                key={`${ep.mal_id}-${ep.episode ?? ep.title}`}
+                key={`${ep.season ?? 'x'}-${ep.episode ?? ep.title}`}
                 className="rounded-lg border border-border bg-card p-3"
               >
                 <div className="flex items-start justify-between gap-2">
                   <span className="text-xs text-muted-foreground">
-                    Ep {ep.episode ?? '?'}
+                    {formatEpNum(ep)}
                   </span>
                   <a
                     href={ep.url}
@@ -1352,7 +1393,7 @@ export default function SeriesDetail() {
                     rel="noreferrer"
                     className="shrink-0 text-xs text-primary"
                   >
-                    MAL ↗
+                    {isAnime ? 'MAL' : 'TMDB'} ↗
                   </a>
                 </div>
                 <p className={`mt-1 ${ep.title_pending ? 'text-muted-foreground' : 'font-medium'}`}>
@@ -1366,16 +1407,15 @@ export default function SeriesDetail() {
                 <p className="mt-1 text-xs text-muted-foreground">
                   {formatAired(ep.aired)}
                 </p>
-                {ep.episode != null && libMedia.get(ep.episode) ? (
+                {k && libMedia.get(k) ? (
                   <div className="mt-2">
-                    <MediaCell m={libMedia.get(ep.episode)} />
+                    <MediaCell m={libMedia.get(k)} />
                   </div>
                 ) : null}
                 {(() => {
-                  const t = episodeDownload(ep.episode, dl?.torrents ?? [])
-                  const watchId = dl?.siteEpisodes[String(ep.episode)]
+                  const t = episodeDownload(ep.episode, dl?.torrents ?? [], ep.season)
                   if (!t && !watchId) return null
-                  const inLibrary = ep.episode != null && libMedia.has(ep.episode)
+                  const inLibrary = k != null && libMedia.has(k)
                   const st = t
                     ? episodeDownloadLabel(t.state, t.progress, {
                         inLibrary,
@@ -1401,7 +1441,8 @@ export default function SeriesDetail() {
                   )
                 })()}
               </li>
-            ))}
+              )
+            })}
           </ul>
 
           {epLoading && episodes.length === 0 ? (
