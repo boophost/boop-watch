@@ -50,6 +50,8 @@ import { posthogUiHostEffective } from './posthogConfig.js'
 import { deleteUser, listAllUsers, setUserAdmin, isAdminViaEnv, isAdminForUserId } from './users.js'
 import { cfgSafe } from './config.js'
 import { sectionLibraryRoot } from './sections.js'
+import { reqOrigin } from './origin.js'
+import { injectShareMeta, sharePageForPath } from './shareMeta.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -1710,17 +1712,27 @@ app.get('/config.js', (req, res) => {
 
 if (IS_PROD) {
   const distPath = path.join(__dirname, '../dist')
-  
-  app.use(express.static(distPath))
+  const indexFile = path.join(distPath, 'index.html')
+  let indexHtml = ''
+  const loadIndex = (): string => {
+    if (!indexHtml) indexHtml = fs.readFileSync(indexFile, 'utf8')
+    return indexHtml
+  }
+
+  // index: false so GET / falls through to the injector — otherwise static
+  // would serve the un-personalized dist/index.html and crawlers would never
+  // see per-title Open Graph tags.
+  app.use(express.static(distPath, { index: false }))
   app.use((req, res) => {
     if (
-      req.method === 'GET' &&
+      (req.method === 'GET' || req.method === 'HEAD') &&
       !req.path.startsWith('/api') &&
       !req.path.startsWith('/ingest')
     ) {
-      // root-relative so send()'s dotfile check doesn't 404 when the checkout
-      // itself lives under a dot-directory (e.g. a .claude worktree)
-      res.sendFile('index.html', { root: distPath })
+      const html = injectShareMeta(loadIndex(), sharePageForPath(req.path), reqOrigin(req))
+      res.setHeader('Content-Type', 'text/html; charset=utf-8')
+      res.setHeader('Cache-Control', 'no-cache')
+      res.send(html)
       return
     }
     res.status(404).end()
