@@ -102,6 +102,19 @@ export async function resolveCatalog(
   return { record: jikanToCatalog(await fetchAnimeFull(mal)), source: 'jikan' }
 }
 
+/**
+ * How long `search` waits on Jikan before answering with AniList's hits alone.
+ * Search is interactive (it fires on every debounced keystroke) and Jikan is
+ * only a supplementary index here, so it must never hold up results the primary
+ * provider already has. The abandoned request is left to settle in its queue.
+ */
+const JIKAN_SEARCH_BUDGET_MS = 3500
+
+/** Resolves to `null` rather than waiting past `ms`. `p` must not reject. */
+function withBudget<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  return Promise.race([p, new Promise<null>((resolve) => { setTimeout(() => resolve(null), ms) })])
+}
+
 export const malClient: MetadataClient = {
   provider: 'mal',
   // AniList and Jikan are both public and unauthenticated.
@@ -121,20 +134,46 @@ export const malClient: MetadataClient = {
       episodes: number | null
     }): TitleHit => ({ source: 'mal', source_id: h.mal_id, ...h })
 
-    try {
-      return (await searchAnimeAniList(query, limit)).map(toHit)
-    } catch (anilistErr) {
+    // Both indexes are queried and their hits unioned by mal_id, because
+    // neither one alone is complete. AniList's matcher is literal over its own
+    // title/synonym list, so a show whose common English name lives only on MAL
+    // misses entirely — "The Super Dimension Fortress Macross" returns the two
+    // sequels but not the 1982 series, whose AniList synonym is spelled
+    // "Super Dimensional Fortress Macross". Jikan catches those. AniList stays
+    // primary (better relevance order, and it carries the year/type/status/
+    // episode fields the cards render), so it leads and wins any overlap.
+    const [anilist, jikan] = await Promise.all([
+      searchAnimeAniList(query, limit).catch((err) => {
+        console.error('search: AniList failed —', err)
+        return null
+      }),
       // Jikan's own search needs a Typesense index a self-hosted instance may
-      // not run, so this is a genuine fallback, not a preference.
-      console.error('search: AniList failed, trying Jikan —', anilistErr)
-      return (await searchAnime(query)).slice(0, limit).map((a) =>
+      // not run, and the public one 504s under load, so a miss here is routine.
+      withBudget(
+        searchAnime(query, limit).catch((err) => {
+          console.error('search: Jikan failed —', err)
+          return null
+        }),
+        JIKAN_SEARCH_BUDGET_MS,
+      ),
+    ])
+    if (anilist == null && jikan == null) {
+      throw new Error('Anime search is unavailable — both AniList and Jikan failed')
+    }
+
+    const hits = (anilist ?? []).map(toHit)
+    const seen = new Set(hits.map((h) => h.source_id))
+    for (const a of jikan ?? []) {
+      if (seen.has(a.mal_id)) continue
+      seen.add(a.mal_id)
+      hits.push(
         toHit({
           mal_id: a.mal_id,
           title: a.title,
           synopsis: a.synopsis ?? '',
           image_url: pickPosterUrl(a),
           url: a.url,
-          // Jikan's brief search result carries none of these; the UI degrades.
+          // Jikan's brief search result carries none of these; the card degrades.
           year: null,
           type: null,
           status: null,
@@ -142,6 +181,7 @@ export const malClient: MetadataClient = {
         }),
       )
     }
+    return hits.slice(0, limit)
   },
 
   async detail(_section: PortalSection, sourceId: number): Promise<TitleDetail> {
