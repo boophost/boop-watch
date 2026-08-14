@@ -4,6 +4,13 @@
 // the editor never hardcodes node knowledge.
 
 import fs from 'node:fs'
+// The library-import sink's I/O runs against an NFS mount, where a single
+// readdir/stat/copy can stall for seconds. Node is single-threaded, so doing
+// that synchronously freezes the HTTP server too — including /health, which is
+// what k8s reads: a long import made the readiness probe time out, dropped the
+// pod from its Service, and Traefik answered "no available server". Anything on
+// the per-file import path must use these, never the *Sync twins.
+import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -5115,10 +5122,19 @@ function franchiseShowName(show: string, hasTvdbSeason: boolean): string {
 // that keeps scheduled runs idempotent. Fall back to size for copy-mode imports
 // (different inode); a genuine upgrade — e.g. a dual-audio re-encode — is a
 // larger, distinct file, so it still replaces the old one.
-function sameLibraryFile(src: string, dest: string): boolean {
+/** Async `existsSync`. `access` rejects rather than returning false, hence the wrap. */
+async function exists(p: string): Promise<boolean> {
   try {
-    const a = fs.statSync(src)
-    const b = fs.statSync(dest)
+    await fsp.access(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function sameLibraryFile(src: string, dest: string): Promise<boolean> {
+  try {
+    const [a, b] = await Promise.all([fsp.stat(src), fsp.stat(dest)])
     if (a.ino !== 0 && a.ino === b.ino && a.dev === b.dev) return true
     return a.size === b.size
   } catch {
@@ -5132,10 +5148,10 @@ const VIDEO_EXTS = new Set(['.mkv', '.mp4', '.m4v', '.avi', '.webm'])
  * marker, regardless of the rest of the filename — so a `pathTemplate` edit
  * (or a differently-named legacy import) still finds the old release instead
  * of treating it as new and leaving two files for one episode. */
-function findSiblingEpisodeFile(destDir: string, marker: string, excludeBasename: string): string | null {
+async function findSiblingEpisodeFile(destDir: string, marker: string, excludeBasename: string): Promise<string | null> {
   let entries: string[]
   try {
-    entries = fs.readdirSync(destDir)
+    entries = await fsp.readdir(destDir)
   } catch {
     return null
   }
@@ -5174,10 +5190,10 @@ function normalizeDirName(name: string): string {
  * indexes it as a second, separate (and non-Public) series — the episodes never
  * surface on the portal, so the chase sits at "importing" forever. Always run
  * the normalised match and pick the canonical twin so both folders converge. */
-function resolveDirSegment(parent: string, wanted: string): string {
+async function resolveDirSegment(parent: string, wanted: string): Promise<string> {
   let entries: fs.Dirent[]
   try {
-    entries = fs.readdirSync(parent, { withFileTypes: true })
+    entries = await fsp.readdir(parent, { withFileTypes: true })
   } catch {
     return wanted
   }
@@ -5193,13 +5209,15 @@ function resolveDirSegment(parent: string, wanted: string): string {
 }
 
 /** Re-point a templated relative path at the directories already on disk. */
-function resolveExistingPath(root: string, rel: string): string {
+async function resolveExistingPath(root: string, rel: string): Promise<string> {
   const parts = rel.split('/')
   const file = parts.pop() as string
   let dir = root
   const resolved: string[] = []
+  // Sequential by necessity: each segment is resolved inside the directory the
+  // previous one picked.
   for (const seg of parts) {
-    const use = resolveDirSegment(dir, seg)
+    const use = await resolveDirSegment(dir, seg)
     resolved.push(use)
     dir = path.join(dir, use)
   }
@@ -5274,21 +5292,21 @@ const libraryImport: NodeImpl = {
     const moveSubs = bool(config, 'moveSubs', true)
 
     // Place one file: link/copy/symlink src -> dest with an EXDEV copy fallback.
-    const place = (src: string, dest: string): 'copy' | 'hardlink' | 'symlink' => {
-      fs.mkdirSync(path.dirname(dest), { recursive: true })
-      if (fs.existsSync(dest)) {
+    const place = async (src: string, dest: string): Promise<'copy' | 'hardlink' | 'symlink'> => {
+      await fsp.mkdir(path.dirname(dest), { recursive: true })
+      if (await exists(dest)) {
         if (!overwrite) return 'hardlink' // caller checks existence first; unreached
-        fs.rmSync(dest)
+        await fsp.rm(dest)
       }
-      if (method === 'copy') { fs.copyFileSync(src, dest); return 'copy' }
-      if (method === 'symlink') { fs.symlinkSync(src, dest); return 'symlink' }
+      if (method === 'copy') { await fsp.copyFile(src, dest); return 'copy' }
+      if (method === 'symlink') { await fsp.symlink(src, dest); return 'symlink' }
       try {
-        fs.linkSync(src, dest)
+        await fsp.link(src, dest)
         return 'hardlink'
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'EXDEV') {
           // Different filesystem: hardlink impossible, copy instead.
-          fs.copyFileSync(src, dest)
+          await fsp.copyFile(src, dest)
           return 'copy'
         }
         throw e
@@ -5370,7 +5388,7 @@ const libraryImport: NodeImpl = {
       }
       // Land in the folder that already holds this show/season rather than the
       // one the template happens to name today.
-      const rel = resolveExistingPath(root, templated)
+      const rel = await resolveExistingPath(root, templated)
       const dest = path.join(root, rel + ext)
       const destDir = path.dirname(dest)
       // Match any existing file for this episode by its SxxExx marker, not
@@ -5385,8 +5403,8 @@ const libraryImport: NodeImpl = {
           ? `S${String(Math.trunc(seasonNum)).padStart(2, '0')}E${String(Math.trunc(episodeNum)).padStart(2, '0')}`
           : null
       const destBasename = path.basename(dest)
-      let existing = fs.existsSync(dest) ? dest : null
-      if (!existing && marker) existing = findSiblingEpisodeFile(destDir, marker, destBasename)
+      let existing = (await exists(dest)) ? dest : null
+      if (!existing && marker) existing = await findSiblingEpisodeFile(destDir, marker, destBasename)
 
       // The want that asked for this file lives in MAL per-cour episode space —
       // fulfil with the PRE-offset number (epNum), never the post-offset
@@ -5410,12 +5428,12 @@ const libraryImport: NodeImpl = {
         // Overwrite mode: only re-place when the incoming file actually differs
         // from what's already there, so re-runs don't churn (or re-trigger a
         // Jellyfin scan) but a real upgrade does replace the old file.
-        if (sameLibraryFile(src, existing)) {
+        if (await sameLibraryFile(src, existing)) {
           // This library file *is* this torrent — free provenance for a file
           // imported before the ledger existed. Backfill it.
           if (!ctx.dryRun) {
             try {
-              const st = fs.statSync(existing)
+              const st = await fsp.stat(existing)
               recordLibraryFile({
                 path: path.relative(root, existing),
                 mal_id: asNumber(item.mal_id),
@@ -5443,13 +5461,13 @@ const libraryImport: NodeImpl = {
         continue
       }
       try {
-        const used = place(src, dest)
+        const used = await place(src, dest)
         // A stale sibling under a different name (an earlier import that used
         // an older path template) must go once the new file is safely placed,
         // or it lingers as a permanent duplicate episode.
         if (existing && existing !== dest) {
           try {
-            fs.rmSync(existing)
+            await fsp.rm(existing)
             forgetLibraryFile(path.relative(root, existing))
           } catch (e) {
             ctx.notes.push(
@@ -5461,7 +5479,7 @@ const libraryImport: NodeImpl = {
         // source lands here as a cross-filesystem copy, so its inode no longer
         // ties back to the torrent — the row is the only surviving provenance.
         try {
-          const st = fs.statSync(dest)
+          const st = await fsp.stat(dest)
           recordLibraryFile({
             path: path.relative(root, dest),
             mal_id: asNumber(item.mal_id),
@@ -5491,8 +5509,8 @@ const libraryImport: NodeImpl = {
             lang && codec ? `.${lang}.${codec}` : path.basename(subSrc).slice(String(item.file_name ?? path.basename(subSrc)).lastIndexOf('.'))
           const subDest = dest.slice(0, dest.length - ext.length) + subExt
           try {
-            fs.mkdirSync(path.dirname(subDest), { recursive: true })
-            fs.copyFileSync(subSrc, subDest)
+            await fsp.mkdir(path.dirname(subDest), { recursive: true })
+            await fsp.copyFile(subSrc, subDest)
             out.library_subtitle_path = subDest
           } catch (e) {
             ctx.notes.push(`subtitle copy failed for ${path.basename(dest)}: ${e instanceof Error ? e.message : String(e)}`)
