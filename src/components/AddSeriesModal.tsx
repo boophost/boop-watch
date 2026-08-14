@@ -35,6 +35,17 @@ export interface TitleSearchHit {
   inCatalog: boolean
 }
 
+/**
+ * Per-section wording. The modal is shared by all three sections, so naming
+ * "AniList" or "series" unconditionally is wrong for TV and movies — those come
+ * from TMDB, and calling a film a series reads as a bug even when the add works.
+ */
+const SECTION_COPY: Record<PortalSection, { noun: string; provider: string }> = {
+  anime: { noun: 'series', provider: 'AniList' },
+  tv: { noun: 'show', provider: 'TMDB' },
+  movies: { noun: 'movie', provider: 'TMDB' },
+}
+
 interface AddSeriesModalProps {
   /** Which catalog section to search and add into. */
   section: PortalSection
@@ -51,18 +62,20 @@ export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQu
   const [results, setResults] = useState<TitleSearchHit[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [selectedId, setSelectedMal] = useState<number | null>(null)
-  const [addedIds, setAddedMals] = useState<Set<number>>(new Set())
-  const [addingId, setAddingMal] = useState<number | null>(null)
+  // These key on `source_id`, never `mal_id` — `mal_id` is null for every TV and
+  // movie hit, so keying on it collapses each of these to a single null bucket.
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [addedIds, setAddedIds] = useState<Set<number>>(new Set())
+  const [addingId, setAddingId] = useState<number | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // Reset transient state each time the modal opens; seed the query.
   useEffect(() => {
     if (open) {
       setQ(initialQuery)
-      setSelectedMal(null)
+      setSelectedId(null)
       setError('')
-      setAddedMals(new Set())
+      setAddedIds(new Set())
       // Focus after the dialog mounts.
       const t = window.setTimeout(() => inputRef.current?.focus(), 50)
       return () => window.clearTimeout(t)
@@ -90,7 +103,7 @@ export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQu
           const hits = raw.results ?? []
           setResults(hits)
           // Auto-select the first addable hit so the detail panel isn't empty.
-          setSelectedMal((cur) =>
+          setSelectedId((cur) =>
             cur != null && hits.some((h) => h.source_id === cur) ? cur : (hits[0]?.source_id ?? null),
           )
         } catch (e) {
@@ -113,7 +126,7 @@ export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQu
 
   const addSeries = async (hit: TitleSearchHit) => {
     if (isAdded(hit)) return
-    setAddingMal(hit.mal_id)
+    setAddingId(hit.source_id)
     setError('')
     try {
       const r = await fetchAuth('/api/series', {
@@ -131,18 +144,20 @@ export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQu
       const raw = await parseAuthJson<{ error?: string }>(r)
       if (r.status === 409) {
         // Already added elsewhere — treat as added.
-        setAddedMals((s) => new Set(s).add(hit.source_id))
+        setAddedIds((s) => new Set(s).add(hit.source_id))
         return
       }
       if (!r.ok) throw new Error(raw.error ?? 'Could not add')
-      setAddedMals((s) => new Set(s).add(hit.source_id))
+      setAddedIds((s) => new Set(s).add(hit.source_id))
       onAdded?.()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not add')
     } finally {
-      setAddingMal(null)
+      setAddingId(null)
     }
   }
+
+  const { noun, provider } = SECTION_COPY[section]
 
   const meta = (h: TitleSearchHit) =>
     [h.year, h.type, h.episodes != null ? `${h.episodes} ep` : null].filter(Boolean).join(' · ')
@@ -151,16 +166,16 @@ export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQu
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl">
         <DialogHeader>
-          <DialogTitle>Add a series</DialogTitle>
+          <DialogTitle>Add a {noun}</DialogTitle>
           <DialogDescription>
-            Search AniList and click a poster to review it before adding to your catalog.
+            Search {provider} and click a poster to review it before adding to your catalog.
           </DialogDescription>
         </DialogHeader>
 
         <Input
           ref={inputRef}
           type="search"
-          placeholder="Search AniList…"
+          placeholder={`Search ${provider}…`}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           autoComplete="off"
@@ -183,7 +198,7 @@ export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQu
             ) : null}
             {!q.trim() && results.length === 0 ? (
               <div className="flex h-40 items-center justify-center px-6 text-center text-sm text-muted-foreground">
-                Start typing to search for a show to add.
+                Start typing to search for a {noun} to add.
               </div>
             ) : null}
             {results.length > 0 ? (
@@ -194,7 +209,7 @@ export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQu
                     <li key={h.source_id}>
                       <button
                         type="button"
-                        onClick={() => setSelectedMal(h.mal_id)}
+                        onClick={() => setSelectedId(h.source_id)}
                         className={cn(
                           'group relative block w-full overflow-hidden rounded-md border text-left transition-colors',
                           selectedId === h.source_id
@@ -267,14 +282,14 @@ export function AddSeriesModal({ section, open, onOpenChange, onAdded, initialQu
                       type="button"
                       className="w-full gap-1"
                       onClick={() => void addSeries(selected)}
-                      disabled={addingId === selected.mal_id}
+                      disabled={addingId === selected.source_id}
                     >
-                      {addingId === selected.mal_id ? (
+                      {addingId === selected.source_id ? (
                         <Loader2 className="size-4 animate-spin" />
                       ) : (
                         <Plus className="size-4" />
                       )}
-                      Add series
+                      Add {noun}
                     </Button>
                   )}
                 </div>
