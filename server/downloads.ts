@@ -173,6 +173,8 @@ export function matchSeriesDownloads(
     tvdb_season?: number | null
     episode_offset?: number | null
     episodes?: number | null
+    /** Release year — disambiguates a film from its sequel on the portal. */
+    year?: number | null
   },
   portalItems: ReturnType<typeof getAllPortalItems>,
   rawTorrents: QbitTorrent[] | null,
@@ -201,7 +203,36 @@ export function matchSeriesDownloads(
       tvShow && it.parent_index_number != null ? `${it.parent_index_number}:${number}` : String(number)
     siteEpisodes[key] = it.id
   }
-  const portalSeriesId = resolvePortalSeriesId(series, portalItems)
+  // A film is a portal item in its own right, not a parent with episodes: the
+  // loop above only ever matches `Episode`s, so the movies section reported
+  // "On site: Not yet" even with the film live on the portal. Resolve the Movie
+  // item itself and record it as the section's single on-site unit.
+  let portalSeriesId = resolvePortalSeriesId(series, portalItems)
+  if (series.section === 'movies') {
+    // Token overlap alone cannot separate a film from its sequel: `tokens()`
+    // drops bare numerals, so "Iron Man" and "Iron Man 2" both reduce to
+    // [iron, man] and both score 1.0 — the sequel would link to the original.
+    // Rank an exact normalised-title match, then a production-year agreement,
+    // above raw overlap.
+    const wantYear = series.year ?? null
+    const titles = [series.title, series.title_english, series.title_japanese]
+      .filter((t): t is string => !!t)
+      .map(norm)
+    let best: { id: string; rank: number } | null = null
+    for (const it of portalItems) {
+      if (it.type !== 'Movie') continue
+      const score = bestOverlap(it.name, variantTokens)
+      if (score < 0.5) continue
+      const exact = titles.includes(norm(it.name)) ? 2 : 0
+      const yearOk = wantYear != null && it.production_year === wantYear ? 1 : 0
+      const rank = exact + yearOk + score
+      if (!best || rank > best.rank) best = { id: it.id, rank }
+    }
+    if (best) {
+      siteEpisodes.movie = best.id
+      portalSeriesId = best.id
+    }
+  }
 
   if (!qbit.configured || rawTorrents == null) {
     return {
