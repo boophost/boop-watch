@@ -89,6 +89,16 @@ export const CONFIG_SPEC: ConfigFieldSpec[] = [
   { key: 'JIMAKU_API_KEY', label: 'Jimaku API key', group: 'Metadata', secret: true,
     help: 'Subtitle fallback. Unset routes every item to "missed"; the embedded-sub branch still works.' },
   { key: 'JIMAKU_URL', label: 'Jimaku base URL', group: 'Metadata' },
+  // OpenSubtitles is the only English-subtitle source here — Jimaku hosts
+  // Japanese subs, and its node's `lang` is a label on the sidecar, not a
+  // filter. Downloads (unlike search) need a logged-in token, hence the
+  // username/password alongside the key.
+  { key: 'OPENSUBTITLES_API_KEY', label: 'OpenSubtitles API key', group: 'Metadata', secret: true,
+    help: 'English subtitle fetch. Unset routes every item to "missed"; the embedded-sub branch still works.' },
+  { key: 'OPENSUBTITLES_USERNAME', label: 'OpenSubtitles username', group: 'Metadata',
+    help: 'Required for downloads — the API key alone only permits search.' },
+  { key: 'OPENSUBTITLES_PASSWORD', label: 'OpenSubtitles password', group: 'Metadata', secret: true },
+  { key: 'OPENSUBTITLES_URL', label: 'OpenSubtitles base URL', group: 'Metadata' },
 
   // --- Downloads ------------------------------------------------------------
   { key: 'QBIT_URL', label: 'qBittorrent URL', group: 'Downloads' },
