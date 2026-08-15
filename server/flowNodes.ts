@@ -5344,6 +5344,23 @@ const libraryImport: NodeImpl = {
     let catalogRows: ReturnType<typeof listSeries> | null = null
     const catalog = () => (catalogRows ??= listAnimeSeries())
 
+    // The catalog row this file belongs to, for the ledger. `mal_id` is null on
+    // every TV and movie import, so a row keyed only on it is orphaned from its
+    // title — which is what left an imported film showing "Library: None yet".
+    // `enrich.indexer-match` puts the provider id on the item as `source_id`.
+    const seriesIdCache = new Map<number, number | null>()
+    const resolveSeriesId = (item: FlowItem): number | null => {
+      const direct = asNumber(item.series_id)
+      if (direct != null) return direct
+      const sourceId = asNumber(item.source_id) ?? asNumber(item.mal_id)
+      if (sourceId == null) return null
+      if (seriesIdCache.has(sourceId)) return seriesIdCache.get(sourceId) ?? null
+      const provider = sectionConfig(importSection).provider
+      const found = findBySource(importSection, provider, sourceId)?.id ?? null
+      seriesIdCache.set(sourceId, found)
+      return found
+    }
+
     /** True when this mal_id is one cour of a multi-season franchise (siblings
      * share its tvdb_id). Guessing Season 1 for such a file buries a later
      * cour's episodes under the wrong season — better to skip and say so. */
@@ -5462,6 +5479,7 @@ const libraryImport: NodeImpl = {
             try {
               const st = await fsp.stat(existing)
               recordLibraryFile({
+                series_id: resolveSeriesId(item),
                 path: path.relative(root, existing),
                 mal_id: asNumber(item.mal_id),
                 tvdb_id: asNumber(item.tvdb_id),
@@ -5508,6 +5526,7 @@ const libraryImport: NodeImpl = {
         try {
           const st = await fsp.stat(dest)
           recordLibraryFile({
+            series_id: resolveSeriesId(item),
             path: path.relative(root, dest),
             mal_id: asNumber(item.mal_id),
             tvdb_id: asNumber(item.tvdb_id),
