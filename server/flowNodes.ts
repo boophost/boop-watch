@@ -2094,6 +2094,7 @@ const compare: NodeImpl = {
           { value: 'contains', label: 'contains' },
           { value: 'matches', label: 'matches regex' },
           { value: 'in', label: 'in (comma list)' },
+          { value: 'year-ok', label: 'year agrees (or absent)' },
         ],
         default: 'gte',
       },
@@ -2119,6 +2120,17 @@ const compare: NodeImpl = {
         case 'matches':
           try { ok = new RegExp(String(right), 'i').test(String(left ?? '')) } catch { ok = false }
           break
+        // "The name must contain the release year" is the right instinct but the
+        // wrong test: plenty of legitimate releases carry no year at all (raw and
+        // non-English groups especially), and a plain `contains` rejects every one
+        // of them. Only a *conflicting* year is evidence of a mismatch — an absent
+        // one is simply no evidence, so it passes.
+        case 'year-ok': {
+          const want = String(right ?? '').match(/\d{4}/)?.[0]
+          const years = String(left ?? '').match(/(?:19|20)\d{2}/g)
+          ok = !want || !years || years.includes(want)
+          break
+        }
         case 'in':
           ok = String(right).split(',').map((s) => s.trim().toLowerCase()).includes(String(left ?? '').toLowerCase())
           break
@@ -3008,8 +3020,23 @@ function scoreCandidate(c: Candidate, o: SearchOpts): number {
   return s
 }
 
+// Theatrical-release markers. A film carries no episode number, so the batch
+// heuristic ("no episode ⇒ season pack") happily hands one to an episode want —
+// that is how a want for the Macross *TV* series pulled down the 1984 film,
+// which then failed import as `unresolved-episode` after an 11 GB download.
+// Naming the fact here (rather than acting on it) keeps the branching in the
+// graph, per the general filter/sort node convention.
+const FILM_MARKERS =
+  /(\bmovies?\b|\bthe\s+movie\b|\bgekijou?ban\b|劇場版|剧场版|院线版|\bfeature\s+film\b)/i
+
+/** True when a release name advertises itself as a theatrical film. */
+export function releaseLooksLikeFilm(name: string): boolean {
+  return FILM_MARKERS.test(name)
+}
+
 function candidateFields(c: Candidate): FlowItem {
   return {
+    torrent_is_film: releaseLooksLikeFilm(c.name),
     torrent_name: c.name,
     torrent_magnet: c.magnet,
     torrent_hash: c.hash,
