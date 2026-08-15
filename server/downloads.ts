@@ -392,24 +392,66 @@ export async function resolveJfSeriesId(series: {
   }
 }
 
-/** Media facts for every library episode of a series, keyed for the manage page.
- * Sourced from Jellyfin (one /Shows/{id}/Episodes call with stream fields). */
+/**
+ * The one library file behind a movies-section row, as a single-entry list.
+ *
+ * A film is not a series: `/Shows/{id}/Episodes` returns nothing for one, so the
+ * TV path below reported "no library files" for every imported movie — the
+ * manage page sat on "Library: None yet" with the file plainly on disk. Look up
+ * the Movie item directly instead, preferring the year to separate remakes.
+ */
+async function getMovieLibraryMedia(series: {
+  title: string
+  title_english?: string | null
+  year?: number | null
+}): Promise<JfItem[]> {
+  const terms = [series.title_english, series.title].filter((t): t is string => !!t && !!t.trim())
+  for (const term of terms) {
+    try {
+      const r = await jfJson<{ Items?: JfItem[] }>('/Items', {
+        Recursive: 'true',
+        IncludeItemTypes: 'Movie',
+        SearchTerm: term,
+        Fields: 'MediaStreams,MediaSources',
+        Limit: '25',
+      })
+      const items = r.Items ?? []
+      if (items.length === 0) continue
+      // A year match is the strongest signal we have; fall back to the single
+      // hit rather than guessing between several same-named films.
+      const byYear = series.year != null ? items.filter((it) => it.ProductionYear === series.year) : []
+      if (byYear.length > 0) return [byYear[0]]
+      if (items.length === 1) return items
+    } catch {
+      /* try the next title variant */
+    }
+  }
+  return []
+}
+
+/** Media facts for every library file behind a catalog row, for the manage page.
+ * TV/anime list their Jellyfin episodes; a movie resolves to its single file. */
 export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMedia[]> {
   if (!jellyfinConfigured()) return []
   const series = getSeriesById(seriesId)
   if (!series) return []
 
-  const jfSeriesId = await resolveJfSeriesId(series)
-  if (!jfSeriesId) return []
-
   let episodes: JfItem[] = []
-  try {
-    const r = await jfJson<{ Items?: JfItem[] }>(`/Shows/${jfSeriesId}/Episodes`, {
-      Fields: 'MediaStreams,MediaSources',
-    })
-    episodes = r.Items ?? []
-  } catch {
-    return []
+  if (series.section === 'movies') {
+    episodes = await getMovieLibraryMedia(series)
+    if (episodes.length === 0) return []
+  } else {
+    const jfSeriesId = await resolveJfSeriesId(series)
+    if (!jfSeriesId) return []
+
+    try {
+      const r = await jfJson<{ Items?: JfItem[] }>(`/Shows/${jfSeriesId}/Episodes`, {
+        Fields: 'MediaStreams,MediaSources',
+      })
+      episodes = r.Items ?? []
+    } catch {
+      return []
+    }
   }
 
   // Multi-season franchise: a cour catalog row (tvdb_season set) only wants that

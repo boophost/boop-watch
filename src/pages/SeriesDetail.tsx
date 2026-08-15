@@ -594,6 +594,9 @@ export default function SeriesDetail() {
   // labels) hang off this. The server 409s these routes for a TV/movie row —
   // rendering them would just produce a page of failed requests.
   const isAnime = series == null || series.section == null || series.section === 'anime'
+  // A film has no episode list and exactly one library file, so the episode
+  // table and the per-episode pipeline maths are both wrong for it.
+  const isMovie = series?.section === 'movies'
   const [mal, setMal] = useState<MalDetail | null>(null)
   const [malError, setMalError] = useState('')
   const [detailLoading, setDetailLoading] = useState(true)
@@ -619,6 +622,8 @@ export default function SeriesDetail() {
 
 
   const [libMedia, setLibMedia] = useState<Map<string, EpisodeMedia>>(new Map())
+  // The film's single library file, whatever key it landed under.
+  const movieMedia = isMovie ? [...libMedia.values()][0] : undefined
 
   const loadDownloads = useCallback(async () => {
     if (!Number.isFinite(id)) return
@@ -640,7 +645,11 @@ export default function SeriesDetail() {
       setLibMedia(
         new Map(
           episodes.flatMap((e) => {
-            const k = mediaKey(e.season, e.episode)
+            // A movie carries no episode number, so `mediaKey` yields null and the
+            // file would drop out of the map entirely — leaving "Library: None
+            // yet" next to a file that is plainly on disk. Fall back to the
+            // Jellyfin item id, which is unique and never collides with "s:e".
+            const k = mediaKey(e.season, e.episode) ?? e.id
             return k ? ([[k, e]] as [string, EpisodeMedia][]) : []
           }),
         ),
@@ -1011,7 +1020,7 @@ export default function SeriesDetail() {
 
         <div className="space-y-2">
           <PipelineStrip
-            expected={dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null}
+            expected={isMovie ? 1 : (dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null)}
             libCount={libMedia.size}
             torrents={dl?.torrents ?? []}
             onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
@@ -1246,6 +1255,27 @@ export default function SeriesDetail() {
           ) : null}
         </section>
 
+        {isMovie ? (
+          <section>
+            <h2 className="mb-4 text-lg font-semibold">Library file</h2>
+            {movieMedia ? (
+              <div className="rounded-lg border border-border bg-card p-4">
+                <MediaCell m={movieMedia} />
+                {movieMedia.runtimeMin ? (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    Runtime {movieMedia.runtimeMin} min
+                    {movieMedia.container ? ` · ${movieMedia.container}` : ''}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Not in the library yet — it appears here once the Movie import flow places the file
+                and Jellyfin has scanned it.
+              </p>
+            )}
+          </section>
+        ) : (
         <section>
           <h2 className="mb-4 text-lg font-semibold">Episodes</h2>
           {epError ? (
@@ -1468,6 +1498,7 @@ export default function SeriesDetail() {
             </div>
           ) : null}
         </section>
+        )}
       </main>
     </div>
   )
