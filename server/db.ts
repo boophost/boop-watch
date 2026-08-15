@@ -1121,6 +1121,10 @@ export function addBanner(b: {
 
 export interface LibraryFileRow {
   path: string
+  /** The catalog row this file belongs to. The section-agnostic identity —
+   * `mal_id` is null for every TV and movie import, so keying only on it left
+   * their ledger rows orphaned from the title they were imported for. */
+  series_id: number | null
   mal_id: number | null
   tvdb_id: number | null
   tvdb_season: number | null
@@ -1138,9 +1142,10 @@ export interface LibraryFileRow {
 export function recordLibraryFile(row: Omit<LibraryFileRow, 'imported_at'>): void {
   getDb()
     .prepare(
-      `INSERT INTO library_files (path, mal_id, tvdb_id, tvdb_season, episode, torrent_hash, source_path, inode, size, method, imported_at)
-       VALUES (@path, @mal_id, @tvdb_id, @tvdb_season, @episode, @torrent_hash, @source_path, @inode, @size, @method, datetime('now'))
+      `INSERT INTO library_files (path, series_id, mal_id, tvdb_id, tvdb_season, episode, torrent_hash, source_path, inode, size, method, imported_at)
+       VALUES (@path, @series_id, @mal_id, @tvdb_id, @tvdb_season, @episode, @torrent_hash, @source_path, @inode, @size, @method, datetime('now'))
        ON CONFLICT(path) DO UPDATE SET
+         series_id=excluded.series_id,
          mal_id=excluded.mal_id, tvdb_id=excluded.tvdb_id, tvdb_season=excluded.tvdb_season,
          episode=excluded.episode, torrent_hash=excluded.torrent_hash, source_path=excluded.source_path,
          inode=excluded.inode, size=excluded.size, method=excluded.method, imported_at=datetime('now')`,
