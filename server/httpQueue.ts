@@ -96,6 +96,7 @@ type ServiceKey =
   | 'kitsu'
   | 'fanart'
   | 'jimaku'
+  | 'opensubtitles'
   | 'aniskip'
   | 'itunes'
   | 'other'
@@ -114,6 +115,9 @@ const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   kitsu: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   fanart: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   jimaku: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 2 },
+  // OpenSubtitles publishes a per-second cap and a daily download quota; pace
+  // it conservatively so a library-wide sweep degrades to slow, not banned.
+  opensubtitles: { minGapMs: 1200, concurrency: 1, timeoutMs: 30_000, retries: 2 },
   aniskip: { minGapMs: 350, concurrency: 2, timeoutMs: 5_000, retries: 1 },
   // iTunes Search allows ~20 req/min without a key — pace well under that.
   itunes: { minGapMs: 3100, concurrency: 1, timeoutMs: 10_000, retries: 1 },
@@ -293,6 +297,7 @@ const HOST_KEYS: Array<[RegExp, ServiceKey]> = [
   [/(^|\.)kitsu\.(io|app)$/i, 'kitsu'],
   [/(^|\.)fanart\.tv$/i, 'fanart'],
   [/(^|\.)jimaku\.cc$/i, 'jimaku'],
+  [/(^|\.)opensubtitles\.com$/i, 'opensubtitles'],
   [/(^|\.)aniskip\.com$/i, 'aniskip'],
 ]
 
