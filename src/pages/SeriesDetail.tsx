@@ -991,7 +991,12 @@ export default function SeriesDetail() {
               ) : null}
               {dl?.portalSeriesId ? (
                 <Button variant="outline" size="sm" asChild>
-                  <a href={`/series/${dl.portalSeriesId}`} target="_blank" rel="noreferrer">
+                  {/* A film lives at /movie/:id on the portal, not /series/:id. */}
+                  <a
+                    href={`${isMovie ? '/movie' : '/series'}/${dl.portalSeriesId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
                     View on site
                     <ExternalLink className="ml-1 size-3.5 opacity-70" />
                   </a>
