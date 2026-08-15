@@ -317,8 +317,6 @@ function digPath(doc: unknown, path: string): unknown {
   return cur
 }
 
-/** The anime section's collection — the historical WATCH_COLLECTION_ID. */
-const defaultCollectionId = (): string => cfgSafe('WATCH_COLLECTION_ID')
 
 /** Maps a Jellyfin item to the flow-item shape (superset of PortalItem). */
 function fromJellyfin(it: JfItem): FlowItem {
@@ -5746,7 +5744,19 @@ const jellyfinCollection: NodeImpl = {
       { id: 'pending', label: 'not found yet' },
     ],
     config: [
-      { key: 'collectionId', label: 'Collection id', kind: 'text', default: '', help: 'Empty = WATCH_COLLECTION_ID env (the public "Watch" collection).' },
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+        ],
+        default: 'anime',
+        help: 'Which section’s collection to add to. Ignored when a collection id is set below.',
+      },
+      { key: 'collectionId', label: 'Collection id (override)', kind: 'text', default: '', help: 'Add to this BoxSet instead of the section’s configured one.' },
       { key: 'nameField', label: 'Show name field', kind: 'text', default: 'title_english', help: 'Item field with the show title; falls back to name.' },
       { key: 'itemType', label: 'Item type', kind: 'select', options: [
         { value: 'Series', label: 'Series' },
@@ -5758,7 +5768,16 @@ const jellyfinCollection: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const items = allInputs(inputs)
-    const collectionId = str(config, 'collectionId', '') || defaultCollectionId()
+    // Explicit id wins, then the chosen section's collection. Defaulting the
+    // section to anime keeps every saved graph on WATCH_COLLECTION_ID exactly as
+    // before; without a section this node could only ever feed the anime
+    // collection, so TV and movie imports landed in the library but never
+    // reached the portal — "imported" but permanently "not on site".
+    const section = (str(config, 'section', 'anime') || 'anime') as PortalSection
+    const collectionId =
+      str(config, 'collectionId', '') ||
+      sectionCollections().find((c) => c.section === section)?.collectionId ||
+      ''
     const nameField = str(config, 'nameField', 'title_english')
     const itemType = str(config, 'itemType', 'Series')
     const threshold = num(config, 'threshold', 0.6)
@@ -5775,7 +5794,11 @@ const jellyfinCollection: NodeImpl = {
       ctx.notes.push('no items had a show name to resolve')
       return { added: [], pending: items }
     }
-    if (!collectionId) throw new Error('No collection id (config or WATCH_COLLECTION_ID env)')
+    if (!collectionId) {
+      throw new Error(
+        `No Jellyfin collection for the ${section} section — set its collection id in /manage/settings, or paste one into this node.`,
+      )
+    }
     if (!jellyfinConfigured()) throw new Error('Jellyfin is not configured')
 
     // Resolve each unique show to a Jellyfin id, polling for the async scan.
