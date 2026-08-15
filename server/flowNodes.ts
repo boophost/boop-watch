@@ -4129,7 +4129,7 @@ const mediaProbe: NodeImpl = {
     label: 'Probe media',
     category: 'enrich',
     description:
-      'ffprobes the video file and emits its stream facts (sub_langs, sub_codecs, sub_track_count, audio_langs, video_codec) plus a sub_tracks list for the extractor. Branch on these with a Compare node.',
+      'ffprobes the video file and emits its stream facts (sub_langs, sub_text_langs, sub_image_langs, sub_codecs, sub_track_count, audio_langs, video_codec) plus a sub_tracks list for the extractor. sub_text_langs is the one to branch on for "can we actually serve this subtitle" — image subs (PGS/VobSub) are unusable. Branch on these with a Compare node.',
     inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
       { id: 'probed', label: 'probed', dataType: 'probed' },
@@ -4169,11 +4169,24 @@ const mediaProbe: NodeImpl = {
           .map((s) => s.tags?.language ?? '')
           .filter(Boolean)
         const video = streams.find((s) => s.codec_type === 'video')
+        // `sub_langs` alone cannot answer "does this have a usable English
+        // subtitle": a file can carry English as a PGS/VobSub bitmap, which the
+        // portal cannot render (subs go out as text for client-side JASSUB) and
+        // the extractor cannot pull out. Splitting the languages by whether the
+        // track is text keeps that distinction expressible in a graph, where a
+        // plain Compare on the flat lists would silently conflate the two.
+        const isText = (codec: string): boolean => Object.hasOwn(SUB_EXT, codec.toLowerCase())
+        const langsOf = (want: boolean): string =>
+          [...new Set(subTracks.filter((t) => isText(t.codec) === want).map((t) => t.lang).filter(Boolean))].join(',')
         probed.push({
           ...item,
           sub_track_count: subTracks.length,
           sub_langs: subTracks.map((t) => t.lang).filter(Boolean).join(','),
           sub_codecs: subTracks.map((t) => t.codec).filter(Boolean).join(','),
+          /** Languages available as *text* — the ones we can actually serve. */
+          sub_text_langs: langsOf(true),
+          /** Languages available only as a bitmap (PGS/VobSub); needs OCR. */
+          sub_image_langs: langsOf(false),
           sub_tracks: JSON.stringify(subTracks),
           audio_langs: audioLangs.join(','),
           video_codec: video?.codec_name ?? '',
