@@ -4309,7 +4309,10 @@ const extractSubs: NodeImpl = {
 // embedded sub in the target language. Keys on AniList id when available, else a
 // title query. Needs JIMAKU_API_KEY; without it the node passes items straight
 // to "missed" so the graph can route them elsewhere.
-const jimakuUrl = (): string => cfgSafe('jimakuUrl()') || 'https://jimaku.cc/api'
+// Was `cfgSafe('jimakuUrl()')` — the literal function text as the key, which
+// matches nothing, so JIMAKU_URL silently never applied and the default was
+// always used.
+const jimakuUrl = (): string => cfgSafe('JIMAKU_URL') || 'https://jimaku.cc/api'
 
 const fetchSubs: NodeImpl = {
   spec: {
@@ -4415,6 +4418,228 @@ const fetchSubs: NodeImpl = {
     }
     ctx.notes.push(ctx.dryRun ? `dry run — resolved ${found.length} Jimaku sub(s)` : `fetched ${found.length} sub(s), ${missed.length} missed`)
     return { found, missed }
+  },
+}
+
+const opensubsUrl = (): string => cfgSafe('OPENSUBTITLES_URL') || 'https://api.opensubtitles.com/api/v1'
+
+/**
+ * Fetch an English subtitle from OpenSubtitles.
+ *
+ * The only English source available: Jimaku is a Japanese-subtitle repository,
+ * and `enrich.extract-subs` can only surface a track the file already carries —
+ * useless for a release whose subtitles are PGS bitmaps, or which has none.
+ *
+ * Search accepts the API key alone, but *download* requires a logged-in token,
+ * so a username/password is needed too. The token is minted once per run.
+ * Sets subtitle_path/lang/codec exactly like the extractor and Jimaku node, so
+ * `sink.library-import` and `sink.subtitle-sidecar` both consume it unchanged.
+ */
+const fetchSubsOpenSubtitles: NodeImpl = {
+  spec: {
+    type: 'enrich.fetch-subs-opensubtitles',
+    label: 'Fetch subtitles (OpenSubtitles)',
+    category: 'enrich',
+    description:
+      'Downloads an English subtitle from OpenSubtitles for items that have none usable. Sets subtitle_path/lang/codec like the other subtitle nodes. Needs OPENSUBTITLES_API_KEY plus username/password (downloads require a login token). Free accounts have a small daily download quota.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'found', label: 'found' },
+      { id: 'missed', label: 'missed' },
+    ],
+    config: [
+      { key: 'queryField', label: 'Title field', kind: 'text', default: 'title' },
+      { key: 'yearField', label: 'Year field', kind: 'text', default: 'production_year', help: 'Narrows the search; skipped when absent.' },
+      { key: 'seasonField', label: 'Season field', kind: 'text', default: '', help: 'Set for TV to match a specific episode.' },
+      { key: 'episodeField', label: 'Episode field', kind: 'text', default: '', help: 'Set for TV to match a specific episode.' },
+      { key: 'lang', label: 'Language', kind: 'text', default: 'en', help: 'OpenSubtitles language code. Recorded as subtitle_lang.' },
+      { key: 'outDir', label: 'Output dir', kind: 'text', default: '', help: 'Empty = DATA_DIR/work.' },
+      { key: 'maxItems', label: 'Max lookups', kind: 'number', default: 25, help: 'Guards the daily download quota. 0 = unlimited.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const items = allInputs(inputs)
+    const queryField = str(config, 'queryField', 'title')
+    const yearField = str(config, 'yearField', 'production_year')
+    const seasonField = str(config, 'seasonField', '')
+    const episodeField = str(config, 'episodeField', '')
+    const lang = str(config, 'lang', 'en') || 'en'
+    const outDir = str(config, 'outDir', '') || path.join(WORK_DIR(), 'work')
+    const maxItems = num(config, 'maxItems', 25)
+
+    const apiKey = cfgSafe('OPENSUBTITLES_API_KEY')
+    const username = cfgSafe('OPENSUBTITLES_USERNAME')
+    const password = cfgSafe('OPENSUBTITLES_PASSWORD')
+    const found: FlowItem[] = []
+    const missed: FlowItem[] = []
+
+    // Unconfigured is a routing outcome, not a run failure: the embedded-sub
+    // branch of a subtitle flow must keep working without this credential.
+    if (!apiKey) {
+      ctx.notes.push('OPENSUBTITLES_API_KEY is not set — every item routed to "missed"')
+      return { found: [], missed: items }
+    }
+    const base = opensubsUrl().replace(/\/$/, '')
+    const headers = { 'Api-Key': apiKey, 'User-Agent': 'boop-watch v1', 'Content-Type': 'application/json' }
+
+    let token: string | null = null
+    const login = async (): Promise<string | null> => {
+      if (token || !username || !password) return token
+      const res = await limitedFetch('opensubtitles', `${base}/login`, {
+        method: 'POST', headers, body: JSON.stringify({ username, password }),
+      })
+      if (!res.ok) throw new Error(`login ${res.status}`)
+      token = ((await res.json()) as { token?: string }).token ?? null
+      return token
+    }
+
+    let looked = 0
+    for (const item of items) {
+      if (maxItems > 0 && looked >= maxItems) { missed.push(item); continue }
+      const query = String(item[queryField] ?? '').trim()
+      if (!query) { missed.push(item); continue }
+      looked++
+      try {
+        const q = new URLSearchParams({ query, languages: lang })
+        const year = yearField ? asNumber(item[yearField]) : null
+        if (year != null) q.set('year', String(year))
+        const season = seasonField ? asNumber(item[seasonField]) : null
+        const episode = episodeField ? asNumber(item[episodeField]) : null
+        if (season != null) q.set('season_number', String(season))
+        if (episode != null) q.set('episode_number', String(episode))
+        q.set('type', episode != null ? 'episode' : 'movie')
+
+        const sres = await limitedFetch('opensubtitles', `${base}/subtitles?${q}`, { headers })
+        if (!sres.ok) throw new Error(`search ${sres.status}`)
+        const data = (await sres.json()) as {
+          data?: { attributes?: { download_count?: number; files?: { file_id?: number; file_name?: string }[] } }[]
+        }
+        // Most-downloaded first: the community's own quality signal, and far
+        // more reliable than the arbitrary API ordering.
+        const best = (data.data ?? [])
+          .filter((d) => (d.attributes?.files ?? []).some((f) => f.file_id != null))
+          .sort((a, b) => (b.attributes?.download_count ?? 0) - (a.attributes?.download_count ?? 0))[0]
+        const file = best?.attributes?.files?.find((f) => f.file_id != null)
+        if (!file?.file_id) { missed.push(item); continue }
+
+        const ext = /\.(ass|ssa)$/i.test(file.file_name ?? '') ? 'ass' : 'srt'
+        const baseName = String(
+          item.file_name ? path.basename(String(item.file_name), path.extname(String(item.file_name))) : query,
+        ).replace(/[/\\]/g, '_')
+        const subDir = path.join(outDir, baseName)
+        const subPath = path.join(subDir, `${baseName}.${lang}.${ext}`)
+
+        if (ctx.dryRun) {
+          found.push({ ...item, subtitle_path: subPath, subtitle_lang: lang, subtitle_codec: ext, subtitle_dir: subDir, subtitle_source: 'opensubtitles' })
+          continue
+        }
+        const tok = await login()
+        if (!tok) {
+          ctx.notes.push('OPENSUBTITLES_USERNAME/PASSWORD not set — search works but downloads need a login')
+          missed.push(item)
+          continue
+        }
+        const dres = await limitedFetch('opensubtitles', `${base}/download`, {
+          method: 'POST',
+          headers: { ...headers, Authorization: `Bearer ${tok}` },
+          body: JSON.stringify({ file_id: file.file_id }),
+        })
+        if (!dres.ok) throw new Error(`download ${dres.status}`)
+        const link = ((await dres.json()) as { link?: string }).link
+        if (!link) throw new Error('no download link')
+        const dl = await fetch(link, { signal: AbortSignal.timeout(30_000) })
+        if (!dl.ok) throw new Error(`fetch ${dl.status}`)
+        await fsp.mkdir(subDir, { recursive: true })
+        await fsp.writeFile(subPath, Buffer.from(await dl.arrayBuffer()))
+        found.push({ ...item, subtitle_path: subPath, subtitle_lang: lang, subtitle_codec: ext, subtitle_dir: subDir, subtitle_source: 'opensubtitles' })
+      } catch (e) {
+        ctx.notes.push(`OpenSubtitles error for "${query}": ${e instanceof Error ? e.message : String(e)}`)
+        missed.push(item)
+      }
+    }
+    ctx.notes.push(
+      `${ctx.dryRun ? 'dry run — resolved' : 'fetched'} ${found.length} sub(s), ${missed.length} missed`,
+    )
+    return { found, missed }
+  },
+}
+
+/**
+ * Place an already-fetched subtitle beside a video that is *already in the
+ * library*.
+ *
+ * `sink.library-import` moves sidecars alongside the video it places, but that
+ * only helps at import time. Everything that produces a subtitle later — an
+ * extraction or a provider fetch run over the existing library — wrote into the
+ * work dir with nothing to consume it, so a subtitle could be obtained and still
+ * never reach Jellyfin. This is the missing last step; pair it with
+ * `sink.jellyfin-scan` so the new track is picked up.
+ *
+ * The name Jellyfin expects is the video's own basename plus a language tag:
+ * `Some Film (1984).eng.srt` next to `Some Film (1984).mkv`.
+ */
+const subtitleSidecar: NodeImpl = {
+  spec: {
+    type: 'sink.subtitle-sidecar',
+    label: 'Place subtitle sidecar',
+    category: 'sink',
+    description:
+      'Copies an item’s subtitle (subtitle_path) next to its video in the library, named <video>.<lang>.<ext> so Jellyfin picks it up. For files already imported — sink.library-import already handles sidecars for new ones. Follow with a Jellyfin scan.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'placed', label: 'placed' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      { key: 'videoField', label: 'Video path field', kind: 'text', default: 'file_path', help: 'The library video the sidecar belongs beside.' },
+      { key: 'subField', label: 'Subtitle path field', kind: 'text', default: 'subtitle_path' },
+      { key: 'langField', label: 'Language field', kind: 'text', default: 'subtitle_lang', help: 'Written into the filename as .<lang>. Falls back to "eng".' },
+      { key: 'codecField', label: 'Extension field', kind: 'text', default: 'subtitle_codec', help: 'srt / ass / vtt. Empty = taken from the subtitle file’s own extension.' },
+      { key: 'overwrite', label: 'Overwrite existing', kind: 'boolean', default: false },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const videoField = str(config, 'videoField', 'file_path')
+    const subField = str(config, 'subField', 'subtitle_path')
+    const langField = str(config, 'langField', 'subtitle_lang')
+    const codecField = str(config, 'codecField', 'subtitle_codec')
+    const overwrite = bool(config, 'overwrite', false)
+    const placed: FlowItem[] = []
+    const skipped: FlowItem[] = []
+
+    for (const item of allInputs(inputs)) {
+      const video = String(item[videoField] ?? '')
+      const sub = String(item[subField] ?? '')
+      if (!video || !sub) {
+        skipped.push({ ...item, sidecar_status: 'missing-fields' })
+        continue
+      }
+      const lang = String(item[langField] ?? '').trim() || 'eng'
+      const ext = (String(item[codecField] ?? '').trim() || path.extname(sub).replace(/^\./, '') || 'srt').toLowerCase()
+      const base = path.basename(video, path.extname(video))
+      const dest = path.join(path.dirname(video), `${base}.${lang}.${ext}`)
+
+      if (!overwrite && (await exists(dest))) {
+        skipped.push({ ...item, library_subtitle_path: dest, sidecar_status: 'exists' })
+        continue
+      }
+      if (ctx.dryRun) {
+        placed.push({ ...item, library_subtitle_path: dest, sidecar_status: 'new' })
+        continue
+      }
+      try {
+        await fsp.mkdir(path.dirname(dest), { recursive: true })
+        await fsp.copyFile(sub, dest)
+        placed.push({ ...item, library_subtitle_path: dest, sidecar_status: 'new' })
+      } catch (e) {
+        ctx.notes.push(`sidecar failed for ${path.basename(video)}: ${e instanceof Error ? e.message : String(e)}`)
+        skipped.push({ ...item, sidecar_status: 'error' })
+      }
+    }
+    ctx.notes.push(
+      `${ctx.dryRun ? 'dry run — would place' : 'placed'} ${placed.length} sidecar(s), skipped ${skipped.length}`,
+    )
+    return { placed, skipped }
   },
 }
 
@@ -6322,6 +6547,8 @@ const IMPLS: NodeImpl[] = [
   mediaProbe,
   extractSubs,
   fetchSubs,
+  fetchSubsOpenSubtitles,
+  subtitleSidecar,
   muxTracks,
   trimAudioTracks,
   metadataEnrich,
