@@ -199,7 +199,25 @@ publicRouter.get('/api/catalog', async (req, res) => {
 // Recency = the actual release/air date (PremiereDate), so a bulk-imported
 // back-catalog doesn't flood the rail; DateCreated (file added) is the
 // fallback for items with no premiere metadata.
-const releasedAt = (it: JfItem): string | null => it.PremiereDate || it.DateCreated || null
+/**
+ * When an item became available to us, for the "recently updated" rail.
+ *
+ * PremiereDate is preferred because it is the *nominal* release date: importing
+ * a 2007 back-catalogue series should not shove it to the top of a rail about
+ * what is new. But that date can sit in the **future** — a simulcast we grabbed
+ * ahead of its listed air date, or metadata whose episode numbering runs ahead
+ * of the files we hold. A future date is the worst of both: it outranks
+ * everything in a "newest first" sort, and renders as an empty timestamp
+ * because there is no sensible way to say "-4 days ago".
+ *
+ * So: use PremiereDate only once it has actually passed, else fall back to when
+ * the file landed in the library.
+ */
+const releasedAt = (it: JfItem): string | null => {
+  const premiere = it.PremiereDate ? Date.parse(it.PremiereDate) : NaN
+  if (Number.isFinite(premiere) && premiere <= Date.now()) return it.PremiereDate ?? null
+  return it.DateCreated || it.PremiereDate || null
+}
 const releasedTs = (it: JfItem): number => Date.parse(releasedAt(it) || '') || 0
 
 // Home page rail: recently released watchables, newest first — one entry per
