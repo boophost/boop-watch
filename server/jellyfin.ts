@@ -100,6 +100,10 @@ export interface JfItem {
   SeriesName?: string
   PrimaryImageAspectRatio?: number
   BackdropImageTags?: string[]
+  /** Filesystem path Jellyfin reads this item from. Only populated when asked
+   * for via `Fields=Path` — it is what tells us which folder Jellyfin actually
+   * serves a series from, and so whether our imports agree with it. */
+  Path?: string
   MediaStreams?: JfMediaStream[]
   MediaSources?: { MediaStreams?: JfMediaStream[]; Size?: number; Container?: string }[]
 }

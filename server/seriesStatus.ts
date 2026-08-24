@@ -31,9 +31,10 @@ import { sectionLibraryRoot } from './sections.js'
 import { seriesLibraryDirs } from './libraryPaths.js'
 import { seriesHealth, type SeriesHealth } from './sourcing.js'
 import {
-  matchSeriesDownloads, getSeriesLibraryMedia,
+  matchSeriesDownloads, getSeriesLibraryMedia, resolveJfSeriesId,
   type EpisodeMedia, type SeriesDownload,
 } from './downloads.js'
+import { jfItem } from './jellyfin.js'
 import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
 
 /**
@@ -194,10 +195,6 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
   }
 
   const libRoot = sectionLibraryRoot((series.section ?? 'anime') as 'anime' | 'tv' | 'movies')
-  const libraryDirs = await seriesLibraryDirs(libRoot, [
-    series.title,
-    series.title_english,
-  ])
 
   const health = malId != null ? await seriesHealth(malId, { live: raw }) : null
 
@@ -231,6 +228,19 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
   const cached = new Map(
     (malId != null ? getCachedEpisodes(malId) : []).map((e) => [e.number, e]),
   )
+
+  // Where the library actually lives, from both sides: the folders our ledger
+  // wrote into, and the folder Jellyfin is reading the series from. When those
+  // disagree the show is split in two and its new episodes never reach the
+  // portal — invisible until now, and the whole reason this field exists.
+  let jellyfinPath: string | null = null
+  try {
+    const jfId = await resolveJfSeriesId(series)
+    if (jfId) jellyfinPath = (await jfItem(jfId, 'Path')).Path ?? null
+  } catch {
+    jellyfinPath = null
+  }
+  const libraryDirs = seriesLibraryDirs([...fileByLibEp.values()].map((f) => f.path), jellyfinPath)
 
   const liveByHash = new Map((raw ?? []).map((t) => [t.hash.toLowerCase(), t]))
   const norm = modalAudioLangs(media)
