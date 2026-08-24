@@ -105,7 +105,9 @@ type ServiceKey =
 // e.g. HTTPQ_JIKAN={"minGapMs":500}.
 const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   jikan: { minGapMs: 400, concurrency: 1, timeoutMs: 10_000, retries: 3 },
-  tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 20_000, retries: 3 },
+  // Measured from the cluster at 30-33s (and currently 502-ing), so the old 20s
+  // turned every fallback search into a timeout. Same reasoning as tosho below.
+  tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 60_000, retries: 3 },
   // AnimeTosho's search is genuinely slow, not flaky: measured from the cluster
   // it answers a broad query in 41-50s (the same query is fast from a desktop,
   // so this is egress, not the index). At the old 20s it timed out on *every*
