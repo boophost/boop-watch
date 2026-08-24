@@ -106,7 +106,14 @@ type ServiceKey =
 const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   jikan: { minGapMs: 400, concurrency: 1, timeoutMs: 10_000, retries: 3 },
   tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 20_000, retries: 3 },
-  tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
+  // AnimeTosho's search is genuinely slow, not flaky: measured from the cluster
+  // it answers a broad query in 41-50s (the same query is fast from a desktop,
+  // so this is egress, not the index). At the old 20s it timed out on *every*
+  // request and three retries turned each want into a 60s no-op — the whole
+  // primary provider was dead and only the TsukiHime fallback ran, which does
+  // not stock older episodes. Retries drop to 1 so a genuinely unreachable
+  // index still fails fast rather than costing 3 minutes a want.
+  tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 75_000, retries: 1 },
   apibay: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   anilist: { minGapMs: 350, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   // TMDB retired its published 40-req/10s cap but still 429s under bursts;
