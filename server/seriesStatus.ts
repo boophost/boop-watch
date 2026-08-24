@@ -247,6 +247,13 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
   }
   const libraryDirs = seriesLibraryDirs([...fileByLibEp.values()].map((f) => f.path), jellyfinPath)
 
+  // Only claim disk truth when there is a disk to read. Previews deliberately
+  // run with an empty LIBRARY_DIR (that is what keeps them from touching the
+  // shared library), and without this guard every imported file in one reports
+  // "missing from disk" — an alarming, entirely wrong claim about production
+  // data. Same principle as `mediaOk` above: unknown must not render as broken.
+  const canCheckDisk = libRoot.trim().length > 0 && fs.existsSync(libRoot)
+
   const liveByHash = new Map((raw ?? []).map((t) => [t.hash.toLowerCase(), t]))
   const norm = modalAudioLangs(media)
   const abs = (p: string) => (path.isAbsolute(p) ? p : path.join(libRoot, p))
@@ -294,7 +301,9 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
       const m = mediaByLibEp.get(libEp) ?? null
       const portalId = portalByEp.get(episode) ?? null
       const liveT = trow ? liveByHash.get(trow.hash) ?? null : null
-      const existsOnDisk = frow ? fs.existsSync(abs(frow.path)) : false
+      // `true` when we cannot check: an unverifiable file is treated as present,
+      // so the row reads "on disk" rather than accusing it of being gone.
+      const existsOnDisk = frow ? (canCheckDisk ? fs.existsSync(abs(frow.path)) : true) : false
 
       const issues: EpisodeIssue[] = []
 
@@ -304,14 +313,14 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
           detail: `No release found after ${want.attempts} attempts${want.note ? ` — ${want.note}` : ''}.`,
         })
       }
-      if (frow && !existsOnDisk) {
+      if (frow && canCheckDisk && !existsOnDisk) {
         issues.push({
           code: 'ghost-file',
           detail: `The ledger points at ${frow.path}, but there is no file there.`,
         })
       }
       // The one that would have caught the Re:Zero incident on sight.
-      if (frow && existsOnDisk && !m && mediaOk) {
+      if (frow && canCheckDisk && existsOnDisk && !m && mediaOk) {
         issues.push({
           code: 'unindexed',
           detail: 'The file is on disk but Jellyfin has not indexed it — usually a folder Jellyfin reads as a different series.',
