@@ -51,6 +51,11 @@ import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
  */
 export type EpisodeStage =
   | 'unaired'
+  /** Aired, and nothing is happening about it — no want, no download, no file.
+   * Distinct from `unaired` because one of them is a gap you might act on and
+   * the other is just the future. Collapsing them made the "missing" count
+   * useless: a 12-episode cour with 11 unsourced episodes reported 1. */
+  | 'missing'
   | 'wanted'
   | 'searching'
   | 'downloading'
@@ -348,7 +353,11 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
       else if (liveT || (trow && ['queued', 'downloading', 'completed'].includes(trow.status))) stage = 'downloading'
       else if (want && want.status === 'open') stage = want.attempts > 0 ? 'searching' : 'wanted'
       else if (want) stage = 'wanted'
-      else stage = 'unaired'
+      else {
+        const airedAt = cached.get(episode)?.aired ?? null
+        const t = airedAt ? new Date(airedAt).getTime() : NaN
+        stage = Number.isFinite(t) && t <= Date.now() ? 'missing' : 'unaired'
+      }
 
       return {
         episode,

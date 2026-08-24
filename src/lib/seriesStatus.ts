@@ -10,6 +10,7 @@
 
 export type EpisodeStage =
   | 'unaired'
+  | 'missing'
   | 'wanted'
   | 'searching'
   | 'downloading'
@@ -122,6 +123,7 @@ type Tone = 'done' | 'active' | 'accent' | 'warn' | 'error' | 'muted'
  * scanning nineteen rows should not have to translate jargon. */
 export const STAGE_DISPLAY: Record<EpisodeStage, { label: string; tone: Tone; hint: string }> = {
   unaired: { label: 'Not aired', tone: 'muted', hint: 'This episode has not aired yet.' },
+  missing: { label: 'Missing', tone: 'warn', hint: 'This episode has aired but nothing is sourcing it.' },
   wanted: { label: 'Wanted', tone: 'muted', hint: 'Queued to be searched for.' },
   searching: { label: 'Searching', tone: 'warn', hint: 'Looking for a release; nothing found yet.' },
   downloading: { label: 'Downloading', tone: 'active', hint: 'A release is downloading.' },
@@ -141,7 +143,7 @@ export const ISSUE_DISPLAY: Record<EpisodeIssueCode, { label: string; tone: Tone
 }
 
 export const STAGE_ORDER: EpisodeStage[] = [
-  'unaired', 'wanted', 'searching', 'downloading', 'imported', 'indexed', 'on-portal',
+  'unaired', 'missing', 'wanted', 'searching', 'downloading', 'imported', 'indexed', 'on-portal',
 ]
 
 export type EpisodeFilter = 'all' | 'missing' | 'in-flight' | 'attention'
