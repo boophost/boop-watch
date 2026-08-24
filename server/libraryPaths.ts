@@ -103,31 +103,50 @@ export async function resolveExistingPath(root: string, rel: string): Promise<st
 }
 
 /**
- * Every directory under `root` that reads as this series' folder.
+ * The distinct top-level library folders a series occupies.
  *
- * More than one means the library is split — the state that made today's
- * incident invisible. Returned rather than auto-merged: consolidating folders
- * moves real files around and is the operator's call, not a page render's.
+ * More than one means the library is split — the state that made the Re:Zero
+ * incident invisible, where our import wrote
+ * "ReZERO -Starting Life in Another World (2026)" while Jellyfin kept serving
+ * Sonarr's "Re - ZERO, Starting Life in Another World", indexed them as two
+ * separate series, and left the new episodes off the portal entirely.
  *
- * `titles` should carry every name the show is known by (catalog title, English
- * title, the franchise name the import template would render), because the
- * whole point is that the two folders were named from *different* sources.
+ * Both inputs are ground truth rather than a guess:
+ *   - `filePaths`  library-relative paths from our own `library_files` ledger
+ *                  (where *we* put things)
+ *   - `jellyfinPath` the Path of the Jellyfin series item
+ *                  (where the media server is *reading* things)
+ *
+ * Deriving the folder by normalising the catalog title instead was tried and is
+ * wrong in both directions: the import strips season/part suffixes before
+ * building a path, so the title does not match the folder it writes; and
+ * stripping hard enough to fix that makes "… Season 2" collapse onto the S1
+ * folder and reports a split between two cours that are correctly separate.
+ *
+ * Returned rather than auto-merged: consolidating folders moves real files and
+ * is the operator's call, not a page render's.
  */
-export async function seriesLibraryDirs(root: string, titles: (string | null | undefined)[]): Promise<string[]> {
-  const targets = new Set(
-    titles
-      .map((t) => normalizeDirName(String(t ?? '')))
-      .filter((t) => t.length >= 3), // a 1-2 char normalised name matches far too much
-  )
-  if (targets.size === 0) return []
-  let entries: fs.Dirent[]
-  try {
-    entries = await fsp.readdir(root, { withFileTypes: true })
-  } catch {
-    return []
+export function seriesLibraryDirs(
+  filePaths: (string | null | undefined)[],
+  jellyfinPath?: string | null,
+): string[] {
+  const dirs = new Set<string>()
+  for (const p of filePaths) {
+    const rel = String(p ?? '').replace(/\\/g, '/')
+    const first = rel.split('/').filter(Boolean)[0]
+    if (first && !first.includes('.')) dirs.add(first)
   }
-  return entries
-    .filter((e) => e.isDirectory() && targets.has(normalizeDirName(e.name)))
-    .map((e) => e.name)
-    .sort()
+  if (jellyfinPath) {
+    const norm = String(jellyfinPath).replace(/\\/g, '/').replace(/\/+$/, '')
+    const base = norm.split('/').filter(Boolean).pop()
+    // Compared *literally*, on purpose. An earlier draft only counted a folder
+    // as different when it also normalised differently — which silently missed
+    // the exact case this exists for: "ReZERO -Starting Life in Another World
+    // (2026)" and "Re - ZERO, Starting Life in Another World" normalise to the
+    // same string (that is what makes them a pair worth converging) while being
+    // two genuinely separate directories on disk. Two distinct names here always
+    // means two directories, and two directories always means a split.
+    if (base) dirs.add(base)
+  }
+  return [...dirs].sort()
 }

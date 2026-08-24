@@ -31,9 +31,10 @@ import { sectionLibraryRoot } from './sections.js'
 import { seriesLibraryDirs } from './libraryPaths.js'
 import { seriesHealth, type SeriesHealth } from './sourcing.js'
 import {
-  matchSeriesDownloads, getSeriesLibraryMedia,
+  matchSeriesDownloads, getSeriesLibraryMedia, resolveJfSeriesId,
   type EpisodeMedia, type SeriesDownload,
 } from './downloads.js'
+import { jfItem } from './jellyfin.js'
 import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
 
 /**
@@ -50,6 +51,11 @@ import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
  */
 export type EpisodeStage =
   | 'unaired'
+  /** Aired, and nothing is happening about it — no want, no download, no file.
+   * Distinct from `unaired` because one of them is a gap you might act on and
+   * the other is just the future. Collapsing them made the "missing" count
+   * useless: a 12-episode cour with 11 unsourced episodes reported 1. */
+  | 'missing'
   | 'wanted'
   | 'searching'
   | 'downloading'
@@ -194,10 +200,6 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
   }
 
   const libRoot = sectionLibraryRoot((series.section ?? 'anime') as 'anime' | 'tv' | 'movies')
-  const libraryDirs = await seriesLibraryDirs(libRoot, [
-    series.title,
-    series.title_english,
-  ])
 
   const health = malId != null ? await seriesHealth(malId, { live: raw }) : null
 
@@ -232,6 +234,26 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
     (malId != null ? getCachedEpisodes(malId) : []).map((e) => [e.number, e]),
   )
 
+  // Where the library actually lives, from both sides: the folders our ledger
+  // wrote into, and the folder Jellyfin is reading the series from. When those
+  // disagree the show is split in two and its new episodes never reach the
+  // portal — invisible until now, and the whole reason this field exists.
+  let jellyfinPath: string | null = null
+  try {
+    const jfId = await resolveJfSeriesId(series)
+    if (jfId) jellyfinPath = (await jfItem(jfId, 'Path')).Path ?? null
+  } catch {
+    jellyfinPath = null
+  }
+  const libraryDirs = seriesLibraryDirs([...fileByLibEp.values()].map((f) => f.path), jellyfinPath)
+
+  // Only claim disk truth when there is a disk to read. Previews deliberately
+  // run with an empty LIBRARY_DIR (that is what keeps them from touching the
+  // shared library), and without this guard every imported file in one reports
+  // "missing from disk" — an alarming, entirely wrong claim about production
+  // data. Same principle as `mediaOk` above: unknown must not render as broken.
+  const canCheckDisk = libRoot.trim().length > 0 && fs.existsSync(libRoot)
+
   const liveByHash = new Map((raw ?? []).map((t) => [t.hash.toLowerCase(), t]))
   const norm = modalAudioLangs(media)
   const abs = (p: string) => (path.isAbsolute(p) ? p : path.join(libRoot, p))
@@ -258,8 +280,18 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
     numbers.add(n)
   }
 
+  // A cour is a *slice* of a Jellyfin season, not the whole thing. Jellyfin's
+  // "Season 2" for Mushoku Tensei holds every cour's episodes (up to S02E36),
+  // and getSeriesLibraryMedia filters only on the season number — so without
+  // this clamp a 12-episode cour grew rows 13-24 out of its sibling cour's
+  // files, and the summary read "15 of 12 aired". Same rule matchSeriesDownloads
+  // already applies (server/downloads.ts): trust `episodes` as the cour length
+  // whenever the row is season-mapped.
+  const courLength =
+    season != null && series.episodes != null && series.episodes > 0 ? series.episodes : null
+
   const episodes: EpisodeStatus[] = [...numbers]
-    .filter((n) => Number.isFinite(n) && n >= 1)
+    .filter((n) => Number.isFinite(n) && n >= 1 && (courLength == null || n <= courLength))
     .sort((a, b) => a - b)
     .map((episode) => {
       const libEp = episode + offset
@@ -269,7 +301,9 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
       const m = mediaByLibEp.get(libEp) ?? null
       const portalId = portalByEp.get(episode) ?? null
       const liveT = trow ? liveByHash.get(trow.hash) ?? null : null
-      const existsOnDisk = frow ? fs.existsSync(abs(frow.path)) : false
+      // `true` when we cannot check: an unverifiable file is treated as present,
+      // so the row reads "on disk" rather than accusing it of being gone.
+      const existsOnDisk = frow ? (canCheckDisk ? fs.existsSync(abs(frow.path)) : true) : false
 
       const issues: EpisodeIssue[] = []
 
@@ -279,14 +313,14 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
           detail: `No release found after ${want.attempts} attempts${want.note ? ` — ${want.note}` : ''}.`,
         })
       }
-      if (frow && !existsOnDisk) {
+      if (frow && canCheckDisk && !existsOnDisk) {
         issues.push({
           code: 'ghost-file',
           detail: `The ledger points at ${frow.path}, but there is no file there.`,
         })
       }
       // The one that would have caught the Re:Zero incident on sight.
-      if (frow && existsOnDisk && !m && mediaOk) {
+      if (frow && canCheckDisk && existsOnDisk && !m && mediaOk) {
         issues.push({
           code: 'unindexed',
           detail: 'The file is on disk but Jellyfin has not indexed it — usually a folder Jellyfin reads as a different series.',
@@ -328,7 +362,11 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
       else if (liveT || (trow && ['queued', 'downloading', 'completed'].includes(trow.status))) stage = 'downloading'
       else if (want && want.status === 'open') stage = want.attempts > 0 ? 'searching' : 'wanted'
       else if (want) stage = 'wanted'
-      else stage = 'unaired'
+      else {
+        const airedAt = cached.get(episode)?.aired ?? null
+        const t = airedAt ? new Date(airedAt).getTime() : NaN
+        stage = Number.isFinite(t) && t <= Date.now() ? 'missing' : 'unaired'
+      }
 
       return {
         episode,
