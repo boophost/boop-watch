@@ -5458,12 +5458,23 @@ async function findSiblingEpisodeFile(destDir: string, marker: string, excludeBa
  * that already holds the show instead of splitting it in two.
  */
 function normalizeDirName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/\s*\((?:19|20)\d{2}\)\s*$/, '')
-    .replace(/^season\s*0*(\d+)$/, 'season $1')
-    .replace(/\s+/g, ' ')
-    .trim()
+  return (
+    name
+      .toLowerCase()
+      .replace(/\s*\((?:19|20)\d{2}\)\s*$/, '')
+      // Punctuation is the other way these names drift, and it is the way that
+      // actually bit us. Our template renders a MAL title ("ReZERO -Starting
+      // Life in Another World"); the folder already on disk came from Sonarr via
+      // TVDB ("Re - ZERO, Starting Life in Another World"). Same show, same
+      // words, different dashes and commas — so the year/padding rules above
+      // both matched and the twin got created anyway. Fold punctuation to
+      // spaces, then drop spaces entirely, because the disagreement is often
+      // *inside* a word ("ReZERO" vs "Re - ZERO").
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/^season\s*0*(\d+)$/, 'season $1')
+      .replace(/\s+/g, '')
+  )
 }
 
 /** The directory to use for one templated segment: an existing directory that
@@ -5483,14 +5494,30 @@ async function resolveDirSegment(parent: string, wanted: string): Promise<string
     return wanted
   }
   const target = normalizeDirName(wanted)
-  // Sorted so the choice is deterministic while a duplicate pair still exists;
-  // the un-suffixed legacy name sorts before its "… (2026)" twin, and an
-  // unpadded "Season 4" resolves within it once the show folder converges.
   const matches = entries
     .filter((e) => e.isDirectory() && normalizeDirName(e.name) === target)
     .map((e) => e.name)
     .sort()
-  return matches[0] ?? wanted
+  if (matches.length <= 1) return matches[0] ?? wanted
+  // A duplicate pair already exists, so a previous import split this show. Pick
+  // the directory that actually holds the library rather than trusting name
+  // order: the twin we minted has one season in it, the real folder has every
+  // season. Choosing by name here is what would keep every future import
+  // landing in the twin, leaving Jellyfin with two series and the chase stuck
+  // at "importing". Ties break by name so the result stays deterministic.
+  const weighed = await Promise.all(
+    matches.map(async (name) => {
+      let count = 0
+      try {
+        count = (await fsp.readdir(path.join(parent, name))).length
+      } catch {
+        count = 0
+      }
+      return { name, count }
+    }),
+  )
+  weighed.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+  return weighed[0].name
 }
 
 /** Re-point a templated relative path at the directories already on disk. */
