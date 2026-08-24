@@ -51,9 +51,9 @@ export interface SourcingLedgerReport {
   /** In qBittorrent but unknown to the torrent ledger (pre-ledger or hand-added). */
   qbitOrphans: { hash: string; name: string; category: string; progress: number; tags: string }[]
   /** Ledger says live (queued/downloading/completed/imported) but qBittorrent no longer has it. */
-  ledgerOrphans: { hash: string; name: string | null; status: string }[]
+  ledgerOrphans: { hash: string; name: string | null; status: string; mal_id: number | null }[]
   /** Completed >24h ago and neither imported nor exhausted — the import flow is not consuming them. */
-  staleCompleted: { hash: string; name: string | null; completed_at: string | null }[]
+  staleCompleted: { hash: string; name: string | null; completed_at: string | null; mal_id: number | null }[]
   /** Sourced wants whose torrent is gone/cleaned/failed — they will never fulfil. */
   sourcedWantsDeadTorrent: { want_id: number; mal_id: number; episode: number | null; torrent_hash: string | null; torrent_status: string | null }[]
   /** Fulfilled wants whose library file no longer exists on disk — the chase
@@ -62,12 +62,19 @@ export interface SourcingLedgerReport {
   fulfilledWantsMissingFile: { want_id: number; mal_id: number; episode: number | null; library_path: string | null }[]
 }
 
-export async function sourcingLedger(): Promise<SourcingLedgerReport> {
+export async function sourcingLedger(
+  opts: {
+    /** Already-fetched live slice. The series page needs qBittorrent for its
+     * own download list anyway, and it polls every few seconds while a download
+     * runs — re-querying here would double that load for no new information. */
+    live?: QbitTorrent[] | null
+  } = {},
+): Promise<SourcingLedgerReport> {
   const rows = allTorrentRows()
   const byHash = new Map(rows.map((r) => [r.hash, r]))
   const configured = qbitConfigured()
-  let live: QbitTorrent[] = []
-  if (configured) live = await qbitListOurs()
+  let live: QbitTorrent[] = opts.live ?? []
+  if (configured && opts.live == null) live = await qbitListOurs()
   const liveByHash = new Map(live.map((t) => [t.hash.toLowerCase(), t]))
 
   const counts = (list: { status: string }[]) => {
@@ -98,7 +105,7 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
             (r.category == null || r.category === cat) &&
             !liveByHash.has(r.hash),
         )
-        .map((r) => ({ hash: r.hash, name: r.name, status: r.status }))
+        .map((r) => ({ hash: r.hash, name: r.name, status: r.status, mal_id: r.mal_id }))
     : []
 
   const dayAgo = Date.now() - 24 * 3600_000
@@ -112,7 +119,7 @@ export async function sourcingLedger(): Promise<SourcingLedgerReport> {
         r.completed_at != null &&
         new Date(r.completed_at + 'Z').getTime() < dayAgo,
     )
-    .map((r) => ({ hash: r.hash, name: r.name, completed_at: r.completed_at }))
+    .map((r) => ({ hash: r.hash, name: r.name, completed_at: r.completed_at, mal_id: r.mal_id }))
 
   const wants = listWants()
   const sourcedWantsDeadTorrent = wants
@@ -587,4 +594,47 @@ export function wantForEpisode(
   if (!want) return null
   const torrent = want.torrent_hash ? (getTorrent(want.torrent_hash) ?? null) : null
   return { want, torrent }
+}
+
+/**
+ * The checks `sourcingLedger()` already runs, narrowed to one series.
+ *
+ * Exists because these problems were only ever visible on a global admin route
+ * that nobody opens per title. A stuck series looked healthy on its own page:
+ * Re:Zero S4 spent a day with four wants at 7-9 failed attempts and nine
+ * "fulfilled" wants whose files had moved, and `/manage/series/54` showed none
+ * of it. Same detectors, same wording — just answerable for the title you are
+ * actually looking at.
+ *
+ * `qbitOrphans` is deliberately absent: a torrent unknown to the ledger has no
+ * series to be grouped under, so it belongs on the global page only.
+ */
+export interface SeriesHealth {
+  ledgerOrphans: SourcingLedgerReport['ledgerOrphans']
+  staleCompleted: SourcingLedgerReport['staleCompleted']
+  sourcedWantsDeadTorrent: SourcingLedgerReport['sourcedWantsDeadTorrent']
+  fulfilledWantsMissingFile: SourcingLedgerReport['fulfilledWantsMissingFile']
+}
+
+export async function seriesHealth(
+  malId: number,
+  opts: { live?: QbitTorrent[] | null } = {},
+): Promise<SeriesHealth> {
+  const report = await sourcingLedger({ live: opts.live })
+  return {
+    ledgerOrphans: report.ledgerOrphans.filter((r) => r.mal_id === malId),
+    staleCompleted: report.staleCompleted.filter((r) => r.mal_id === malId),
+    sourcedWantsDeadTorrent: report.sourcedWantsDeadTorrent.filter((r) => r.mal_id === malId),
+    fulfilledWantsMissingFile: report.fulfilledWantsMissingFile.filter((r) => r.mal_id === malId),
+  }
+}
+
+/** True when any of the four checks found something for this series. */
+export function seriesHealthIsClean(h: SeriesHealth): boolean {
+  return (
+    h.ledgerOrphans.length === 0 &&
+    h.staleCompleted.length === 0 &&
+    h.sourcedWantsDeadTorrent.length === 0 &&
+    h.fulfilledWantsMissingFile.length === 0
+  )
 }
