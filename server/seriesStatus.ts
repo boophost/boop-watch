@@ -268,8 +268,18 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
     numbers.add(n)
   }
 
+  // A cour is a *slice* of a Jellyfin season, not the whole thing. Jellyfin's
+  // "Season 2" for Mushoku Tensei holds every cour's episodes (up to S02E36),
+  // and getSeriesLibraryMedia filters only on the season number — so without
+  // this clamp a 12-episode cour grew rows 13-24 out of its sibling cour's
+  // files, and the summary read "15 of 12 aired". Same rule matchSeriesDownloads
+  // already applies (server/downloads.ts): trust `episodes` as the cour length
+  // whenever the row is season-mapped.
+  const courLength =
+    season != null && series.episodes != null && series.episodes > 0 ? series.episodes : null
+
   const episodes: EpisodeStatus[] = [...numbers]
-    .filter((n) => Number.isFinite(n) && n >= 1)
+    .filter((n) => Number.isFinite(n) && n >= 1 && (courLength == null || n <= courLength))
     .sort((a, b) => a - b)
     .map((episode) => {
       const libEp = episode + offset
