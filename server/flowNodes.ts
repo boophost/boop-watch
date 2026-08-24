@@ -2841,7 +2841,10 @@ function providerQuery(q: string): string {
 
 async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
   const doc = (await fetchJson(
-    `${base}/json/v1/search?q=${encodeURIComponent(q)}`,
+    // limit caps at 100 server-side; the default is 50. Newest-first, so a
+    // wider page is the difference between seeing a long season's older
+    // episodes and not seeing them at all.
+    `${base}/json/v1/search?q=${encodeURIComponent(q)}&limit=100`,
   )) as { data?: Record<string, unknown>[] }
   return (doc.data ?? [])
     .filter((r) => r.magnet || r.info_hash)
@@ -3200,12 +3203,38 @@ const torrentSearch: NodeImpl = {
       const havePin = Number.isFinite(knownPin) && knownPin > 0
 
       try {
-        const raw =
+        const fetchFor = (query: string): Promise<Candidate[]> =>
           provider === 'tsukihime'
-            ? await tsukiCandidates(q, base)
+            ? tsukiCandidates(query, base)
             : provider === 'apibay'
-              ? await apibayCandidates(q, base)
-              : await toshoCandidates(q, base)
+              ? apibayCandidates(query, base)
+              : toshoCandidates(query, base)
+
+        // An episode-pinned search needs a NARROW query, not a broad one. These
+        // indexes answer newest-first and cap a page at 100, so a months-old
+        // episode of a long season is simply not in the window: Re:Zero S4's
+        // broad query returned episodes 1, 2 and 8-13 and never 3-7, and every
+        // want for those reported "no release" against a catalogue holding six
+        // dual-audio copies of each. When the season is known, the SxxEyy marker
+        // is how these releases are actually named, so it selects the right
+        // slice directly. Broad stays the fallback — for shows with no season
+        // mapping, and for groups that number episodes with no season marker.
+        const pad2 = (n: number) => String(n).padStart(2, '0')
+        const markerSeason = asNumber(item.tvdb_season)
+        const marker =
+          pinnedEpNum != null && markerSeason != null
+            ? `S${pad2(markerSeason)}E${pad2(pinnedEpNum)}`
+            : null
+
+        let raw: Candidate[] = []
+        if (marker) {
+          raw = await fetchFor(`${q} ${marker}`)
+          // Only trust the narrowed page when it actually carries the episode we
+          // pinned; otherwise it told us nothing and the broad query still might.
+          if (!raw.some((c) => c.episode === pinnedEpNum)) raw = []
+          else ctx.notes.push(`narrowed "${q}" to ${marker} (${raw.length} results)`)
+        }
+        if (raw.length === 0) raw = await fetchFor(q)
 
         let relevant: Candidate[]
         // Only trust the pin when the results actually carry ids (a provider can
