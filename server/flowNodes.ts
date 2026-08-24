@@ -2819,6 +2819,26 @@ function parseSeason(title: string): number | null {
   return null
 }
 
+// Torrent indexes read punctuation in a query as search *operators*, and
+// MAL/AniList titles are full of it. AnimeTosho and TsukiHime both take a
+// hyphen-prefixed word as NOT: "Re:ZERO -Starting Life in Another World- Season 4"
+// sends `-Starting` and `World-`, so the index excludes the very show the title
+// names and answers with zero results — for a whole season's wants, forever
+// ("no release found", every backoff, until someone looks). Dropping the
+// operator punctuation costs nothing, because breadth isn't what keeps the
+// search honest: the season pin (AnimeTosho's anidb_aid / TsukiHime's anime.id)
+// and the relevance floor below both run over the results either way.
+// Boundary-only for -, + and / — the internal ones are part of real names
+// ("Kaguya-sama", "Fate/Zero") and carry no operator meaning there.
+function providerQuery(q: string): string {
+  return q
+    .replace(/["()[\]{}<>*=~^|!@]/g, ' ')
+    .replace(/(^|\s)[-+/]+/g, '$1')
+    .replace(/[-+/]+(?=\s|$)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
   const doc = (await fetchJson(
     `${base}/json/v1/search?q=${encodeURIComponent(q)}`,
@@ -3143,7 +3163,9 @@ const torrentSearch: NodeImpl = {
     let queried = 0
 
     for (const item of items) {
-      const q = String(item[queryField] ?? '').trim()
+      // Sanitized here rather than inside each fetcher so the run-report notes
+      // ("no title-relevant releases for …") quote the string actually searched.
+      const q = providerQuery(String(item[queryField] ?? ''))
       if (!q || (maxItems > 0 && queried >= maxItems)) {
         missed.push(item)
         continue
