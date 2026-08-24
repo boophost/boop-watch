@@ -64,6 +64,7 @@ import { getFlow, parseComponent } from './flowsDb.js'
 import { deriveInterface, buildSpecResolver } from './flowComponents.js'
 import { cfgSafe, cfgNum, CONFIG_SPEC, isKnownConfigKey, isSecretKey } from './config.js'
 import { sectionLibraryRoot, sectionConfig } from './sections.js'
+import { resolveExistingPath } from './libraryPaths.js'
 
 const execFileP = promisify(execFile)
 
@@ -2827,9 +2828,32 @@ function parseSeason(title: string): number | null {
   return null
 }
 
+// Torrent indexes read punctuation in a query as search *operators*, and
+// MAL/AniList titles are full of it. AnimeTosho and TsukiHime both take a
+// hyphen-prefixed word as NOT: "Re:ZERO -Starting Life in Another World- Season 4"
+// sends `-Starting` and `World-`, so the index excludes the very show the title
+// names and answers with zero results — for a whole season's wants, forever
+// ("no release found", every backoff, until someone looks). Dropping the
+// operator punctuation costs nothing, because breadth isn't what keeps the
+// search honest: the season pin (AnimeTosho's anidb_aid / TsukiHime's anime.id)
+// and the relevance floor below both run over the results either way.
+// Boundary-only for -, + and / — the internal ones are part of real names
+// ("Kaguya-sama", "Fate/Zero") and carry no operator meaning there.
+function providerQuery(q: string): string {
+  return q
+    .replace(/["()[\]{}<>*=~^|!@]/g, ' ')
+    .replace(/(^|\s)[-+/]+/g, '$1')
+    .replace(/[-+/]+(?=\s|$)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
   const doc = (await fetchJson(
-    `${base}/json/v1/search?q=${encodeURIComponent(q)}`,
+    // limit caps at 100 server-side; the default is 50. Newest-first, so a
+    // wider page is the difference between seeing a long season's older
+    // episodes and not seeing them at all.
+    `${base}/json/v1/search?q=${encodeURIComponent(q)}&limit=100`,
   )) as { data?: Record<string, unknown>[] }
   return (doc.data ?? [])
     .filter((r) => r.magnet || r.info_hash)
@@ -3151,7 +3175,9 @@ const torrentSearch: NodeImpl = {
     let queried = 0
 
     for (const item of items) {
-      const q = String(item[queryField] ?? '').trim()
+      // Sanitized here rather than inside each fetcher so the run-report notes
+      // ("no title-relevant releases for …") quote the string actually searched.
+      const q = providerQuery(String(item[queryField] ?? ''))
       if (!q || (maxItems > 0 && queried >= maxItems)) {
         missed.push(item)
         continue
@@ -3186,12 +3212,38 @@ const torrentSearch: NodeImpl = {
       const havePin = Number.isFinite(knownPin) && knownPin > 0
 
       try {
-        const raw =
+        const fetchFor = (query: string): Promise<Candidate[]> =>
           provider === 'tsukihime'
-            ? await tsukiCandidates(q, base)
+            ? tsukiCandidates(query, base)
             : provider === 'apibay'
-              ? await apibayCandidates(q, base)
-              : await toshoCandidates(q, base)
+              ? apibayCandidates(query, base)
+              : toshoCandidates(query, base)
+
+        // An episode-pinned search needs a NARROW query, not a broad one. These
+        // indexes answer newest-first and cap a page at 100, so a months-old
+        // episode of a long season is simply not in the window: Re:Zero S4's
+        // broad query returned episodes 1, 2 and 8-13 and never 3-7, and every
+        // want for those reported "no release" against a catalogue holding six
+        // dual-audio copies of each. When the season is known, the SxxEyy marker
+        // is how these releases are actually named, so it selects the right
+        // slice directly. Broad stays the fallback — for shows with no season
+        // mapping, and for groups that number episodes with no season marker.
+        const pad2 = (n: number) => String(n).padStart(2, '0')
+        const markerSeason = asNumber(item.tvdb_season)
+        const marker =
+          pinnedEpNum != null && markerSeason != null
+            ? `S${pad2(markerSeason)}E${pad2(pinnedEpNum)}`
+            : null
+
+        let raw: Candidate[] = []
+        if (marker) {
+          raw = await fetchFor(`${q} ${marker}`)
+          // Only trust the narrowed page when it actually carries the episode we
+          // pinned; otherwise it told us nothing and the broad query still might.
+          if (!raw.some((c) => c.episode === pinnedEpNum)) raw = []
+          else ctx.notes.push(`narrowed "${q}" to ${marker} (${raw.length} results)`)
+        }
+        if (raw.length === 0) raw = await fetchFor(q)
 
         let relevant: Candidate[]
         // Only trust the pin when the results actually carry ids (a provider can
@@ -5434,66 +5486,6 @@ async function findSiblingEpisodeFile(destDir: string, marker: string, excludeBa
   return null
 }
 
-/**
- * Two imports of the same show can render different folder names: `{show}
- * ({production_year})` carries the *cour's* year onto a *franchise* folder, so
- * Slime S1 wants "… Slime (2018)" and S4 wants "… Slime (2026)" — and when the
- * metadata hasn't resolved, `sanitizeSegments` drops the empty "()" and yields a
- * third variant. `Season {season:2}` likewise renders "Season 04" where an older
- * import wrote "Season 4". Normalising those away lets us reuse the directory
- * that already holds the show instead of splitting it in two.
- */
-function normalizeDirName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/\s*\((?:19|20)\d{2}\)\s*$/, '')
-    .replace(/^season\s*0*(\d+)$/, 'season $1')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-/** The directory to use for one templated segment: an existing directory that
- * differs only by a `(year)` suffix or season padding, else `wanted` itself.
- *
- * Note we deliberately do NOT short-circuit on `existsSync(wanted)`: once a
- * `… (2026)` twin exists alongside the legacy `…` folder, returning the exact
- * templated name would keep every import landing in the twin, and Jellyfin
- * indexes it as a second, separate (and non-Public) series — the episodes never
- * surface on the portal, so the chase sits at "importing" forever. Always run
- * the normalised match and pick the canonical twin so both folders converge. */
-async function resolveDirSegment(parent: string, wanted: string): Promise<string> {
-  let entries: fs.Dirent[]
-  try {
-    entries = await fsp.readdir(parent, { withFileTypes: true })
-  } catch {
-    return wanted
-  }
-  const target = normalizeDirName(wanted)
-  // Sorted so the choice is deterministic while a duplicate pair still exists;
-  // the un-suffixed legacy name sorts before its "… (2026)" twin, and an
-  // unpadded "Season 4" resolves within it once the show folder converges.
-  const matches = entries
-    .filter((e) => e.isDirectory() && normalizeDirName(e.name) === target)
-    .map((e) => e.name)
-    .sort()
-  return matches[0] ?? wanted
-}
-
-/** Re-point a templated relative path at the directories already on disk. */
-async function resolveExistingPath(root: string, rel: string): Promise<string> {
-  const parts = rel.split('/')
-  const file = parts.pop() as string
-  let dir = root
-  const resolved: string[] = []
-  // Sequential by necessity: each segment is resolved inside the directory the
-  // previous one picked.
-  for (const seg of parts) {
-    const use = await resolveDirSegment(dir, seg)
-    resolved.push(use)
-    dir = path.join(dir, use)
-  }
-  return [...resolved, file].join('/')
-}
 
 const libraryImport: NodeImpl = {
   spec: {
