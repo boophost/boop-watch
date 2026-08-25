@@ -425,8 +425,9 @@ export function releaseFlowLock(): void {
 }
 
 // Chain-depth cap so a self-firing loop (flow A fires a name that runs A, …)
-// can't run away. Fires past this depth are dropped with a warning.
-const FIRE_DEPTH_CAP = 5
+// can't run away forever. Kept high enough for intentional test loops; past
+// this depth further fires are dropped with a warning.
+const FIRE_DEPTH_CAP = 100
 
 /**
  * Run a set of flows for one trigger event, seeding each as the firing event so
@@ -447,7 +448,20 @@ async function runMatchingFlows(
 ): Promise<boolean> {
   const label = event.kind === 'start' ? `"${event.name}"` : event.kind
   if (depth > FIRE_DEPTH_CAP) {
-    console.warn(`fireTrigger: depth cap (${FIRE_DEPTH_CAP}) reached at ${label} — stopping chain`)
+    const msg = `Trigger chain depth cap (${FIRE_DEPTH_CAP}) reached at ${label} — stopping chain`
+    console.warn(`fireTrigger: ${msg}`)
+    // Surface in the live Activity / Map feed so a looping test doesn't just
+    // "mysteriously" go idle.
+    const runToken = randomUUID()
+    emitActivity({
+      type: 'start',
+      runToken,
+      flowId: null,
+      flowName: 'trigger chain',
+      dryRun: false,
+      startedAt: new Date().toISOString(),
+    })
+    emitActivity({ type: 'aborted', runToken, error: msg })
     return true
   }
   let dispatched = true

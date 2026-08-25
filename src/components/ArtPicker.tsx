@@ -23,14 +23,14 @@ const KINDS: Record<ArtKind, { title: string; blurb: string; empty: string; aspe
     blurb: 'Shown behind the title on the public page',
     empty: 'No banners found for this title',
     aspect: 'aspect-[16/5]',
-    cols: 'sm:grid-cols-2 lg:grid-cols-3',
+    cols: 'sm:grid-cols-2',
   },
   poster: {
     title: 'Season poster',
     blurb: "Shown on the browse grid and this season's card — defaults to Jellyfin's own poster",
     empty: 'No posters found for this title',
     aspect: 'aspect-[2/3]',
-    cols: 'grid-cols-3 sm:grid-cols-4 lg:grid-cols-6',
+    cols: 'grid-cols-3 sm:grid-cols-4',
   },
 }
 
@@ -148,7 +148,7 @@ export function ArtPicker({ seriesId, kind }: { seriesId: number; kind: ArtKind 
           has a tvdb id, or upload one to set it.
         </p>
       ) : (
-        <div className={`grid max-h-[36rem] grid-cols-1 gap-3 overflow-y-auto ${copy.cols}`}>
+        <div className={`grid max-h-[26rem] grid-cols-1 gap-3 overflow-y-auto ${copy.cols}`}>
           {art.map((b) => (
             <button
               key={b.id}

@@ -4,12 +4,23 @@
 // the editor never hardcodes node knowledge.
 
 import fs from 'node:fs'
+// The library-import sink's I/O runs against an NFS mount, where a single
+// readdir/stat/copy can stall for seconds. Node is single-threaded, so doing
+// that synchronously freezes the HTTP server too — including /health, which is
+// what k8s reads: a long import made the readiness probe time out, dropped the
+// pod from its Service, and Traefik answered "no available server". Anything on
+// the per-file import path must use these, never the *Sync twins.
+import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { jfJson, jfUrl, jellyfinConfigured, JfItem } from './jellyfin.js'
+import { jfJson, jfUrl, jellyfinConfigured, sectionCollections, JfItem } from './jellyfin.js'
 import {
   listSeries,
+  findBySource,
+  updateSeriesMetadataById,
+  listAnimeSeries,
+  findByMalId,
   upsertSeriesMetadata,
   recordLibraryFile,
   forgetLibraryFile,
@@ -37,18 +48,23 @@ import {
   type WantKind,
   type WantStatus,
 } from './db.js'
-import { fetchAniListAiring, fetchAniListMedia, type AniListMedia } from './anilist.js'
-import { refreshEpisodeCache } from './episodes.js'
+import { fetchAniListAiring } from './anilist.js'
+import { refreshEpisodeCache, isProperTitle } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem } from './portalDb.js'
+import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, isPortalSection, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
-import { searchAnime, pickPosterUrl, fetchAnimeFull, type JikanAnimeFull } from './jikan.js'
+import { searchAnime, pickPosterUrl } from './jikan.js'
+import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
+import { clientForSection } from './metadata/index.js'
 import { blacklistedHashes } from './blacklist.js'
 import { qbitList, qbitToItem, qbitConfigured, parseTorrentTags } from './qbit.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
 import { deriveInterface, buildSpecResolver } from './flowComponents.js'
+import { cfgSafe, cfgNum, CONFIG_SPEC, isKnownConfigKey, isSecretKey } from './config.js'
+import { sectionLibraryRoot, sectionConfig } from './sections.js'
+import { resolveExistingPath } from './libraryPaths.js'
 
 const execFileP = promisify(execFile)
 
@@ -349,7 +365,6 @@ function digPath(doc: unknown, path: string): unknown {
   return cur
 }
 
-const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
 
 /** Maps a Jellyfin item to the flow-item shape (superset of PortalItem). */
 function fromJellyfin(it: JfItem): FlowItem {
@@ -383,10 +398,30 @@ const jellyfinSource: NodeImpl = {
     type: 'source.jellyfin',
     label: 'Get Jellyfin titles',
     category: 'source',
-    description: 'Fetches titles from the Public Jellyfin collection.',
+    description:
+      'Fetches titles from a Jellyfin collection. Defaults to the anime section’s collection (WATCH_COLLECTION_ID); pick another section, or paste a collection id, to source from a different library.',
     inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
     config: [
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+        ],
+        default: 'anime',
+        help: 'Which section’s collection to read. Ignored when a collection id is set below.',
+      },
+      {
+        key: 'collectionId',
+        label: 'Collection id (override)',
+        kind: 'text',
+        default: '',
+        help: 'Read this BoxSet instead of the section’s configured one.',
+      },
       {
         key: 'itemTypes',
         label: 'Item types',
@@ -400,12 +435,27 @@ const jellyfinSource: NodeImpl = {
       },
     ],
   },
-  async run(_inputs, config) {
-    if (!jellyfinConfigured || !COLLECTION_ID) {
-      throw new Error('Jellyfin is not configured (JELLYFIN_API_KEY / WATCH_COLLECTION_ID)')
+  async run(_inputs, config, ctx) {
+    // Explicit id wins; otherwise the chosen section's collection. Naming the
+    // section in the error matters — "Jellyfin is not configured" sent people
+    // to the API key when the actual gap was an unset WATCH_COLLECTION_ID_TV.
+    const section = (str(config, 'section', 'anime') || 'anime') as PortalSection
+    const override = str(config, 'collectionId', '')
+    const collection =
+      override ||
+      sectionCollections().find((c) => c.section === section)?.collectionId ||
+      ''
+    if (!jellyfinConfigured()) {
+      throw new Error('Jellyfin is not configured (JELLYFIN_URL / JELLYFIN_API_KEY)')
     }
+    if (!collection) {
+      throw new Error(
+        `No Jellyfin collection for the ${section} section — set its collection id in /manage/settings, or paste one into this node.`,
+      )
+    }
+    ctx.notes.push(override ? `collection ${override} (override)` : `${section} collection`)
     const res = await jfJson<{ Items?: JfItem[] }>('/Items', {
-      ParentId: COLLECTION_ID,
+      ParentId: collection,
       Recursive: 'true',
       IncludeItemTypes: str(config, 'itemTypes', 'Movie,Series'),
       Fields:
@@ -420,13 +470,30 @@ const indexerSource: NodeImpl = {
     type: 'source.indexer',
     label: 'Get Catalog',
     category: 'source',
-    description: 'Reads the /manage catalog (MAL-backed series list).',
+    description: 'Reads the /manage catalog. Scope it to a section so a TV title never enters an anime search.',
     inputs: [{ id: 'when', label: 'when' }],
     outputs: [{ id: 'items', label: 'catalog', dataType: 'catalog' }],
-    config: [],
+    config: [
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+          { value: '', label: 'All sections' },
+        ],
+        default: '',
+        help: 'Which catalog to emit. Empty = every section (historical behaviour). Prefer a section on new graphs.',
+      },
+    ],
   },
-  async run() {
-    return { items: listSeries().map((s) => ({ ...s })) }
+  async run(_inputs, config, ctx) {
+    const sectionCfg = str(config, 'section', '')
+    const rows = isPortalSection(sectionCfg) ? listSeries(sectionCfg) : listSeries()
+    ctx.notes.push(isPortalSection(sectionCfg) ? `${sectionCfg}: ${rows.length} title(s)` : `${rows.length} title(s)`)
+    return { items: rows.map((s) => ({ ...s })) }
   },
 }
 
@@ -903,19 +970,25 @@ async function qbitLogin(base: string, username: string, password: string): Prom
     signal: AbortSignal.timeout(15_000),
   })
   const cookie = login.headers.get('set-cookie')?.split(';')[0]
-  if (!login.ok || !cookie || !(await login.text()).includes('Ok')) {
-    throw new Error('qBittorrent login failed')
+  // Mirrors server/qbit.ts: a whitelisted (bypassed) login answers 204 with an
+  // empty body, not 200 "Ok.". The cookie is what we need; only check the body
+  // when there is one. See that file for the full explanation.
+  const body = await login.text()
+  if (!login.ok || !cookie || (body.trim() !== '' && !body.includes('Ok'))) {
+    throw new Error(
+      `qBittorrent login failed (HTTP ${login.status}${body.trim() ? `: ${body.trim().slice(0, 80)}` : ''})`,
+    )
   }
   return cookie
 }
 
 function qbitCreds(config: Record<string, unknown>): { base: string; user: string; pass: string } {
-  const base = (str(config, 'url', '') || process.env.QBIT_URL || '').replace(/\/$/, '')
+  const base = (str(config, 'url', '') || cfgSafe('QBIT_URL')).replace(/\/$/, '')
   if (!base) throw new Error('qBittorrent URL is not set (node config or QBIT_URL env)')
   return {
     base,
-    user: str(config, 'username', '') || process.env.QBIT_USERNAME || 'admin',
-    pass: str(config, 'password', '') || process.env.QBIT_PASSWORD || '',
+    user: str(config, 'username', '') || cfgSafe('QBIT_USERNAME') || 'admin',
+    pass: str(config, 'password', '') || cfgSafe('QBIT_PASSWORD'),
   }
 }
 
@@ -1167,6 +1240,68 @@ const jsonValue = valueLiteral(
   },
 )
 
+/**
+ * Emit an app setting onto the canvas as a text value.
+ *
+ * The visual half of flow config access: wire a managed setting into any text
+ * input and see it as a wire, rather than hiding it inside a node's config.
+ *
+ * **Refuses secrets, deliberately.** A value on the canvas becomes an item,
+ * and items land in `NodeReport.samples` — which the editor renders and the
+ * run API returns. Putting an API key on a wire would print it there. Secrets
+ * use `{{config.KEY}}` inside a node's own config instead, which is
+ * substituted at the moment of use and never becomes an item. The `blocked`
+ * output says so rather than failing the run, so a graph built this way is
+ * self-explaining rather than mysteriously broken.
+ */
+const configValue: NodeImpl = {
+  spec: {
+    type: 'value.config',
+    label: 'Setting',
+    category: 'value',
+    description:
+      'Emits one app setting (from /manage/settings) as a text value. Non-secret settings only — reference a secret with {{config.KEY}} inside the node that needs it, so it is never rendered on the canvas.',
+    inputs: [],
+    outputs: [
+      { id: 'value', label: 'text', dataType: 'text' },
+      { id: 'blocked', label: 'blocked', dataType: 'text' },
+    ],
+    config: [
+      {
+        key: 'key',
+        label: 'Setting',
+        kind: 'select',
+        options: CONFIG_SPEC.filter((f) => !f.secret).map((f) => ({
+          value: f.key,
+          label: `${f.label} (${f.key})`,
+        })),
+        default: '',
+        help: 'Secrets are absent from this list on purpose — use {{config.KEY}} in the consuming node instead.',
+      },
+    ],
+  },
+  async run(_inputs, config, ctx) {
+    const key = str(config, 'key', '')
+    if (!key) {
+      ctx.notes.push('no setting selected')
+      return { value: [], blocked: [] }
+    }
+    if (!isKnownConfigKey(key)) {
+      ctx.notes.push(`unknown setting "${key}"`)
+      return { value: [], blocked: asValueItems([`unknown setting: ${key}`]) }
+    }
+    if (isSecretKey(key)) {
+      ctx.notes.push(
+        `"${key}" is a secret and will not be put on the canvas — use {{config.${key}}} in the node that needs it`,
+      )
+      return { value: [], blocked: asValueItems([`secret withheld: ${key}`]) }
+    }
+    const v = cfgSafe(key)
+    ctx.notes.push(v === '' ? `${key} is empty` : `${key} = ${v}`)
+    return { value: asValueItems([v]), blocked: [] }
+  },
+}
+
 const urlValue = valueLiteral(
   'value.url',
   'URL',
@@ -1198,7 +1333,7 @@ const randomNumber: NodeImpl = {
     label: 'Random number',
     category: 'value',
     description:
-      'Emits one or more random numbers on a typed number port. Wire into "Set field from value" — one value broadcasts to every item; set Count to N to zip a distinct roll onto each item.',
+      'Emits one or more random numbers on a typed number port. Wire into "Set field from value" — one value broadcasts to every item; set Count to N to zip a distinct roll onto each item. Evaluated on demand when a live downstream node needs it (not at flow start), so a Random feeding only an untaken Switch arm stays idle.',
     inputs: [],
     outputs: [{ id: 'value', label: 'number', dataType: 'number' }],
     config: [
@@ -2005,6 +2140,7 @@ const compare: NodeImpl = {
           { value: 'contains', label: 'contains' },
           { value: 'matches', label: 'matches regex' },
           { value: 'in', label: 'in (comma list)' },
+          { value: 'year-ok', label: 'year agrees (or absent)' },
         ],
         default: 'gte',
       },
@@ -2030,6 +2166,17 @@ const compare: NodeImpl = {
         case 'matches':
           try { ok = new RegExp(String(right), 'i').test(String(left ?? '')) } catch { ok = false }
           break
+        // "The name must contain the release year" is the right instinct but the
+        // wrong test: plenty of legitimate releases carry no year at all (raw and
+        // non-English groups especially), and a plain `contains` rejects every one
+        // of them. Only a *conflicting* year is evidence of a mismatch — an absent
+        // one is simply no evidence, so it passes.
+        case 'year-ok': {
+          const want = String(right ?? '').match(/\d{4}/)?.[0]
+          const years = String(left ?? '').match(/(?:19|20)\d{2}/g)
+          ok = !want || !years || years.includes(want)
+          break
+        }
         case 'in':
           ok = String(right).split(',').map((s) => s.trim().toLowerCase()).includes(String(left ?? '').toLowerCase())
           break
@@ -2118,9 +2265,9 @@ function switchPorts(config: Record<string, unknown>): { inputs: NodePort[]; out
 }
 
 /**
- * Multi-way branch: each item goes to exactly one output — the first matching
- * case, or "else". Unlike chaining Compare nodes (which can fan out), Switch
- * guarantees a single path per item.
+ * Multi-way exclusive branch: each item goes to exactly one output — the first
+ * matching case, or "else". Downstream of empty arms is not evaluated (unlike
+ * Compare, which still schedules both sides).
  */
 const switchNode: NodeImpl = {
   spec: {
@@ -2128,7 +2275,7 @@ const switchNode: NodeImpl = {
     label: 'Switch',
     category: 'filter',
     description:
-      'Routes each item to exactly one output by matching a field against an ordered list of cases (first match wins). Unmatched items go to "else". Add/remove cases in config to grow or shrink the output ports.',
+      'Exclusive multi-way branch: each item goes to exactly one output (first matching case, else "else"). Only arms that receive items run downstream — empty arms are skipped. Add/remove cases in config to grow or shrink the output ports.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
       { id: 'a', label: 'A' },
@@ -2380,6 +2527,19 @@ const indexerMatch: NodeImpl = {
       },
       { key: 'threshold', label: 'Min word overlap (0-1)', kind: 'number', default: 0.6, help: 'Tokens mode: fraction of a catalog title’s distinctive words the release must contain.' },
       { key: 'seasonField', label: 'Season field', kind: 'text', default: '', help: 'Tokens mode: item field holding a numeric season (e.g. from Parse season). When present, only catalog rows whose tvdb_season matches are considered, so a file routes to the right season of a same-title franchise. Empty = title-only matching.' },
+      {
+        key: 'section',
+        label: 'Match within section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+          { value: '', label: 'Any section' },
+        ],
+        default: 'anime',
+        help: 'Which catalog rows are candidates. Defaults to anime — the historical behaviour, and the safe one: a TV release loose-matched against an anime row lands a file in the wrong library.',
+      },
     ],
   },
   async run(inputs, config, ctx) {
@@ -2389,7 +2549,11 @@ const indexerMatch: NodeImpl = {
     const mode = str(config, 'matchMode', 'exact')
     const threshold = num(config, 'threshold', 0.6)
     const seasonField = str(config, 'seasonField', '')
-    const catalog = listSeries()
+    // Scope the candidate rows. Left unscoped, a TV release could token-match
+    // an anime row (or vice versa) and the import would file it under the wrong
+    // library — the failure is silent and lands real files in the wrong place.
+    const sectionCfg = str(config, 'section', 'anime')
+    const catalog = sectionCfg === '' ? listSeries() : listSeries(sectionCfg as PortalSection)
     // When the release's season is known, a matching tvdb_season is strong
     // evidence, so we accept a lower title overlap than the general threshold
     // (the franchise name alone is enough to disambiguate within one season).
@@ -2470,19 +2634,29 @@ const indexerMatch: NodeImpl = {
     const matchTag = (item: FlowItem): (typeof catalog)[number] | undefined => {
       const mal = asNumber(item.tag_mal_id)
       const tagged = mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
-      if (!tagged || !seasonField) return tagged
-      const season = Number(item[seasonField])
-      if (!Number.isFinite(season) || tagged.tvdb_season == null || Number(tagged.tvdb_season) === season) {
+      if (tagged) {
+        if (!seasonField) return tagged
+        const season = Number(item[seasonField])
+        if (!Number.isFinite(season) || tagged.tvdb_season == null || Number(tagged.tvdb_season) === season) {
+          return tagged
+        }
+        const corrected = catalog.find(
+          (s) => s.tvdb_id != null && s.tvdb_id === tagged.tvdb_id && Number(s.tvdb_season) === season,
+        )
+        if (corrected) {
+          tagCorrected++
+          return corrected
+        }
         return tagged
       }
-      const corrected = catalog.find(
-        (s) => s.tvdb_id != null && s.tvdb_id === tagged.tvdb_id && Number(s.tvdb_season) === season,
-      )
-      if (corrected) {
-        tagCorrected++
-        return corrected
+      // TV/movies stamp `tmdb:<source_id>` (and optionally `series:<id>`) instead
+      // of `mal:` — one catalog row per show, so there is no cour to correct.
+      const tmdb = asNumber(item.tag_tmdb_id)
+      if (tmdb != null) {
+        return catalog.find((s) => s.source === 'tmdb' && s.source_id === tmdb)
       }
-      return tagged
+      const seriesId = asNumber(item.tag_series_id)
+      return seriesId == null ? undefined : catalog.find((s) => s.id === seriesId)
     }
 
     const matched: FlowItem[] = []
@@ -2570,8 +2744,9 @@ const jikanEnrich: NodeImpl = {
 }
 
 // Torrent index base URLs, overridable for mirrors/self-hosted proxies.
-const TOSHO_URL = process.env.TORRENT_TOSHO_URL ?? 'https://feed.animetosho.xyz'
-const TSUKI_URL = process.env.TORRENT_TSUKI_URL ?? 'https://api.tsukihime.org'
+const toshoUrl = (): string => cfgSafe('TORRENT_TOSHO_URL')
+const tsukiUrl = (): string => cfgSafe('TORRENT_TSUKI_URL')
+const apibayUrl = (): string => cfgSafe('TORRENT_APBAY_URL')
 
 // Trackers appended when building a magnet from a bare info-hash (TsukiHime
 // results carry `btih` but no magnet). Same set Anime Tosho magnets embed.
@@ -2648,6 +2823,18 @@ function parseEpisode(title: string): number | null {
   if (m) return Number(m[1])
   m = title.match(/\s-\s(\d{1,4})(?:v\d)?\s*(?:\[|\(|$)/i)
   if (m) return Number(m[1])
+  // "Show - 001 - Episode Title.mkv": the number is followed by another " - "
+  // and the episode's own title, so the branch above (which needs a bracket or
+  // end-of-string) can't see it. Common in BD batch releases. This is not
+  // cosmetic — every file in a batch failing to parse makes `library-import`
+  // skip them all as `unresolved-episode`, which marks the torrent `exhausted`
+  // and drops a fully-downloaded season on the floor permanently.
+  m = title.match(/\s-\s(\d{1,4})(?:v\d)?\s+-\s/i)
+  if (m) {
+    const n = Number(m[1])
+    // "Show - 2023 - Title" is a year, not episode 2023.
+    if (!(m[1].length === 4 && n >= 1900 && n <= 2099)) return n
+  }
   m = title.match(/\s(\d{2,4})\s*(?:\[|\()/)
   if (m) return Number(m[1])
   return null
@@ -2680,9 +2867,32 @@ function parseSeason(title: string): number | null {
   return null
 }
 
+// Torrent indexes read punctuation in a query as search *operators*, and
+// MAL/AniList titles are full of it. AnimeTosho and TsukiHime both take a
+// hyphen-prefixed word as NOT: "Re:ZERO -Starting Life in Another World- Season 4"
+// sends `-Starting` and `World-`, so the index excludes the very show the title
+// names and answers with zero results — for a whole season's wants, forever
+// ("no release found", every backoff, until someone looks). Dropping the
+// operator punctuation costs nothing, because breadth isn't what keeps the
+// search honest: the season pin (AnimeTosho's anidb_aid / TsukiHime's anime.id)
+// and the relevance floor below both run over the results either way.
+// Boundary-only for -, + and / — the internal ones are part of real names
+// ("Kaguya-sama", "Fate/Zero") and carry no operator meaning there.
+function providerQuery(q: string): string {
+  return q
+    .replace(/["()[\]{}<>*=~^|!@]/g, ' ')
+    .replace(/(^|\s)[-+/]+/g, '$1')
+    .replace(/[-+/]+(?=\s|$)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
   const doc = (await fetchJson(
-    `${base}/json/v1/search?q=${encodeURIComponent(q)}`,
+    // limit caps at 100 server-side; the default is 50. Newest-first, so a
+    // wider page is the difference between seeing a long season's older
+    // episodes and not seeing them at all.
+    `${base}/json/v1/search?q=${encodeURIComponent(q)}&limit=100`,
   )) as { data?: Record<string, unknown>[] }
   return (doc.data ?? [])
     .filter((r) => r.magnet || r.info_hash)
@@ -2747,6 +2957,39 @@ async function tsukiCandidates(q: string, base: string): Promise<Candidate[]> {
     })
 }
 
+async function apibayCandidates(q: string, base: string): Promise<Candidate[]> {
+  // apibay is The Pirate Bay's JSON search. It is the public index for Western
+  // TV/movies — AnimeTosho/TsukiHime don't carry them. A miss is a one-element
+  // sentinel with an all-zero hash, not an empty array.
+  const rows = (await fetchJson(`${base}/q.php?q=${encodeURIComponent(q)}`)) as Record<string, unknown>[]
+  const ZERO = '0000000000000000000000000000000000000000'
+  return (Array.isArray(rows) ? rows : [])
+    .filter((r) => {
+      const hash = String(r.info_hash ?? '').toLowerCase()
+      return hash.length >= 32 && hash !== ZERO
+    })
+    .map((r) => {
+      const title = String(r.name ?? '')
+      const hash = String(r.info_hash ?? '')
+      const files = r.num_files != null ? Number(r.num_files) : 0
+      return {
+        name: title || q,
+        magnet: magnetFromHash(hash, title || q),
+        hash,
+        size: r.size != null ? Number(r.size) : null,
+        seeders: r.seeders != null ? Number(r.seeders) : null,
+        resolution: normResolution('', title),
+        dualAudio: titleDualAudio(title),
+        videoCodec: titleCodec(title),
+        isBatch: titleIsBatch(title) || files > 2,
+        episode: parseEpisode(title),
+        aid: null,
+        pinId: null,
+        seriesTitle: null,
+      }
+    })
+}
+
 // Release-name noise that shouldn't count as title words when checking whether
 // a search hit actually matches the show we asked for.
 const QUALITY_TOKENS = new Set([
@@ -2796,6 +3039,7 @@ function relevanceScore(c: Candidate, titleNorm: string, queryTokens: string[]):
 interface SearchOpts {
   resolution: string
   requireResolution: boolean
+  maxResolution: string // hard ceiling by RES_RANK; '' = no cap
   preferDualAudio: boolean
   requireDualAudio: boolean
   minSeeders: number
@@ -2807,8 +3051,21 @@ function passesFilters(c: Candidate, o: SearchOpts): boolean {
   // Seeder floor only applies when the provider reports seeders (TsukiHime doesn't).
   if (o.minSeeders > 0 && c.seeders != null && c.seeders < o.minSeeders) return false
   if (o.requireResolution && o.resolution && c.resolution !== o.resolution) return false
+  // Hard ceiling, distinct from `resolution` (a preference) and from
+  // `requireResolution` (an exact match that would also reject a 720p-only
+  // week). Anything above the cap is dropped outright. This is the guard that
+  // actually holds: our Jellyfin GPU cannot hardware-decode AV1, and 4K
+  // releases are both the most likely to be AV1 and the most expensive to
+  // software-decode — a 2160p AV1 grab is what stalled playback on prod.
+  if (o.maxResolution && RES_RANK[o.maxResolution]) {
+    const rank = RES_RANK[c.resolution]
+    if (rank && rank > RES_RANK[o.maxResolution]) return false
+  }
   if (o.requireDualAudio && !c.dualAudio) return false
-  // Drop unplayable codecs (only when detected — an untagged release is kept).
+  // Drop unplayable codecs. Only fires when the release name states a codec —
+  // plenty of good releases (SubsPlease et al) name none, and rejecting those
+  // would throw away the best-seeded options. So this is a strong filter, not a
+  // guarantee: the only ground truth is ffprobe's `video_codec` after download.
   if (c.videoCodec && o.excludeCodecs.includes(c.videoCodec)) return false
   // Size cap (only when the release reports a size) — keeps a season-pack search
   // from picking an 80GB+ Blu-ray remux over a reasonable WEB-DL.
@@ -2832,8 +3089,23 @@ function scoreCandidate(c: Candidate, o: SearchOpts): number {
   return s
 }
 
+// Theatrical-release markers. A film carries no episode number, so the batch
+// heuristic ("no episode ⇒ season pack") happily hands one to an episode want —
+// that is how a want for the Macross *TV* series pulled down the 1984 film,
+// which then failed import as `unresolved-episode` after an 11 GB download.
+// Naming the fact here (rather than acting on it) keeps the branching in the
+// graph, per the general filter/sort node convention.
+const FILM_MARKERS =
+  /(\bmovies?\b|\bthe\s+movie\b|\bgekijou?ban\b|劇場版|剧场版|院线版|\bfeature\s+film\b)/i
+
+/** True when a release name advertises itself as a theatrical film. */
+export function releaseLooksLikeFilm(name: string): boolean {
+  return FILM_MARKERS.test(name)
+}
+
 function candidateFields(c: Candidate): FlowItem {
   return {
+    torrent_is_film: releaseLooksLikeFilm(c.name),
     torrent_name: c.name,
     torrent_magnet: c.magnet,
     torrent_hash: c.hash,
@@ -2867,6 +3139,7 @@ const torrentSearch: NodeImpl = {
         options: [
           { value: 'animetosho', label: 'Anime Tosho (has seeders)' },
           { value: 'tsukihime', label: 'TsukiHime (no seeders)' },
+          { value: 'apibay', label: 'apibay / The Pirate Bay (TV & movies)' },
         ],
         default: 'animetosho',
       },
@@ -2898,10 +3171,11 @@ const torrentSearch: NodeImpl = {
         { value: '', label: 'Any' },
       ], default: '1080p' },
       { key: 'requireResolution', label: 'Require exact resolution', kind: 'boolean', default: false, help: 'Off = prefer it but accept the best available.' },
+      { key: 'maxResolution', label: 'Max resolution', kind: 'text', default: '', help: 'Hard ceiling, e.g. "1080p" — anything higher is dropped. Unlike "require exact", this still allows a lower one when nothing better exists. Set this: 4K releases are the most likely to be AV1, which our Tesla T4 cannot hardware-decode.' },
       { key: 'preferDualAudio', label: 'Prefer dual audio (EN+JP)', kind: 'boolean', default: true },
       { key: 'requireDualAudio', label: 'Require dual audio', kind: 'boolean', default: false, help: 'Drops releases without English+Japanese audio. Many fansubs are sub-only.' },
       { key: 'excludeCodecs', label: 'Exclude codecs', kind: 'text', default: '', help: 'Comma list of video codecs to drop, e.g. "av1". Our Jellyfin GPU (Tesla T4) can’t hardware-decode AV1, so those stall on playback. h264/HEVC are preferred automatically.' },
-      { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho only — TsukiHime reports no seeders).' },
+      { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho and apibay — TsukiHime reports no seeders).' },
       { key: 'minTitleMatch', label: 'Title match (0-1)', kind: 'number', default: 0.5, help: 'Min fraction of the show’s title words a result must contain. Guards against the index returning a different show.' },
       { key: 'maxEpisodes', label: 'Max episodes', kind: 'number', default: 26, help: 'Episode mode: cap on how many recent episodes to queue per show.' },
       { key: 'maxSizeGB', label: 'Max torrent size (GB)', kind: 'number', default: 0, help: 'Drop releases larger than this (per torrent). Keeps season-pack searches from grabbing 80GB+ Blu-ray remuxes over a ~20GB WEB-DL. 0 = no cap.' },
@@ -2910,15 +3184,17 @@ const torrentSearch: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const provider = str(config, 'provider', 'animetosho')
+    const override = str(config, 'baseUrl', '').replace(/\/$/, '')
     const base =
-      str(config, 'baseUrl', '').replace(/\/$/, '') ||
-      (provider === 'tsukihime' ? TSUKI_URL : TOSHO_URL)
+      override ||
+      (provider === 'tsukihime' ? tsukiUrl() : provider === 'apibay' ? apibayUrl() : toshoUrl())
     const queryField = str(config, 'queryField', 'torrent_query')
     const episodeField = str(config, 'episodeField', '')
     const configMode = str(config, 'mode', 'auto')
     const opts: SearchOpts = {
       resolution: str(config, 'resolution', '1080p'),
       requireResolution: bool(config, 'requireResolution', false),
+      maxResolution: str(config, 'maxResolution', ''),
       preferDualAudio: bool(config, 'preferDualAudio', true),
       requireDualAudio: bool(config, 'requireDualAudio', false),
       minSeeders: num(config, 'minSeeders', 1),
@@ -2938,16 +3214,24 @@ const torrentSearch: NodeImpl = {
     let queried = 0
 
     for (const item of items) {
-      const q = String(item[queryField] ?? '').trim()
+      // Sanitized here rather than inside each fetcher so the run-report notes
+      // ("no title-relevant releases for …") quote the string actually searched.
+      const q = providerQuery(String(item[queryField] ?? ''))
       if (!q || (maxItems > 0 && queried >= maxItems)) {
         missed.push(item)
         continue
       }
       queried++
 
-      // Resolve batch-vs-episode per item.
+      // Resolve batch-vs-episode per item. A pinned episode number is
+      // authoritative: whoever set it (a want) needs THAT episode, so batch
+      // mode — which ignores the pin and takes the best release for the whole
+      // title — is never a safe fallback for it.
+      const pinnedEpNum = episodeField ? asNumber(item[episodeField]) : null
       let mode = configMode
-      if (mode === 'auto') {
+      if (pinnedEpNum != null) {
+        mode = 'episode'
+      } else if (mode === 'auto') {
         const wm = String(item.want_mode ?? '')
         if (wm === 'episode' || wm === 'batch') mode = wm
         else mode = String(item.air_status ?? '') === 'airing' ? 'episode' : 'batch'
@@ -2967,10 +3251,38 @@ const torrentSearch: NodeImpl = {
       const havePin = Number.isFinite(knownPin) && knownPin > 0
 
       try {
-        const raw =
+        const fetchFor = (query: string): Promise<Candidate[]> =>
           provider === 'tsukihime'
-            ? await tsukiCandidates(q, base)
-            : await toshoCandidates(q, base)
+            ? tsukiCandidates(query, base)
+            : provider === 'apibay'
+              ? apibayCandidates(query, base)
+              : toshoCandidates(query, base)
+
+        // An episode-pinned search needs a NARROW query, not a broad one. These
+        // indexes answer newest-first and cap a page at 100, so a months-old
+        // episode of a long season is simply not in the window: Re:Zero S4's
+        // broad query returned episodes 1, 2 and 8-13 and never 3-7, and every
+        // want for those reported "no release" against a catalogue holding six
+        // dual-audio copies of each. When the season is known, the SxxEyy marker
+        // is how these releases are actually named, so it selects the right
+        // slice directly. Broad stays the fallback — for shows with no season
+        // mapping, and for groups that number episodes with no season marker.
+        const pad2 = (n: number) => String(n).padStart(2, '0')
+        const markerSeason = asNumber(item.tvdb_season)
+        const marker =
+          pinnedEpNum != null && markerSeason != null
+            ? `S${pad2(markerSeason)}E${pad2(pinnedEpNum)}`
+            : null
+
+        let raw: Candidate[] = []
+        if (marker) {
+          raw = await fetchFor(`${q} ${marker}`)
+          // Only trust the narrowed page when it actually carries the episode we
+          // pinned; otherwise it told us nothing and the broad query still might.
+          if (!raw.some((c) => c.episode === pinnedEpNum)) raw = []
+          else ctx.notes.push(`narrowed "${q}" to ${marker} (${raw.length} results)`)
+        }
+        if (raw.length === 0) raw = await fetchFor(q)
 
         let relevant: Candidate[]
         // Only trust the pin when the results actually carry ids (a provider can
@@ -3000,6 +3312,24 @@ const torrentSearch: NodeImpl = {
                 ? raw.filter((c) => c.pinId === best.c!.pinId)
                 : raw.filter((c) => relevanceScore(c, titleNorm, qTokens) >= minTitleMatch)
               : []
+          // Without an id pin, title relevance can't tell seasons of a
+          // franchise apart ("Tensei shitara Slime Datta Ken" matches the
+          // "…4th Season" release). When the item knows its season, drop
+          // candidates whose own name declares a DIFFERENT one — a release
+          // with no season marker stays (S1 releases usually carry none).
+          const wantSeason = asNumber(item.tvdb_season)
+          if (wantSeason != null) {
+            const before = relevant.length
+            relevant = relevant.filter((c) => {
+              const rs = parseSeason(c.name)
+              return rs == null || rs === wantSeason
+            })
+            if (relevant.length < before) {
+              ctx.notes.push(
+                `dropped ${before - relevant.length} other-season release(s) for "${q}" (want season ${wantSeason}, no id pin)`,
+              )
+            }
+          }
         }
         const blocked = blacklistedHashes()
         const cands = relevant
@@ -3025,7 +3355,7 @@ const torrentSearch: NodeImpl = {
         } else if (mode === 'episode') {
           // A pinned episode (a want) narrows the grab to exactly that number;
           // otherwise: best release per episode, most recent first.
-          const pinnedEp = episodeField ? asNumber(item[episodeField]) : null
+          const pinnedEp = pinnedEpNum
           const byEp = new Map<number, Candidate>()
           for (const c of cands) {
             if (c.isBatch || c.episode == null) continue
@@ -3095,7 +3425,7 @@ const animeStatus: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const malField = str(config, 'malField', 'mal_id')
-    const base = str(config, 'baseUrl', '').replace(/\/$/, '') || TSUKI_URL
+    const base = str(config, 'baseUrl', '').replace(/\/$/, '') || tsukiUrl()
     const maxItems = num(config, 'maxItems', 25)
     const ttlMs = Math.max(0, num(config, 'cacheTtlHours', 24)) * 3600_000
     const out: FlowItem[] = []
@@ -3169,8 +3499,50 @@ const animeStatus: NodeImpl = {
           anilist_id: a.anilist != null ? Number(a.anilist) : null,
         })
       } catch {
+        // TsukiHime doesn't carry every MAL id — it 404s on shows whose season
+        // it lists under a different entry (real case: mal 46569 Hell's
+        // Paradise). Falling straight through to 'unknown' left the catalog row
+        // with a null air_status forever, which routes the show down flow 27's
+        // unknown branch and leaves torrent search with no season pin. Our own
+        // catalog row already carries MAL's status text, so use it rather than
+        // giving up. The provider ids stay null (we genuinely don't have them),
+        // but the airing/finished decision is recovered.
+        const row = findByMalId(mal)
+        const malStatus = (row?.status ?? '').toLowerCase()
+        const derived =
+          malStatus.includes('current') || malStatus.includes('airing')
+            ? 'airing'
+            : malStatus.includes('finished') || malStatus.includes('complete')
+              ? 'finished'
+              : null
+        if (derived) {
+          const isMovie = (row?.type ?? '').toLowerCase() === 'movie'
+          saveSeriesStatus(mal, {
+            air_status: derived,
+            total_episodes: row?.episodes ?? null,
+            is_movie: isMovie ? 1 : 0,
+            anidb_id: null,
+            tsuki_id: null,
+            anilist_id: null,
+          })
+          out.push({
+            ...item,
+            air_status: derived,
+            total_episodes: row?.episodes ?? null,
+            is_movie: isMovie,
+            want_mode: item.want_mode ?? (derived === 'airing' ? 'episode' : 'batch'),
+            anidb_id: null,
+            tsuki_id: null,
+            anilist_id: null,
+          })
+          continue
+        }
         // Unknown status → default to batch downstream, but route separately.
-        unknown.push({ ...item, air_status: 'unknown', want_mode: 'batch' })
+        // Never clobber an existing want_mode: an episode want must stay an
+        // episode search even when the status lookup fails (a batch fallback
+        // ignores the episode pin — that's how an S4 single got queued for an
+        // S1 episode want on prod).
+        unknown.push({ ...item, air_status: 'unknown', want_mode: item.want_mode ?? 'batch' })
       }
       // TsukiHime default limit is 120 req/min; 550ms spacing (~109/min) stays
       // under it with headroom.
@@ -3307,7 +3679,8 @@ const episodeTitlesNode: NodeImpl = {
       // Cache-first: skip series already fully titled + fresh (refreshEpisodeCache
       // no-ops), and cap upstream lookups per run.
       const cachedRows = getCachedEpisodes(mal)
-      const missing = cachedRows.length === 0 || cachedRows.some((e) => !e.title)
+      const missing =
+        cachedRows.length === 0 || cachedRows.some((e) => !isProperTitle(e.title, e.title_source))
       if (!missing) continue
       if (maxFetch > 0 && refreshed >= maxFetch) continue
       const finished =
@@ -3550,8 +3923,12 @@ const VIDEO_EXTS_DEFAULT = 'mkv,mp4,avi,m4v,mov'
 // environment that *runs* flows) refuses to start when this resolves to a
 // volume below WORK_MIN_GIB — so a forgotten WORK_DIR fails loudly at deploy
 // instead of silently filling the node PVC and evicting the pod at 3am.
+// Managed from /manage/settings (see #224: a live-set WORK_DIR env var is
+// reverted by a link redeploy, silently putting scratch back on the node PVC).
+// DATA_DIR stays the fallback and stays env-only — it is where the DB itself
+// lives, so it cannot be read from the DB.
 const WORK_DIR = () =>
-  process.env.WORK_DIR ?? process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
+  cfgSafe('WORK_DIR') || process.env.DATA_DIR || path.join(process.cwd(), 'data')
 
 // Boot guard: the library-import flow writes GB-sized intermediates, so scratch
 // must never land on the small node PVC (see WORK_DIR above — that's what took
@@ -3569,7 +3946,7 @@ const WORK_DIR = () =>
 // is forgotten it falls back to DATA_DIR (the node PVC), a different device from
 // the library NFS, and we refuse to start. When there's no LIBRARY_DIR to
 // compare against, fall back to a best-effort capacity floor (WORK_MIN_GIB).
-export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB ?? 10)): void {
+export function assertScratchVolumeSafe(minGiB = cfgNum('WORK_MIN_GIB', 10)): void {
   const workDir = WORK_DIR()
   // stat needs an existing path; walk up to the nearest ancestor that exists
   // (the `work` subdir is created lazily by the nodes on first write).
@@ -3589,7 +3966,7 @@ export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB
     try { libDev = fs.statSync(libDir).dev } catch { /* fall through to floor */ }
     if (workDev != null && libDev != null) {
       if (workDev !== libDev) {
-        const src = process.env.WORK_DIR ? 'WORK_DIR' : process.env.DATA_DIR ? 'DATA_DIR' : 'the default'
+        const src = cfgSafe('WORK_DIR') ? 'WORK_DIR' : process.env.DATA_DIR ? 'DATA_DIR' : 'the default'
         throw new Error(
           `flow scratch dir "${workDir}" (from ${src}) is on a different filesystem than the media library ` +
           `"${libDir}". Scratch has fallen back to the small node PVC instead of the media NFS; the ` +
@@ -3648,8 +4025,8 @@ export function assertScratchVolumeSafe(minGiB = Number(process.env.WORK_MIN_GIB
 // + the per-write free-space check; this sweep is the backstop for orphans a
 // crash left behind and for bursts between runs.
 export function pruneWorkDir(
-  ttlHours = Number(process.env.WORK_TTL_HOURS ?? 24),
-  maxGiB = Number(process.env.WORK_MAX_GIB ?? 40),
+  ttlHours = cfgNum('WORK_TTL_HOURS', 24),
+  maxGiB = cfgNum('WORK_MAX_GIB', 40),
 ): { removed: number; freedMB: number } {
   const workDir = path.join(WORK_DIR(), 'work')
   const cutoff = Date.now() - ttlHours * 3600_000
@@ -3905,6 +4282,42 @@ const parseSeasonNode: NodeImpl = {
   },
 }
 
+const expandSeasons: NodeImpl = {
+  spec: {
+    type: 'transform.expand-seasons',
+    label: 'Expand seasons',
+    category: 'enrich',
+    description:
+      'Turns each show into one item per season in a range (e.g. 5–9). Sets season and tvdb_season so torrent search and library import know which season to grab and where to file it. Western TV is one catalog row per show, unlike anime cours.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'items', label: 'seasons' }],
+    config: [
+      { key: 'from', label: 'First season', kind: 'number', default: 1, help: 'Inclusive. Overridden per item when First-season field is set and has a number.' },
+      { key: 'to', label: 'Last season', kind: 'number', default: 1, help: 'Inclusive. Overridden per item when Last-season field is set.' },
+      { key: 'fromField', label: 'First-season field', kind: 'text', default: '', help: 'Optional item field holding the start of the range. Empty = use First season.' },
+      { key: 'toField', label: 'Last-season field', kind: 'text', default: '', help: 'Optional item field holding the end of the range. Empty = use Last season.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const fromDefault = Math.max(1, Math.floor(num(config, 'from', 1)))
+    const toDefault = Math.max(1, Math.floor(num(config, 'to', 1)))
+    const fromField = str(config, 'fromField', '')
+    const toField = str(config, 'toField', '')
+    const items: FlowItem[] = []
+    for (const item of allInputs(inputs)) {
+      const fromRaw = fromField ? asNumber(item[fromField]) : null
+      const toRaw = toField ? asNumber(item[toField]) : null
+      const from = Math.max(1, fromRaw ?? fromDefault)
+      const to = Math.max(from, toRaw ?? toDefault)
+      for (let season = from; season <= to; season++) {
+        items.push({ ...item, season, tvdb_season: season })
+      }
+    }
+    ctx.notes.push(`${allInputs(inputs).length} show(s) → ${items.length} season(s)`)
+    return { items }
+  },
+}
+
 interface ProbeStream {
   index: number
   codec_type?: string
@@ -3918,7 +4331,7 @@ const mediaProbe: NodeImpl = {
     label: 'Probe media',
     category: 'enrich',
     description:
-      'ffprobes the video file and emits its stream facts (sub_langs, sub_codecs, sub_track_count, audio_langs, video_codec) plus a sub_tracks list for the extractor. Branch on these with a Compare node.',
+      'ffprobes the video file and emits its stream facts (sub_langs, sub_text_langs, sub_image_langs, sub_codecs, sub_track_count, audio_langs, video_codec) plus a sub_tracks list for the extractor. sub_text_langs is the one to branch on for "can we actually serve this subtitle" — image subs (PGS/VobSub) are unusable. Branch on these with a Compare node.',
     inputs: [{ id: 'in', label: 'in', dataType: 'file' }],
     outputs: [
       { id: 'probed', label: 'probed', dataType: 'probed' },
@@ -3958,11 +4371,24 @@ const mediaProbe: NodeImpl = {
           .map((s) => s.tags?.language ?? '')
           .filter(Boolean)
         const video = streams.find((s) => s.codec_type === 'video')
+        // `sub_langs` alone cannot answer "does this have a usable English
+        // subtitle": a file can carry English as a PGS/VobSub bitmap, which the
+        // portal cannot render (subs go out as text for client-side JASSUB) and
+        // the extractor cannot pull out. Splitting the languages by whether the
+        // track is text keeps that distinction expressible in a graph, where a
+        // plain Compare on the flat lists would silently conflate the two.
+        const isText = (codec: string): boolean => Object.hasOwn(SUB_EXT, codec.toLowerCase())
+        const langsOf = (want: boolean): string =>
+          [...new Set(subTracks.filter((t) => isText(t.codec) === want).map((t) => t.lang).filter(Boolean))].join(',')
         probed.push({
           ...item,
           sub_track_count: subTracks.length,
           sub_langs: subTracks.map((t) => t.lang).filter(Boolean).join(','),
           sub_codecs: subTracks.map((t) => t.codec).filter(Boolean).join(','),
+          /** Languages available as *text* — the ones we can actually serve. */
+          sub_text_langs: langsOf(true),
+          /** Languages available only as a bitmap (PGS/VobSub); needs OCR. */
+          sub_image_langs: langsOf(false),
           sub_tracks: JSON.stringify(subTracks),
           audio_langs: audioLangs.join(','),
           video_codec: video?.codec_name ?? '',
@@ -4085,7 +4511,10 @@ const extractSubs: NodeImpl = {
 // embedded sub in the target language. Keys on AniList id when available, else a
 // title query. Needs JIMAKU_API_KEY; without it the node passes items straight
 // to "missed" so the graph can route them elsewhere.
-const JIMAKU_URL = process.env.JIMAKU_URL ?? 'https://jimaku.cc/api'
+// Was `cfgSafe('jimakuUrl()')` — the literal function text as the key, which
+// matches nothing, so JIMAKU_URL silently never applied and the default was
+// always used.
+const jimakuUrl = (): string => cfgSafe('JIMAKU_URL') || 'https://jimaku.cc/api'
 
 const fetchSubs: NodeImpl = {
   spec: {
@@ -4111,8 +4540,8 @@ const fetchSubs: NodeImpl = {
     ],
   },
   async run(inputs, config, ctx) {
-    const apiKey = str(config, 'apiKey', '') || process.env.JIMAKU_API_KEY || ''
-    const base = (str(config, 'baseUrl', '') || JIMAKU_URL).replace(/\/$/, '')
+    const apiKey = str(config, 'apiKey', '') || cfgSafe('JIMAKU_API_KEY')
+    const base = (str(config, 'baseUrl', '') || jimakuUrl()).replace(/\/$/, '')
     const anilistField = str(config, 'anilistField', 'anilist_id')
     const queryField = str(config, 'queryField', 'title')
     const episodeField = str(config, 'episodeField', 'torrent_episode')
@@ -4191,6 +4620,228 @@ const fetchSubs: NodeImpl = {
     }
     ctx.notes.push(ctx.dryRun ? `dry run — resolved ${found.length} Jimaku sub(s)` : `fetched ${found.length} sub(s), ${missed.length} missed`)
     return { found, missed }
+  },
+}
+
+const opensubsUrl = (): string => cfgSafe('OPENSUBTITLES_URL') || 'https://api.opensubtitles.com/api/v1'
+
+/**
+ * Fetch an English subtitle from OpenSubtitles.
+ *
+ * The only English source available: Jimaku is a Japanese-subtitle repository,
+ * and `enrich.extract-subs` can only surface a track the file already carries —
+ * useless for a release whose subtitles are PGS bitmaps, or which has none.
+ *
+ * Search accepts the API key alone, but *download* requires a logged-in token,
+ * so a username/password is needed too. The token is minted once per run.
+ * Sets subtitle_path/lang/codec exactly like the extractor and Jimaku node, so
+ * `sink.library-import` and `sink.subtitle-sidecar` both consume it unchanged.
+ */
+const fetchSubsOpenSubtitles: NodeImpl = {
+  spec: {
+    type: 'enrich.fetch-subs-opensubtitles',
+    label: 'Fetch subtitles (OpenSubtitles)',
+    category: 'enrich',
+    description:
+      'Downloads an English subtitle from OpenSubtitles for items that have none usable. Sets subtitle_path/lang/codec like the other subtitle nodes. Needs OPENSUBTITLES_API_KEY plus username/password (downloads require a login token). Free accounts have a small daily download quota.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'found', label: 'found' },
+      { id: 'missed', label: 'missed' },
+    ],
+    config: [
+      { key: 'queryField', label: 'Title field', kind: 'text', default: 'title' },
+      { key: 'yearField', label: 'Year field', kind: 'text', default: 'production_year', help: 'Narrows the search; skipped when absent.' },
+      { key: 'seasonField', label: 'Season field', kind: 'text', default: '', help: 'Set for TV to match a specific episode.' },
+      { key: 'episodeField', label: 'Episode field', kind: 'text', default: '', help: 'Set for TV to match a specific episode.' },
+      { key: 'lang', label: 'Language', kind: 'text', default: 'en', help: 'OpenSubtitles language code. Recorded as subtitle_lang.' },
+      { key: 'outDir', label: 'Output dir', kind: 'text', default: '', help: 'Empty = DATA_DIR/work.' },
+      { key: 'maxItems', label: 'Max lookups', kind: 'number', default: 25, help: 'Guards the daily download quota. 0 = unlimited.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const items = allInputs(inputs)
+    const queryField = str(config, 'queryField', 'title')
+    const yearField = str(config, 'yearField', 'production_year')
+    const seasonField = str(config, 'seasonField', '')
+    const episodeField = str(config, 'episodeField', '')
+    const lang = str(config, 'lang', 'en') || 'en'
+    const outDir = str(config, 'outDir', '') || path.join(WORK_DIR(), 'work')
+    const maxItems = num(config, 'maxItems', 25)
+
+    const apiKey = cfgSafe('OPENSUBTITLES_API_KEY')
+    const username = cfgSafe('OPENSUBTITLES_USERNAME')
+    const password = cfgSafe('OPENSUBTITLES_PASSWORD')
+    const found: FlowItem[] = []
+    const missed: FlowItem[] = []
+
+    // Unconfigured is a routing outcome, not a run failure: the embedded-sub
+    // branch of a subtitle flow must keep working without this credential.
+    if (!apiKey) {
+      ctx.notes.push('OPENSUBTITLES_API_KEY is not set — every item routed to "missed"')
+      return { found: [], missed: items }
+    }
+    const base = opensubsUrl().replace(/\/$/, '')
+    const headers = { 'Api-Key': apiKey, 'User-Agent': 'boop-watch v1', 'Content-Type': 'application/json' }
+
+    let token: string | null = null
+    const login = async (): Promise<string | null> => {
+      if (token || !username || !password) return token
+      const res = await limitedFetch('opensubtitles', `${base}/login`, {
+        method: 'POST', headers, body: JSON.stringify({ username, password }),
+      })
+      if (!res.ok) throw new Error(`login ${res.status}`)
+      token = ((await res.json()) as { token?: string }).token ?? null
+      return token
+    }
+
+    let looked = 0
+    for (const item of items) {
+      if (maxItems > 0 && looked >= maxItems) { missed.push(item); continue }
+      const query = String(item[queryField] ?? '').trim()
+      if (!query) { missed.push(item); continue }
+      looked++
+      try {
+        const q = new URLSearchParams({ query, languages: lang })
+        const year = yearField ? asNumber(item[yearField]) : null
+        if (year != null) q.set('year', String(year))
+        const season = seasonField ? asNumber(item[seasonField]) : null
+        const episode = episodeField ? asNumber(item[episodeField]) : null
+        if (season != null) q.set('season_number', String(season))
+        if (episode != null) q.set('episode_number', String(episode))
+        q.set('type', episode != null ? 'episode' : 'movie')
+
+        const sres = await limitedFetch('opensubtitles', `${base}/subtitles?${q}`, { headers })
+        if (!sres.ok) throw new Error(`search ${sres.status}`)
+        const data = (await sres.json()) as {
+          data?: { attributes?: { download_count?: number; files?: { file_id?: number; file_name?: string }[] } }[]
+        }
+        // Most-downloaded first: the community's own quality signal, and far
+        // more reliable than the arbitrary API ordering.
+        const best = (data.data ?? [])
+          .filter((d) => (d.attributes?.files ?? []).some((f) => f.file_id != null))
+          .sort((a, b) => (b.attributes?.download_count ?? 0) - (a.attributes?.download_count ?? 0))[0]
+        const file = best?.attributes?.files?.find((f) => f.file_id != null)
+        if (!file?.file_id) { missed.push(item); continue }
+
+        const ext = /\.(ass|ssa)$/i.test(file.file_name ?? '') ? 'ass' : 'srt'
+        const baseName = String(
+          item.file_name ? path.basename(String(item.file_name), path.extname(String(item.file_name))) : query,
+        ).replace(/[/\\]/g, '_')
+        const subDir = path.join(outDir, baseName)
+        const subPath = path.join(subDir, `${baseName}.${lang}.${ext}`)
+
+        if (ctx.dryRun) {
+          found.push({ ...item, subtitle_path: subPath, subtitle_lang: lang, subtitle_codec: ext, subtitle_dir: subDir, subtitle_source: 'opensubtitles' })
+          continue
+        }
+        const tok = await login()
+        if (!tok) {
+          ctx.notes.push('OPENSUBTITLES_USERNAME/PASSWORD not set — search works but downloads need a login')
+          missed.push(item)
+          continue
+        }
+        const dres = await limitedFetch('opensubtitles', `${base}/download`, {
+          method: 'POST',
+          headers: { ...headers, Authorization: `Bearer ${tok}` },
+          body: JSON.stringify({ file_id: file.file_id }),
+        })
+        if (!dres.ok) throw new Error(`download ${dres.status}`)
+        const link = ((await dres.json()) as { link?: string }).link
+        if (!link) throw new Error('no download link')
+        const dl = await fetch(link, { signal: AbortSignal.timeout(30_000) })
+        if (!dl.ok) throw new Error(`fetch ${dl.status}`)
+        await fsp.mkdir(subDir, { recursive: true })
+        await fsp.writeFile(subPath, Buffer.from(await dl.arrayBuffer()))
+        found.push({ ...item, subtitle_path: subPath, subtitle_lang: lang, subtitle_codec: ext, subtitle_dir: subDir, subtitle_source: 'opensubtitles' })
+      } catch (e) {
+        ctx.notes.push(`OpenSubtitles error for "${query}": ${e instanceof Error ? e.message : String(e)}`)
+        missed.push(item)
+      }
+    }
+    ctx.notes.push(
+      `${ctx.dryRun ? 'dry run — resolved' : 'fetched'} ${found.length} sub(s), ${missed.length} missed`,
+    )
+    return { found, missed }
+  },
+}
+
+/**
+ * Place an already-fetched subtitle beside a video that is *already in the
+ * library*.
+ *
+ * `sink.library-import` moves sidecars alongside the video it places, but that
+ * only helps at import time. Everything that produces a subtitle later — an
+ * extraction or a provider fetch run over the existing library — wrote into the
+ * work dir with nothing to consume it, so a subtitle could be obtained and still
+ * never reach Jellyfin. This is the missing last step; pair it with
+ * `sink.jellyfin-scan` so the new track is picked up.
+ *
+ * The name Jellyfin expects is the video's own basename plus a language tag:
+ * `Some Film (1984).eng.srt` next to `Some Film (1984).mkv`.
+ */
+const subtitleSidecar: NodeImpl = {
+  spec: {
+    type: 'sink.subtitle-sidecar',
+    label: 'Place subtitle sidecar',
+    category: 'sink',
+    description:
+      'Copies an item’s subtitle (subtitle_path) next to its video in the library, named <video>.<lang>.<ext> so Jellyfin picks it up. For files already imported — sink.library-import already handles sidecars for new ones. Follow with a Jellyfin scan.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'placed', label: 'placed' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      { key: 'videoField', label: 'Video path field', kind: 'text', default: 'file_path', help: 'The library video the sidecar belongs beside.' },
+      { key: 'subField', label: 'Subtitle path field', kind: 'text', default: 'subtitle_path' },
+      { key: 'langField', label: 'Language field', kind: 'text', default: 'subtitle_lang', help: 'Written into the filename as .<lang>. Falls back to "eng".' },
+      { key: 'codecField', label: 'Extension field', kind: 'text', default: 'subtitle_codec', help: 'srt / ass / vtt. Empty = taken from the subtitle file’s own extension.' },
+      { key: 'overwrite', label: 'Overwrite existing', kind: 'boolean', default: false },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const videoField = str(config, 'videoField', 'file_path')
+    const subField = str(config, 'subField', 'subtitle_path')
+    const langField = str(config, 'langField', 'subtitle_lang')
+    const codecField = str(config, 'codecField', 'subtitle_codec')
+    const overwrite = bool(config, 'overwrite', false)
+    const placed: FlowItem[] = []
+    const skipped: FlowItem[] = []
+
+    for (const item of allInputs(inputs)) {
+      const video = String(item[videoField] ?? '')
+      const sub = String(item[subField] ?? '')
+      if (!video || !sub) {
+        skipped.push({ ...item, sidecar_status: 'missing-fields' })
+        continue
+      }
+      const lang = String(item[langField] ?? '').trim() || 'eng'
+      const ext = (String(item[codecField] ?? '').trim() || path.extname(sub).replace(/^\./, '') || 'srt').toLowerCase()
+      const base = path.basename(video, path.extname(video))
+      const dest = path.join(path.dirname(video), `${base}.${lang}.${ext}`)
+
+      if (!overwrite && (await exists(dest))) {
+        skipped.push({ ...item, library_subtitle_path: dest, sidecar_status: 'exists' })
+        continue
+      }
+      if (ctx.dryRun) {
+        placed.push({ ...item, library_subtitle_path: dest, sidecar_status: 'new' })
+        continue
+      }
+      try {
+        await fsp.mkdir(path.dirname(dest), { recursive: true })
+        await fsp.copyFile(sub, dest)
+        placed.push({ ...item, library_subtitle_path: dest, sidecar_status: 'new' })
+      } catch (e) {
+        ctx.notes.push(`sidecar failed for ${path.basename(video)}: ${e instanceof Error ? e.message : String(e)}`)
+        skipped.push({ ...item, sidecar_status: 'error' })
+      }
+    }
+    ctx.notes.push(
+      `${ctx.dryRun ? 'dry run — would place' : 'placed'} ${placed.length} sidecar(s), skipped ${skipped.length}`,
+    )
+    return { placed, skipped }
   },
 }
 
@@ -4444,96 +5095,13 @@ const trimAudioTracks: NodeImpl = {
   },
 }
 
-// A normalized catalog record, produced from either AniList (primary) or Jikan
-// (fallback), so the enrich node's write/emit logic is source-agnostic.
-type CatalogRecord = {
-  base: { title: string; synopsis: string | null; image_url: string | null; url: string }
-  meta: {
-    title_english: string | null
-    title_japanese: string | null
-    type: string | null
-    episodes: number | null
-    status: string | null
-    score: number | null
-    year: number | null
-    season: string | null
-    aired: string | null
-    studios: string
-    genres: string
-    broadcast: string | null
-  }
-}
-
-function aniListToCatalog(a: AniListMedia, mal: number): CatalogRecord {
-  return {
-    base: {
-      title: a.title,
-      synopsis: a.synopsis,
-      image_url: a.coverImage,
-      url: `https://myanimelist.net/anime/${mal}`,
-    },
-    meta: {
-      title_english: a.titleEnglish,
-      title_japanese: a.titleNative,
-      type: a.type,
-      episodes: a.totalEpisodes,
-      status: a.status,
-      score: a.score,
-      year: a.year,
-      season: a.season,
-      aired: a.airedString,
-      studios: JSON.stringify(a.studios),
-      genres: JSON.stringify(a.genres),
-      broadcast: a.broadcast ? JSON.stringify(a.broadcast) : null,
-    },
-  }
-}
-
-function jikanToCatalog(a: JikanAnimeFull): CatalogRecord {
-  return {
-    base: {
-      title: a.title,
-      synopsis: a.synopsis ?? null,
-      image_url: pickPosterUrl(a as unknown as Parameters<typeof pickPosterUrl>[0]),
-      url: a.url,
-    },
-    meta: {
-      title_english: a.title_english ?? null,
-      title_japanese: a.title_japanese ?? null,
-      type: a.type ?? null,
-      episodes: a.episodes ?? null,
-      status: a.status ?? null,
-      score: a.score ?? null,
-      year: a.year ?? null,
-      season: a.season ?? null,
-      aired: a.aired?.string ?? null,
-      studios: JSON.stringify((a.studios ?? []).map((s) => s.name)),
-      genres: JSON.stringify((a.genres ?? []).map((g) => g.name)),
-      broadcast: a.broadcast
-        ? JSON.stringify({
-            day: a.broadcast.day ?? null,
-            time: a.broadcast.time ?? null,
-            timezone: a.broadcast.timezone ?? null,
-            string: a.broadcast.string ?? null,
-          })
-        : null,
-    },
-  }
-}
-
-/** Resolve a catalog record for a mal_id — AniList first (current, not
- * rate-limit-prone), Jikan only if AniList can't answer. Returns the record and
- * which source produced it (for observability). Throws only if both fail. */
-async function resolveCatalog(mal: number): Promise<{ record: CatalogRecord; source: 'anilist' | 'jikan' }> {
-  const al = await fetchAniListMedia(mal)
-  if (al) return { record: aniListToCatalog(al, mal), source: 'anilist' }
-  return { record: jikanToCatalog(await fetchAnimeFull(mal)), source: 'jikan' }
-}
+// CatalogRecord / resolveCatalog live in server/metadata/mal.ts — the admin
+// API resolves anime metadata through the same code, and one copy is the point.
 
 const metadataEnrich: NodeImpl = {
   spec: {
     type: 'enrich.metadata',
-    label: 'Fetch metadata (AniList)',
+    label: 'Fetch metadata',
     category: 'enrich',
     description:
       'Pulls full catalog metadata by mal_id (titles, year, episodes, status, score, studios, genres) into our own catalog DB, and sets those fields on the item (e.g. production_year for the import path). AniList-primary (current + auth-free); falls back to MyAnimeList/Jikan only when AniList can’t answer.',
@@ -4543,7 +5111,19 @@ const metadataEnrich: NodeImpl = {
       { id: 'skipped', label: 'skipped' },
     ],
     config: [
-      { key: 'malField', label: 'MAL id field', kind: 'text', default: 'mal_id' },
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime (AniList / MAL)' },
+          { value: 'tv', label: 'TV (TMDB)' },
+          { value: 'movies', label: 'Movies (TMDB)' },
+        ],
+        default: 'anime',
+        help: 'Decides the provider and the id field. Anime resolves cours to TVDB seasons; TV and movies do not need that — a TMDB season already is the library season.',
+      },
+      { key: 'malField', label: 'Id field', kind: 'text', default: 'mal_id', help: 'Anime: the mal_id field. TV/movies: the TMDB id field (usually source_id).' },
       { key: 'writeDb', label: 'Write to catalog DB', kind: 'boolean', default: true, help: 'Upsert the metadata into our series catalog (the Jellyfin-independent source of truth).' },
       { key: 'maxItems', label: 'Max lookups', kind: 'number', default: 25, help: '0 = unlimited. Jikan is rate-limited.' },
     ],
@@ -4553,6 +5133,58 @@ const metadataEnrich: NodeImpl = {
     const writeDb = bool(config, 'writeDb', true)
     const maxItems = num(config, 'maxItems', 25)
     const items = allInputs(inputs)
+    const section = (str(config, 'section', 'anime') || 'anime') as PortalSection
+
+    // TV/movies resolve through TMDB and take a much simpler path: there is no
+    // cour-to-season mapping to do, because a TMDB season already *is* the
+    // library season. Kept as its own branch so the anime path below is
+    // untouched — that path carries the whole sourcing pipeline.
+    if (section !== 'anime') {
+      const idField = str(config, 'malField', 'source_id')
+      const client = clientForSection(section)
+      if (!client.configured) throw new Error(client.unconfiguredReason)
+      const enrichedTmdb: FlowItem[] = []
+      const skippedTmdb: FlowItem[] = []
+      const memoT = new Map<number, Awaited<ReturnType<typeof client.detail>>>()
+      let lookedT = 0
+      for (const item of items) {
+        const id = Number(item[idField])
+        if (!Number.isFinite(id) || id <= 0 || (!memoT.has(id) && maxItems > 0 && lookedT >= maxItems)) {
+          skippedTmdb.push(item)
+          continue
+        }
+        if (!memoT.has(id)) lookedT++
+        try {
+          let d = memoT.get(id)
+          if (!d) {
+            d = await client.detail(section, id)
+            memoT.set(id, d)
+          }
+          if (writeDb && !ctx.dryRun) {
+            const row = findBySource(section, 'tmdb', id)
+            if (row) updateSeriesMetadataById(row.id, d.metadata)
+          }
+          enrichedTmdb.push({
+            ...item,
+            title: item.title ?? d.title,
+            title_english: d.metadata.title_english,
+            episodes_total: d.episodes,
+            score: d.metadata.score,
+            imdb_id: d.imdb_id,
+            ...(d.tvdb_id != null ? { tvdb_id: d.tvdb_id } : {}),
+            ...(d.year != null ? { production_year: d.year, year: d.year } : {}),
+          })
+        } catch (e) {
+          ctx.notes.push(`tmdb ${id}: ${e instanceof Error ? e.message : String(e)}`)
+          skippedTmdb.push(item)
+        }
+      }
+      ctx.notes.push(
+        `${ctx.dryRun ? 'dry run — ' : ''}resolved ${memoT.size} ${section} record(s) via TMDB` +
+          (ctx.dryRun ? ' (not written)' : ''),
+      )
+      return { enriched: enrichedTmdb, skipped: skippedTmdb }
+    }
     const enriched: FlowItem[] = []
     const skipped: FlowItem[] = []
     // A library-import run feeds this node one item per FILE, so the same
@@ -4709,6 +5341,20 @@ const qbittorrentSink: NodeImpl = {
           if (wantId == null) continue
           const t = getTorrent(h)
           if (!t) continue
+          // The tracked torrent only satisfies the want when it's the same
+          // series. A cross-series hit (title relevance matched a sibling
+          // season's torrent — S4E11 for an S1 want, observed on prod) must
+          // NOT fulfil; it's a failed search, back off and retry elsewhere.
+          const wantMal = asNumber(it.mal_id)
+          const sameSeries = t.mal_id == null || wantMal == null || t.mal_id === wantMal
+          if (!sameSeries) {
+            recordWantAttempt(
+              wantId,
+              360,
+              `search matched torrent ${h.slice(0, 8)} of a different series (mal ${t.mal_id} ≠ ${wantMal}) — backing off`,
+            )
+            continue
+          }
           if (t.status === 'imported') {
             fulfilWantById(wantId, h, 'already imported by a tracked torrent')
           } else if (t.status === 'queued' || t.status === 'downloading' || t.status === 'completed') {
@@ -4936,7 +5582,7 @@ function sanitizeSegments(rel: string): string {
     .join('/')
 }
 
-const LIBRARY_DIR = () => process.env.LIBRARY_DIR ?? '/library'
+const LIBRARY_DIR = () => sectionLibraryRoot('anime')
 
 /** Strip cour/season suffixes from a MAL title so multi-season imports land in
  * the franchise folder ("… as a Slime Season 4" → "… as a Slime") when we have
@@ -4957,10 +5603,19 @@ function franchiseShowName(show: string, hasTvdbSeason: boolean): string {
 // that keeps scheduled runs idempotent. Fall back to size for copy-mode imports
 // (different inode); a genuine upgrade — e.g. a dual-audio re-encode — is a
 // larger, distinct file, so it still replaces the old one.
-function sameLibraryFile(src: string, dest: string): boolean {
+/** Async `existsSync`. `access` rejects rather than returning false, hence the wrap. */
+async function exists(p: string): Promise<boolean> {
   try {
-    const a = fs.statSync(src)
-    const b = fs.statSync(dest)
+    await fsp.access(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function sameLibraryFile(src: string, dest: string): Promise<boolean> {
+  try {
+    const [a, b] = await Promise.all([fsp.stat(src), fsp.stat(dest)])
     if (a.ino !== 0 && a.ino === b.ino && a.dev === b.dev) return true
     return a.size === b.size
   } catch {
@@ -4974,10 +5629,10 @@ const VIDEO_EXTS = new Set(['.mkv', '.mp4', '.m4v', '.avi', '.webm'])
  * marker, regardless of the rest of the filename — so a `pathTemplate` edit
  * (or a differently-named legacy import) still finds the old release instead
  * of treating it as new and leaving two files for one episode. */
-function findSiblingEpisodeFile(destDir: string, marker: string, excludeBasename: string): string | null {
+async function findSiblingEpisodeFile(destDir: string, marker: string, excludeBasename: string): Promise<string | null> {
   let entries: string[]
   try {
-    entries = fs.readdirSync(destDir)
+    entries = await fsp.readdir(destDir)
   } catch {
     return null
   }
@@ -4989,57 +5644,6 @@ function findSiblingEpisodeFile(destDir: string, marker: string, excludeBasename
   return null
 }
 
-/**
- * Two imports of the same show can render different folder names: `{show}
- * ({production_year})` carries the *cour's* year onto a *franchise* folder, so
- * Slime S1 wants "… Slime (2018)" and S4 wants "… Slime (2026)" — and when the
- * metadata hasn't resolved, `sanitizeSegments` drops the empty "()" and yields a
- * third variant. `Season {season:2}` likewise renders "Season 04" where an older
- * import wrote "Season 4". Normalising those away lets us reuse the directory
- * that already holds the show instead of splitting it in two.
- */
-function normalizeDirName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/\s*\((?:19|20)\d{2}\)\s*$/, '')
-    .replace(/^season\s*0*(\d+)$/, 'season $1')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-/** The directory to use for one templated segment: an existing directory that
- * differs only by a `(year)` suffix or season padding, else `wanted` itself. */
-function resolveDirSegment(parent: string, wanted: string): string {
-  if (fs.existsSync(path.join(parent, wanted))) return wanted
-  let entries: fs.Dirent[]
-  try {
-    entries = fs.readdirSync(parent, { withFileTypes: true })
-  } catch {
-    return wanted
-  }
-  const target = normalizeDirName(wanted)
-  // Sorted so the choice is deterministic while a duplicate pair still exists;
-  // the un-suffixed legacy name sorts before its "… (2026)" twin.
-  const matches = entries
-    .filter((e) => e.isDirectory() && normalizeDirName(e.name) === target)
-    .map((e) => e.name)
-    .sort()
-  return matches[0] ?? wanted
-}
-
-/** Re-point a templated relative path at the directories already on disk. */
-function resolveExistingPath(root: string, rel: string): string {
-  const parts = rel.split('/')
-  const file = parts.pop() as string
-  let dir = root
-  const resolved: string[] = []
-  for (const seg of parts) {
-    const use = resolveDirSegment(dir, seg)
-    resolved.push(use)
-    dir = path.join(dir, use)
-  }
-  return [...resolved, file].join('/')
-}
 
 const libraryImport: NodeImpl = {
   spec: {
@@ -5055,7 +5659,19 @@ const libraryImport: NodeImpl = {
     ],
     config: [
       { key: 'fileField', label: 'Video file field', kind: 'text', default: 'file_path' },
-      { key: 'libraryRoot', label: 'Library root', kind: 'text', default: '', help: 'Destination library dir. Empty = LIBRARY_DIR env (/library).' },
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+        ],
+        default: 'anime',
+        help: 'Picks the destination library and the default path layout for that section (movies get a flat folder, no Season NN).',
+      },
+      { key: 'libraryRoot', label: 'Library root (override)', kind: 'text', default: '', help: 'Empty = the section’s configured library path from /manage/settings.' },
       {
         key: 'pathTemplate',
         label: 'Path template',
@@ -5082,10 +5698,14 @@ const libraryImport: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const fileField = str(config, 'fileField', 'file_path')
-    const root = str(config, 'libraryRoot', '') || LIBRARY_DIR()
-    // Keep this fallback identical to the spec's pathTemplate default so a node
-    // that doesn't set it still gets the full Jellyfin layout.
-    const tpl = str(config, 'pathTemplate', '{show} ({production_year})/Season {season:2}/{show} - S{season:2}E{torrent_episode:2}')
+    // Explicit override wins; otherwise the section's own root. Reading it per
+    // run (not at import) is what lets /manage/settings change it live.
+    const importSection = (str(config, 'section', 'anime') || 'anime') as PortalSection
+    const root = str(config, 'libraryRoot', '') || sectionLibraryRoot(importSection)
+    // Fall back to the *section's* layout, not a hardcoded one: a movie has no
+    // Season NN level, and defaulting it into one would bury every film a
+    // folder deep and hide it from Jellyfin's movie scanner.
+    const tpl = str(config, 'pathTemplate', '') || sectionConfig(importSection).pathTemplate
     const showField = str(config, 'showField', 'title')
     const defaultSeason = num(config, 'defaultSeason', 1)
     const method = str(config, 'method', 'hardlink')
@@ -5093,21 +5713,21 @@ const libraryImport: NodeImpl = {
     const moveSubs = bool(config, 'moveSubs', true)
 
     // Place one file: link/copy/symlink src -> dest with an EXDEV copy fallback.
-    const place = (src: string, dest: string): 'copy' | 'hardlink' | 'symlink' => {
-      fs.mkdirSync(path.dirname(dest), { recursive: true })
-      if (fs.existsSync(dest)) {
+    const place = async (src: string, dest: string): Promise<'copy' | 'hardlink' | 'symlink'> => {
+      await fsp.mkdir(path.dirname(dest), { recursive: true })
+      if (await exists(dest)) {
         if (!overwrite) return 'hardlink' // caller checks existence first; unreached
-        fs.rmSync(dest)
+        await fsp.rm(dest)
       }
-      if (method === 'copy') { fs.copyFileSync(src, dest); return 'copy' }
-      if (method === 'symlink') { fs.symlinkSync(src, dest); return 'symlink' }
+      if (method === 'copy') { await fsp.copyFile(src, dest); return 'copy' }
+      if (method === 'symlink') { await fsp.symlink(src, dest); return 'symlink' }
       try {
-        fs.linkSync(src, dest)
+        await fsp.link(src, dest)
         return 'hardlink'
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === 'EXDEV') {
           // Different filesystem: hardlink impossible, copy instead.
-          fs.copyFileSync(src, dest)
+          await fsp.copyFile(src, dest)
           return 'copy'
         }
         throw e
@@ -5116,7 +5736,24 @@ const libraryImport: NodeImpl = {
 
     // One catalog read per run, not per item.
     let catalogRows: ReturnType<typeof listSeries> | null = null
-    const catalog = () => (catalogRows ??= listSeries())
+    const catalog = () => (catalogRows ??= listAnimeSeries())
+
+    // The catalog row this file belongs to, for the ledger. `mal_id` is null on
+    // every TV and movie import, so a row keyed only on it is orphaned from its
+    // title — which is what left an imported film showing "Library: None yet".
+    // `enrich.indexer-match` puts the provider id on the item as `source_id`.
+    const seriesIdCache = new Map<number, number | null>()
+    const resolveSeriesId = (item: FlowItem): number | null => {
+      const direct = asNumber(item.series_id)
+      if (direct != null) return direct
+      const sourceId = asNumber(item.source_id) ?? asNumber(item.mal_id)
+      if (sourceId == null) return null
+      if (seriesIdCache.has(sourceId)) return seriesIdCache.get(sourceId) ?? null
+      const provider = sectionConfig(importSection).provider
+      const found = findBySource(importSection, provider, sourceId)?.id ?? null
+      seriesIdCache.set(sourceId, found)
+      return found
+    }
 
     /** True when this mal_id is one cour of a multi-season franchise (siblings
      * share its tvdb_id). Guessing Season 1 for such a file buries a later
@@ -5189,7 +5826,7 @@ const libraryImport: NodeImpl = {
       }
       // Land in the folder that already holds this show/season rather than the
       // one the template happens to name today.
-      const rel = resolveExistingPath(root, templated)
+      const rel = await resolveExistingPath(root, templated)
       const dest = path.join(root, rel + ext)
       const destDir = path.dirname(dest)
       // Match any existing file for this episode by its SxxExx marker, not
@@ -5204,8 +5841,8 @@ const libraryImport: NodeImpl = {
           ? `S${String(Math.trunc(seasonNum)).padStart(2, '0')}E${String(Math.trunc(episodeNum)).padStart(2, '0')}`
           : null
       const destBasename = path.basename(dest)
-      let existing = fs.existsSync(dest) ? dest : null
-      if (!existing && marker) existing = findSiblingEpisodeFile(destDir, marker, destBasename)
+      let existing = (await exists(dest)) ? dest : null
+      if (!existing && marker) existing = await findSiblingEpisodeFile(destDir, marker, destBasename)
 
       // The want that asked for this file lives in MAL per-cour episode space —
       // fulfil with the PRE-offset number (epNum), never the post-offset
@@ -5229,13 +5866,14 @@ const libraryImport: NodeImpl = {
         // Overwrite mode: only re-place when the incoming file actually differs
         // from what's already there, so re-runs don't churn (or re-trigger a
         // Jellyfin scan) but a real upgrade does replace the old file.
-        if (sameLibraryFile(src, existing)) {
+        if (await sameLibraryFile(src, existing)) {
           // This library file *is* this torrent — free provenance for a file
           // imported before the ledger existed. Backfill it.
           if (!ctx.dryRun) {
             try {
-              const st = fs.statSync(existing)
+              const st = await fsp.stat(existing)
               recordLibraryFile({
+                series_id: resolveSeriesId(item),
                 path: path.relative(root, existing),
                 mal_id: asNumber(item.mal_id),
                 tvdb_id: asNumber(item.tvdb_id),
@@ -5262,13 +5900,13 @@ const libraryImport: NodeImpl = {
         continue
       }
       try {
-        const used = place(src, dest)
+        const used = await place(src, dest)
         // A stale sibling under a different name (an earlier import that used
         // an older path template) must go once the new file is safely placed,
         // or it lingers as a permanent duplicate episode.
         if (existing && existing !== dest) {
           try {
-            fs.rmSync(existing)
+            await fsp.rm(existing)
             forgetLibraryFile(path.relative(root, existing))
           } catch (e) {
             ctx.notes.push(
@@ -5280,8 +5918,9 @@ const libraryImport: NodeImpl = {
         // source lands here as a cross-filesystem copy, so its inode no longer
         // ties back to the torrent — the row is the only surviving provenance.
         try {
-          const st = fs.statSync(dest)
+          const st = await fsp.stat(dest)
           recordLibraryFile({
+            series_id: resolveSeriesId(item),
             path: path.relative(root, dest),
             mal_id: asNumber(item.mal_id),
             tvdb_id: asNumber(item.tvdb_id),
@@ -5310,8 +5949,8 @@ const libraryImport: NodeImpl = {
             lang && codec ? `.${lang}.${codec}` : path.basename(subSrc).slice(String(item.file_name ?? path.basename(subSrc)).lastIndexOf('.'))
           const subDest = dest.slice(0, dest.length - ext.length) + subExt
           try {
-            fs.mkdirSync(path.dirname(subDest), { recursive: true })
-            fs.copyFileSync(subSrc, subDest)
+            await fsp.mkdir(path.dirname(subDest), { recursive: true })
+            await fsp.copyFile(subSrc, subDest)
             out.library_subtitle_path = subDest
           } catch (e) {
             ctx.notes.push(`subtitle copy failed for ${path.basename(dest)}: ${e instanceof Error ? e.message : String(e)}`)
@@ -5423,7 +6062,7 @@ const jellyfinScan: NodeImpl = {
       ctx.notes.push('dry run — would trigger a Jellyfin library scan')
       return { items }
     }
-    if (!jellyfinConfigured) {
+    if (!jellyfinConfigured()) {
       ctx.notes.push('Jellyfin not configured — scan skipped')
       return { items }
     }
@@ -5501,7 +6140,19 @@ const jellyfinCollection: NodeImpl = {
       { id: 'pending', label: 'not found yet' },
     ],
     config: [
-      { key: 'collectionId', label: 'Collection id', kind: 'text', default: '', help: 'Empty = WATCH_COLLECTION_ID env (the public "Watch" collection).' },
+      {
+        key: 'section',
+        label: 'Section',
+        kind: 'select',
+        options: [
+          { value: 'anime', label: 'Anime' },
+          { value: 'tv', label: 'TV' },
+          { value: 'movies', label: 'Movies' },
+        ],
+        default: 'anime',
+        help: 'Which section’s collection to add to. Ignored when a collection id is set below.',
+      },
+      { key: 'collectionId', label: 'Collection id (override)', kind: 'text', default: '', help: 'Add to this BoxSet instead of the section’s configured one.' },
       { key: 'nameField', label: 'Show name field', kind: 'text', default: 'title_english', help: 'Item field with the show title; falls back to name.' },
       { key: 'itemType', label: 'Item type', kind: 'select', options: [
         { value: 'Series', label: 'Series' },
@@ -5513,7 +6164,16 @@ const jellyfinCollection: NodeImpl = {
   },
   async run(inputs, config, ctx) {
     const items = allInputs(inputs)
-    const collectionId = str(config, 'collectionId', '') || COLLECTION_ID || ''
+    // Explicit id wins, then the chosen section's collection. Defaulting the
+    // section to anime keeps every saved graph on WATCH_COLLECTION_ID exactly as
+    // before; without a section this node could only ever feed the anime
+    // collection, so TV and movie imports landed in the library but never
+    // reached the portal — "imported" but permanently "not on site".
+    const section = (str(config, 'section', 'anime') || 'anime') as PortalSection
+    const collectionId =
+      str(config, 'collectionId', '') ||
+      sectionCollections().find((c) => c.section === section)?.collectionId ||
+      ''
     const nameField = str(config, 'nameField', 'title_english')
     const itemType = str(config, 'itemType', 'Series')
     const threshold = num(config, 'threshold', 0.6)
@@ -5530,8 +6190,12 @@ const jellyfinCollection: NodeImpl = {
       ctx.notes.push('no items had a show name to resolve')
       return { added: [], pending: items }
     }
-    if (!collectionId) throw new Error('No collection id (config or WATCH_COLLECTION_ID env)')
-    if (!jellyfinConfigured) throw new Error('Jellyfin is not configured')
+    if (!collectionId) {
+      throw new Error(
+        `No Jellyfin collection for the ${section} section — set its collection id in /manage/settings, or paste one into this node.`,
+      )
+    }
+    if (!jellyfinConfigured()) throw new Error('Jellyfin is not configured')
 
     // Resolve each unique show to a Jellyfin id, polling for the async scan.
     const resolved = new Map<string, { id: string; name: string }>()
@@ -5684,6 +6348,8 @@ const portalSink: NodeImpl = {
       const row: PortalItem = {
         id,
         type: String(item.type ?? existing?.type ?? 'Movie'),
+        // Flow-written rows keep their section; the flow system is anime-side.
+        section: existing?.section ?? 'anime',
         name,
         original_title: (item.original_title ?? existing?.original_title ?? null) as string | null,
         overview: (item.overview ?? existing?.overview ?? null) as string | null,
@@ -6016,6 +6682,7 @@ const triggerFire: NodeImpl = {
 }
 
 const IMPLS: NodeImpl[] = [
+  configValue,
   triggerStart,
   triggerNewItem,
   triggerNewPortalItem,
@@ -6038,9 +6705,12 @@ const IMPLS: NodeImpl[] = [
   join,
   expandFiles,
   parseSeasonNode,
+  expandSeasons,
   mediaProbe,
   extractSubs,
   fetchSubs,
+  fetchSubsOpenSubtitles,
+  subtitleSidecar,
   muxTracks,
   trimAudioTracks,
   metadataEnrich,

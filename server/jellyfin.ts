@@ -3,15 +3,70 @@
 import { Readable, pipeline } from 'node:stream'
 import type { Request, Response } from 'express'
 import { syncJellyfinToPortal } from './sync.js'
-import { getPortalCollectionItems, getPortalScopeEpisodes, getPortalPlayableIds, PortalItem } from './portalDb.js'
+import {
+  getPortalCollectionItems, getPortalScopeEpisodes, getPortalPlayableIds,
+  PortalItem, type PortalSection,
+} from './portalDb.js'
+import { cfgSafe } from './config.js'
 
-const JF = (process.env.JELLYFIN_URL || 'http://jellyfin:8096').replace(/\/+$/, '')
-const KEY = process.env.JELLYFIN_API_KEY
-const COLLECTION_ID = process.env.WATCH_COLLECTION_ID
+// Editable from /manage/settings, so read per call rather than captured at
+// import: a module-scope constant would pin whatever was set when the pod
+// started, which is the redeploy-to-change-a-value problem this replaces.
+const jfBase = (): string => cfgSafe('JELLYFIN_URL').replace(/\/+$/, '')
+const jfKey = (): string => cfgSafe('JELLYFIN_API_KEY')
 const SCOPE_TTL_MS = 5 * 60 * 1000
 
-/** The public portal needs both an admin key and the "Public" collection id. */
-export const jellyfinConfigured = Boolean(KEY && COLLECTION_ID)
+// One Jellyfin collection per portal section. WATCH_COLLECTION_ID keeps its
+// historical meaning (the original single-collection portal was all anime);
+// the tv/movies collections are optional — an unset one hides that section.
+/** The (section, collection) pairs the portal serves, in display order. */
+export const sectionCollections = (): ReadonlyArray<{ section: PortalSection; collectionId: string }> =>
+  ([
+    { section: 'anime' as const, collectionId: cfgSafe('WATCH_COLLECTION_ID') },
+    { section: 'tv' as const, collectionId: cfgSafe('WATCH_COLLECTION_ID_TV') },
+    { section: 'movies' as const, collectionId: cfgSafe('WATCH_COLLECTION_ID_MOVIES') },
+  ]).filter((c) => c.collectionId)
+
+/** Sections that have a collection configured (drives the header switcher). */
+export const enabledSections = (): PortalSection[] => sectionCollections().map((c) => c.section)
+
+/** One of Jellyfin's configured libraries, as the admin API reports it. */
+export interface JfVirtualFolder {
+  Name: string
+  CollectionType?: string
+  ItemId?: string
+  Locations?: string[]
+}
+
+/**
+ * Jellyfin's own library list, so /manage can show each section's real folder
+ * and on-disk path and flag a mismatch against our LIBRARY_DIR_* config.
+ *
+ * Returns null rather than throwing: this is a cross-check on an informational
+ * panel, and a Jellyfin that's down should cost the cross-check, not the page.
+ * Cached briefly — the manage UI polls, and library config changes rarely.
+ */
+let vfCache: { at: number; folders: JfVirtualFolder[] } | null = null
+const VF_TTL_MS = 5 * 60 * 1000
+
+export async function jfVirtualFolders(): Promise<JfVirtualFolder[] | null> {
+  if (!jfKey()) return null
+  if (vfCache && Date.now() - vfCache.at < VF_TTL_MS) return vfCache.folders
+  try {
+    const folders = await jfJson<JfVirtualFolder[]>('/Library/VirtualFolders')
+    if (!Array.isArray(folders)) return null
+    vfCache = { at: Date.now(), folders }
+    return folders
+  } catch (e) {
+    console.error('[jellyfin] VirtualFolders lookup failed —', e)
+    // Serve a stale list over nothing; it's better than blanking the panel.
+    return vfCache?.folders ?? null
+  }
+}
+
+/** The public portal needs an admin key and at least one section collection. */
+export const jellyfinConfigured = (): boolean =>
+  Boolean(jfKey() && sectionCollections().length > 0)
 
 export interface JfMediaStream {
   Index: number
@@ -45,6 +100,10 @@ export interface JfItem {
   SeriesName?: string
   PrimaryImageAspectRatio?: number
   BackdropImageTags?: string[]
+  /** Filesystem path Jellyfin reads this item from. Only populated when asked
+   * for via `Fields=Path` — it is what tells us which folder Jellyfin actually
+   * serves a series from, and so whether our imports agree with it. */
+  Path?: string
   MediaStreams?: JfMediaStream[]
   MediaSources?: { MediaStreams?: JfMediaStream[]; Size?: number; Container?: string }[]
 }
@@ -52,11 +111,11 @@ export interface JfItem {
 type Query = Record<string, string | number | undefined | null>
 
 export function jfUrl(path: string, query: Query = {}): URL {
-  const u = new URL(JF + (path.startsWith('/') ? path : '/' + path))
+  const u = new URL(jfBase() + (path.startsWith('/') ? path : '/' + path))
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null) u.searchParams.set(k, String(v))
   }
-  u.searchParams.set('api_key', KEY ?? '')
+  u.searchParams.set('api_key', jfKey())
   return u
 }
 
@@ -186,6 +245,9 @@ export async function jfSeriesIdByTvdb(tvdbId: number): Promise<string | null> {
 let collectionItems: JfItem[] = []
 let scopeEpisodes: JfItem[] = []
 let playableIds = new Set<string>()
+// Section per scope id (titles + episodes) — JfItem is a Jellyfin shape, so
+// the portal-only section fact lives alongside rather than on it.
+let sectionById = new Map<string, PortalSection>()
 let scopeLoadedAt = 0
 let scopeLoading: Promise<void> | null = null
 
@@ -210,13 +272,16 @@ function mapPortalToJf(p: PortalItem): JfItem {
 }
 
 async function refreshScope(): Promise<void> {
-  if (!jellyfinConfigured) throw new Error('Jellyfin not configured')
+  if (!jellyfinConfigured()) throw new Error('Jellyfin not configured')
   
   await syncJellyfinToPortal()
 
-  collectionItems = getPortalCollectionItems().map(mapPortalToJf)
-  scopeEpisodes = getPortalScopeEpisodes().map(mapPortalToJf)
+  const titles = getPortalCollectionItems()
+  const episodes = getPortalScopeEpisodes()
+  collectionItems = titles.map(mapPortalToJf)
+  scopeEpisodes = episodes.map(mapPortalToJf)
   playableIds = getPortalPlayableIds()
+  sectionById = new Map([...titles, ...episodes].map((p) => [p.id, p.section]))
   scopeLoadedAt = Date.now()
 }
 
@@ -259,8 +324,8 @@ export async function ensureScope(): Promise<void> {
 
 /** Best-effort initial load at boot (no-op if Jellyfin isn't configured). */
 export function warmScope(): void {
-  if (!jellyfinConfigured) {
-    console.warn('[jellyfin] JELLYFIN_API_KEY / WATCH_COLLECTION_ID not set — public portal routes disabled')
+  if (!jellyfinConfigured()) {
+    console.warn('[jellyfin] JELLYFIN_API_KEY / no section collection (WATCH_COLLECTION_ID[_TV|_MOVIES]) set — public portal routes disabled')
     return
   }
   refreshScope()
@@ -268,10 +333,13 @@ export function warmScope(): void {
     .catch((e) => console.error('initial scope load failed:', e instanceof Error ? e.message : e))
 }
 
-export const getCollectionItems = (): JfItem[] => collectionItems
-export const getScopeEpisodes = (): JfItem[] => scopeEpisodes
+export const getCollectionItems = (section?: PortalSection): JfItem[] =>
+  section ? collectionItems.filter((it) => sectionById.get(it.Id) === section) : collectionItems
+export const getScopeEpisodes = (section?: PortalSection): JfItem[] =>
+  section ? scopeEpisodes.filter((it) => sectionById.get(it.Id) === section) : scopeEpisodes
 export const getPlayableIds = (): Set<string> => playableIds
 export const isCollectionItem = (id: string): boolean => collectionItems.some((it) => it.Id === id)
+export const getItemSection = (id: string): PortalSection | undefined => sectionById.get(id)
 
 // ---------------------------------------------------------------------------
 // Byte-streaming proxy to Jellyfin (images, playlists, segments).

@@ -7,13 +7,18 @@ import path from 'node:path'
 import { Router, type Request, type Response } from 'express'
 import {
   jellyfinConfigured, ensureScope, jfItem, jfJson, jfUrl, proxy, getSeriesSeasons,
-  getCollectionItems, getScopeEpisodes, getPlayableIds, isCollectionItem, type JfItem, type JfSeason,
+  getCollectionItems, getScopeEpisodes, getPlayableIds, isCollectionItem, getItemSection,
+  enabledSections, type JfItem, type JfSeason,
 } from './jellyfin.js'
 import { buildWatchData, type Segment } from './watch.js'
 import { aniskipSegments } from './aniskip.js'
 import { getSchedule } from './schedule.js'
-import { getPortalItem, getPortalEpisodes, getPortalSeasonCounts } from './portalDb.js'
-import { getBanner, getSelectedBanner, findByMalId, listSeries, listComments, type BannerRow, type SeriesRow, type CommentRow } from './db.js'
+import {
+  getPortalItem, getPortalEpisodes, getPortalSeasonCounts, getPortalSeasonYears,
+  getPortalSeasonTitles, getPortalCollectionItems, isPortalSection,
+  type PortalItem, type PortalSection,
+} from './portalDb.js'
+import { getBanner, getSelectedBanner, findByMalId, listAnimeSeries, listComments, type BannerRow, type AnimeSeriesRow, type CommentRow } from './db.js'
 import { BANNERS_DIR } from './banners.js'
 import { AVATARS_DIR } from './avatars.js'
 import { buildSeriesChase, toPublicChase } from './chaseContext.js'
@@ -45,10 +50,17 @@ publicRouter.get('/api/avatar/:file', (req, res) => {
 
 const qStr = (v: unknown): string => (typeof v === 'string' ? v : Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '')
 
+// ?section= filter for the browse-surface routes; anything unrecognized
+// (including absent) means "all sections", so old clients keep working.
+const qSection = (req: Request): PortalSection | undefined => {
+  const s = qStr(req.query.section)
+  return isPortalSection(s) ? s : undefined
+}
+
 const normTitle = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 
 /** True when a catalog title is clearly the same franchise as the portal name. */
-function titleMatchesFranchise(portalName: string, catalog: SeriesRow): boolean {
+function titleMatchesFranchise(portalName: string, catalog: AnimeSeriesRow): boolean {
   const name = normTitle(portalName)
   if (!name) return false
   for (const raw of [catalog.title, catalog.title_english]) {
@@ -66,10 +78,10 @@ function titleMatchesFranchise(portalName: string, catalog: SeriesRow): boolean 
  * merely shares the same `tvdb_season` number (Slime ?season=2 must not
  * resolve to Mushoku Part 2).
  */
-function franchiseForSeries(pItem: { mal_id: number | null; name: string }): SeriesRow[] {
-  const all = listSeries()
+function franchiseForSeries(pItem: { mal_id: number | null; name: string }): AnimeSeriesRow[] {
+  const all = listAnimeSeries()
 
-  let franchise: SeriesRow[] = []
+  let franchise: AnimeSeriesRow[] = []
   if (pItem.mal_id != null) {
     const seed = findByMalId(pItem.mal_id)
     if (seed?.tvdb_id != null) {
@@ -89,11 +101,28 @@ function franchiseForSeries(pItem: { mal_id: number | null; name: string }): Ser
   return franchise
 }
 
+/**
+ * Reverse of franchiseForSeries: the Public JF series a catalog cour belongs to.
+ * The /manage pages are keyed by catalog (mal) id while the season-title
+ * override is keyed by JF series id, so the admin editor needs this bridge.
+ * Resolves by asking each Public series which cours it owns — same anchoring the
+ * portal itself uses, so the two can never disagree.
+ */
+export function portalSeriesForCatalog(malId: number): PortalItem | null {
+  // The Jikan/MAL catalog only ever maps to anime-section titles.
+  for (const pItem of getPortalCollectionItems('anime')) {
+    if (pItem.type !== 'Series') continue
+    if (pItem.mal_id === malId) return pItem
+    if (franchiseForSeries(pItem).some((s) => s.mal_id === malId)) return pItem
+  }
+  return null
+}
+
 /** Catalog cour for a Public JF series (see franchiseForSeries for anchoring). */
 export function catalogCourForSeries(
   pItem: { mal_id: number | null; name: string },
   season: number | null,
-): SeriesRow | null {
+): AnimeSeriesRow | null {
   const franchise = franchiseForSeries(pItem)
 
   if (season != null && franchise.length > 0) {
@@ -124,7 +153,7 @@ export function catalogCourForSeries(
 export function catalogCoursForSeason(
   pItem: { mal_id: number | null; name: string },
   season: number | null,
-): SeriesRow[] {
+): AnimeSeriesRow[] {
   const franchise = franchiseForSeries(pItem)
   if (season == null) return franchise
   const cours = franchise
@@ -139,13 +168,14 @@ publicRouter.get('/health', (_req, res) => { res.type('text').send('ok') })
 
 // Fail every portal route cleanly (not at boot) when Jellyfin isn't configured.
 function ensureConfigured(res: Response): boolean {
-  if (jellyfinConfigured) return true
+  if (jellyfinConfigured()) return true
   res.status(503).json({ error: 'Jellyfin not configured' })
   return false
 }
 
-// Browse: the Public collection.
-publicRouter.get('/api/catalog', async (_req, res) => {
+// Browse: the section collections (?section= narrows; default is everything,
+// with each item carrying its section so the client can split locally).
+publicRouter.get('/api/catalog', async (req, res) => {
   if (!ensureConfigured(res)) return
   try {
     await ensureScope()
@@ -153,28 +183,48 @@ publicRouter.get('/api/catalog', async (_req, res) => {
     res.status(502).json({ error: 'Library unavailable' })
     return
   }
-  const items = getCollectionItems().map((it) => ({
+  const scoped = getCollectionItems(qSection(req))
+  const items = scoped.map((it) => ({
     id: it.Id,
     type: it.Type,
+    section: getItemSection(it.Id) ?? 'anime',
     name: it.Name || '',
     year: it.ProductionYear || null,
     genres: it.Genres || [],
   }))
-  const genres = [...new Set(getCollectionItems().flatMap((it) => it.Genres || []))].sort()
-  res.json({ items, genres })
+  const genres = [...new Set(scoped.flatMap((it) => it.Genres || []))].sort()
+  res.json({ items, genres, sections: enabledSections() })
 })
 
 // Recency = the actual release/air date (PremiereDate), so a bulk-imported
 // back-catalog doesn't flood the rail; DateCreated (file added) is the
 // fallback for items with no premiere metadata.
-const releasedAt = (it: JfItem): string | null => it.PremiereDate || it.DateCreated || null
+/**
+ * When an item became available to us, for the "recently updated" rail.
+ *
+ * PremiereDate is preferred because it is the *nominal* release date: importing
+ * a 2007 back-catalogue series should not shove it to the top of a rail about
+ * what is new. But that date can sit in the **future** — a simulcast we grabbed
+ * ahead of its listed air date, or metadata whose episode numbering runs ahead
+ * of the files we hold. A future date is the worst of both: it outranks
+ * everything in a "newest first" sort, and renders as an empty timestamp
+ * because there is no sensible way to say "-4 days ago".
+ *
+ * So: use PremiereDate only once it has actually passed, else fall back to when
+ * the file landed in the library.
+ */
+const releasedAt = (it: JfItem): string | null => {
+  const premiere = it.PremiereDate ? Date.parse(it.PremiereDate) : NaN
+  if (Number.isFinite(premiere) && premiere <= Date.now()) return it.PremiereDate ?? null
+  return it.DateCreated || it.PremiereDate || null
+}
 const releasedTs = (it: JfItem): number => Date.parse(releasedAt(it) || '') || 0
 
 // Home page rail: recently released watchables, newest first — one entry per
 // *season* (a per-episode rail buries every other title whenever one show drops
 // a batch), plus one per movie. `id` is always a *playable* id (the season's
 // newest episode / the movie itself), so a card can still link into the player.
-publicRouter.get('/api/recent', async (_req, res) => {
+publicRouter.get('/api/recent', async (req, res) => {
   if (!ensureConfigured(res)) return
   try {
     await ensureScope()
@@ -182,6 +232,7 @@ publicRouter.get('/api/recent', async (_req, res) => {
     res.status(502).json({ error: 'Library unavailable' })
     return
   }
+  const section = qSection(req)
   // Same-day drops share a premiere date; break those ties by episode order
   // so the furthest-along episode represents the season.
   const epOrd = (ep: JfItem) => (ep.ParentIndexNumber || 0) * 10000 + (ep.IndexNumber || 0)
@@ -189,7 +240,7 @@ publicRouter.get('/api/recent', async (_req, res) => {
   // Newest episode per (series, season), and how many episodes that season has.
   const newest = new Map<string, JfItem>()
   const counts = new Map<string, number>()
-  for (const ep of getScopeEpisodes()) {
+  for (const ep of getScopeEpisodes(section)) {
     if (!ep.SeriesId) continue
     const key = `${ep.SeriesId}:${ep.ParentIndexNumber ?? ''}`
     counts.set(key, (counts.get(key) || 0) + 1)
@@ -214,7 +265,7 @@ publicRouter.get('/api/recent', async (_req, res) => {
         addedAt: releasedAt(ep),
       },
     })),
-    ...getCollectionItems().filter((it) => it.Type !== 'Series').map((it) => ({
+    ...getCollectionItems(section).filter((it) => it.Type !== 'Series').map((it) => ({
       t: releasedTs(it),
       item: {
         id: it.Id,
@@ -251,6 +302,7 @@ publicRouter.get('/api/items/summary', async (req, res) => {
     ...getScopeEpisodes().filter((ep) => ids.has(ep.Id)).map((ep) => ({
       id: ep.Id,
       type: 'episode' as const,
+      section: getItemSection(ep.Id) ?? 'anime',
       seriesId: ep.SeriesId || null,
       name: ep.SeriesName || ep.Name || '',
       season: ep.ParentIndexNumber ?? null,
@@ -262,6 +314,7 @@ publicRouter.get('/api/items/summary', async (req, res) => {
     ...getCollectionItems().filter((it) => ids.has(it.Id)).map((it) => ({
       id: it.Id,
       type: (it.Type === 'Series' ? 'series' : 'movie') as 'series' | 'movie',
+      section: getItemSection(it.Id) ?? 'anime',
       seriesId: null,
       name: it.Name || '',
       season: null,
@@ -276,7 +329,7 @@ publicRouter.get('/api/items/summary', async (req, res) => {
 // metadata to render the featured banner. `watchId` jumps straight into the
 // title — the first regular episode for series (S0 specials sort last), the
 // movie itself otherwise.
-publicRouter.get('/api/featured', async (_req, res) => {
+publicRouter.get('/api/featured', async (req, res) => {
   if (!ensureConfigured(res)) return
   try {
     await ensureScope()
@@ -284,6 +337,7 @@ publicRouter.get('/api/featured', async (_req, res) => {
     res.status(502).json({ error: 'Library unavailable' })
     return
   }
+  const section = qSection(req)
   const epOrd = (ep: JfItem) =>
     (ep.ParentIndexNumber ? ep.ParentIndexNumber : 999) * 10000 + (ep.IndexNumber ?? 9999)
 
@@ -295,7 +349,7 @@ publicRouter.get('/api/featured', async (_req, res) => {
   // while a single-season show stays unlabelled.
   const latestSeasonBySeries = new Map<string, number>()
   const seasonsBySeries = new Map<string, Set<number>>()
-  for (const ep of getScopeEpisodes()) {
+  for (const ep of getScopeEpisodes(section)) {
     const sid = ep.SeriesId
     if (!sid) continue
     const t = releasedTs(ep)
@@ -310,7 +364,7 @@ publicRouter.get('/api/featured', async (_req, res) => {
     }
   }
 
-  const entries = getCollectionItems().flatMap((it) => {
+  const entries = getCollectionItems(section).flatMap((it) => {
     if (!it.BackdropImageTags || it.BackdropImageTags.length === 0) return []
     const isSeries = it.Type === 'Series'
     const watchId = isSeries ? firstEp.get(it.Id)?.Id : it.Id
@@ -381,14 +435,22 @@ publicRouter.get('/api/catalog/:id', async (req, res) => {
           new Promise<JfSeason[]>((r) => setTimeout(() => r([]), 1500)),
         ])
       }
+      // Years come from our own synced episodes first, so a slow/timed-out
+      // Jellyfin (the race above resolving to []) can't blank them out; the JF
+      // season item stays a fallback for a season we somehow have no dates for.
+      const seasonYears = getPortalSeasonYears(id)
+      const seasonTitles = getPortalSeasonTitles(id)
       const seasonList = seasonCounts.map((c) => {
         const jfSeason = jfSeasons.find((s) => s.IndexNumber === c.season)
         return {
           season: c.season,
           name: jfSeason?.Name || `Season ${c.season}`,
           episodes: c.episodes,
-          year: jfSeason?.ProductionYear
+          year: seasonYears.get(c.season)
+            ?? jfSeason?.ProductionYear
             ?? (jfSeason?.PremiereDate ? new Date(jfSeason.PremiereDate).getFullYear() : null),
+          // Admin override only — no server-side fallback; the portal owns the default.
+          displayTitle: seasonTitles.get(c.season) ?? null,
         }
       })
 

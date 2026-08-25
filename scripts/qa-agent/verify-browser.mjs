@@ -21,7 +21,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { filterCredentials, getEarliestReset } from './cooldown.mjs'
+import { filterCredentials, getEarliestReset, credentialPool } from './cooldown.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -63,20 +63,16 @@ Output a single fenced json block, nothing after:
 const env = { ...process.env }
 for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION']) delete env[k]
 
-// Try each pooled credential, same as run.mjs — a capped account must not look
-// like a broken browser.
-const allTokens = [
-  process.env.CLAUDE_CODE_OAUTH_TOKEN,
-  process.env.CLAUDE_CODE_OAUTH_TOKEN_2,
-  process.env.CLAUDE_CODE_OAUTH_TOKEN_3,
-].filter((t) => t?.trim())
-const creds = allTokens.map((t, i) => ({ name: `TOKEN_${i}`, env: { CLAUDE_CODE_OAUTH_TOKEN: t } }))
-const validCreds = filterCredentials(creds)
-if (allTokens.length > 0 && validCreds.length === 0) {
-  console.log(`All credentials are on cooldown until ${getEarliestReset(creds) || 'unknown'}. Skipping verify-browser since agent will skip too.`)
+// Same pool + cooldown filter as run.mjs — a capped account must not look like
+// a broken browser. Only OAuth tokens here (API-key billing doesn't hit the
+// same subscription 429 path this guard rotates through).
+const allCreds = credentialPool().filter((c) => c.kind === 'oauth')
+const validCreds = filterCredentials(allCreds)
+if (allCreds.length > 0 && validCreds.length === 0) {
+  console.log(`All credentials are on cooldown until ${getEarliestReset(allCreds) || 'unknown'}. Skipping verify-browser since agent will skip too.`)
   process.exit(0)
 }
-const tokens = validCreds.map(c => c.env.CLAUDE_CODE_OAUTH_TOKEN)
+const tokens = validCreds.map((c) => c.env.CLAUDE_CODE_OAUTH_TOKEN).filter(Boolean)
 
 // Read the structured `result` event rather than string-sniffing the whole
 // stream: a *previous* credential's 429 text lingers in the buffer and would
@@ -119,14 +115,27 @@ if (rateLimited) {
 
 const toolCalls = []
 let finalResult = ''
+// Whether *claude itself* failed, as opposed to running fine without a browser.
+// Without this the two are indistinguishable downstream, and they have opposite
+// fixes — see the failure branch below.
+let agentError = ''
 for (const line of raw.split('\n')) {
   if (!line.trim()) continue
   let ev
   try { ev = JSON.parse(line) } catch { continue }
   if (ev.type === 'assistant') {
     for (const b of ev.message?.content ?? []) if (b.type === 'tool_use') toolCalls.push(b.name)
+    if (ev.is_api_error_message || ev.error) {
+      const text = (ev.message?.content ?? []).find((b) => b.type === 'text')?.text ?? ''
+      agentError = [ev.error, text].filter(Boolean).join(': ')
+    }
   }
-  if (ev.type === 'result') finalResult = ev.result ?? ''
+  if (ev.type === 'result') {
+    finalResult = ev.result ?? ''
+    if (ev.is_error && !agentError) {
+      agentError = [ev.api_error_status && `HTTP ${ev.api_error_status}`, ev.result].filter(Boolean).join(': ')
+    }
+  }
 }
 
 const usedBrowser = toolCalls.some((t) => t.startsWith('mcp__playwright'))
@@ -138,7 +147,23 @@ console.log('used browser:', usedBrowser)
 console.log('verdict:', JSON.stringify(verdict))
 
 if (!usedBrowser) {
-  console.error('\n❌ The agent never called a browser tool — the Playwright MCP is not loading.')
+  // "No browser tool" has two very different causes and they were previously
+  // reported identically. An expired CLAUDE_CODE_OAUTH_TOKEN produces the exact
+  // same three lines as a genuinely broken MCP — and the old message sent you
+  // debugging Chromium and npx while the real fix was `claude setup-token`.
+  // If the agent never got off the ground, say so and stop guessing.
+  if (agentError) {
+    console.error(`\n❌ The agent could not run at all: ${agentError}`)
+    console.error('   This is NOT a browser problem — claude never reached the point of calling a tool.')
+    if (/not logged in|authentication|unauthor/i.test(agentError)) {
+      console.error('   Fix: mint a fresh token with `claude setup-token` and update the')
+      console.error('   CLAUDE_CODE_OAUTH_TOKEN repo secret (and _2/_3 if you pool accounts).')
+    }
+    process.exit(1)
+  }
+  console.error('\n❌ The agent ran but never called a browser tool — the Playwright MCP is not loading.')
+  console.error('   Check: `npx -y @playwright/mcp@latest --headless` starts and advertises browser_* tools,')
+  console.error('   and that ~/.cache/ms-playwright has the chromium build it expects.')
   if (verdict?.status === 'pass') console.error('   Worse: it PASSED a UI item anyway. That is a false pass.')
   process.exit(1)
 }

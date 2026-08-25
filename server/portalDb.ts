@@ -6,9 +6,18 @@ import { fileURLToPath } from 'url'
 const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
 const dbPath = path.join(dataDir, 'portal.sqlite')
 
+/** Which portal section an item belongs to — each is its own Jellyfin
+ * collection with its own metadata-sourcing rules (anime gets the MAL/Jikan
+ * enrichment; tv/movies keep Jellyfin's own TVDB/TMDb metadata). */
+export type PortalSection = 'anime' | 'tv' | 'movies'
+export const PORTAL_SECTIONS: PortalSection[] = ['anime', 'tv', 'movies']
+export const isPortalSection = (s: string): s is PortalSection =>
+  (PORTAL_SECTIONS as string[]).includes(s)
+
 export interface PortalItem {
   id: string
   type: string
+  section: PortalSection
   name: string
   original_title: string | null
   overview: string | null
@@ -55,6 +64,18 @@ export function getPortalDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_portal_type ON portal_items(type);
     CREATE INDEX IF NOT EXISTS idx_portal_series_id ON portal_items(series_id);
+
+    -- Admin-authored season lines for the portal title page ("Season 1 Part 2",
+    -- "Diamond is Unbreakable"). Keyed by the JF series id + JF season number, so
+    -- it is deliberately its own table: portal_items rows are a sync cache that
+    -- prunePortalItemsNotIn wipes, and a hand-written override must survive that.
+    CREATE TABLE IF NOT EXISTS portal_season_titles (
+      series_id TEXT NOT NULL,
+      season INTEGER NOT NULL,
+      display_title TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (series_id, season)
+    );
   `)
   try {
     instance.exec('ALTER TABLE portal_items ADD COLUMN has_backdrop INTEGER DEFAULT 1');
@@ -68,6 +89,13 @@ export function getPortalDb(): Database.Database {
   } catch (e) {
     // ignore if already exists
   }
+  try {
+    // Portal section (anime/tv/movies). Pre-section rows are all from the
+    // original single collection, which the anime section inherits.
+    instance.exec("ALTER TABLE portal_items ADD COLUMN section TEXT NOT NULL DEFAULT 'anime'");
+  } catch (e) {
+    // ignore if already exists
+  }
   db = instance
   return instance
 }
@@ -76,11 +104,21 @@ export function getAllPortalItems(): PortalItem[] {
   return getPortalDb().prepare('SELECT * FROM portal_items').all() as PortalItem[]
 }
 
-export function getPortalCollectionItems(): PortalItem[] {
+export function getPortalCollectionItems(section?: PortalSection): PortalItem[] {
+  if (section) {
+    return getPortalDb()
+      .prepare("SELECT * FROM portal_items WHERE type IN ('Series', 'Movie') AND section = ?")
+      .all(section) as PortalItem[]
+  }
   return getPortalDb().prepare("SELECT * FROM portal_items WHERE type IN ('Series', 'Movie')").all() as PortalItem[]
 }
 
-export function getPortalScopeEpisodes(): PortalItem[] {
+export function getPortalScopeEpisodes(section?: PortalSection): PortalItem[] {
+  if (section) {
+    return getPortalDb()
+      .prepare("SELECT * FROM portal_items WHERE type = 'Episode' AND section = ?")
+      .all(section) as PortalItem[]
+  }
   return getPortalDb().prepare("SELECT * FROM portal_items WHERE type = 'Episode'").all() as PortalItem[]
 }
 
@@ -131,19 +169,74 @@ export function getPortalSeasonCounts(seriesId: string): Array<{ season: number;
     .all(seriesId) as Array<{ season: number; episodes: number }>
 }
 
+/**
+ * Year per JF season, taken from the season's own episodes (earliest premiere
+ * date, else the earliest production year). Jellyfin's season items carry the
+ * same fact, but only behind a live `/Shows/:id/Seasons` call — this is already
+ * synced locally, so the year survives a slow/unreachable Jellyfin.
+ */
+export function getPortalSeasonYears(seriesId: string): Map<number, number> {
+  const rows = getPortalDb()
+    .prepare(
+      `SELECT parent_index_number AS season,
+              MIN(premiere_date) AS premiere_date,
+              MIN(production_year) AS production_year
+       FROM portal_items
+       WHERE type = 'Episode' AND series_id = ? AND parent_index_number IS NOT NULL
+       GROUP BY parent_index_number`,
+    )
+    .all(seriesId) as Array<{ season: number; premiere_date: string | null; production_year: number | null }>
+  const out = new Map<number, number>()
+  for (const r of rows) {
+    const fromPremiere = r.premiere_date ? new Date(r.premiere_date).getFullYear() : NaN
+    const year = Number.isFinite(fromPremiere) ? fromPremiere : r.production_year
+    if (year != null && Number.isFinite(year)) out.set(r.season, year)
+  }
+  return out
+}
+
+/** Admin season-line overrides for a series, keyed by JF season number. */
+export function getPortalSeasonTitles(seriesId: string): Map<number, string> {
+  const rows = getPortalDb()
+    .prepare('SELECT season, display_title FROM portal_season_titles WHERE series_id = ?')
+    .all(seriesId) as Array<{ season: number; display_title: string }>
+  return new Map(rows.map((r) => [r.season, r.display_title]))
+}
+
+/** Set (non-empty string) or clear (null/blank) one season's override. */
+export function setPortalSeasonTitle(seriesId: string, season: number, displayTitle: string | null) {
+  const value = displayTitle?.trim()
+  if (!value) {
+    getPortalDb()
+      .prepare('DELETE FROM portal_season_titles WHERE series_id = ? AND season = ?')
+      .run(seriesId, season)
+    return
+  }
+  getPortalDb()
+    .prepare(
+      `INSERT INTO portal_season_titles (series_id, season, display_title, updated_at)
+       VALUES (?, ?, ?, datetime('now'))
+       ON CONFLICT(series_id, season) DO UPDATE SET
+         display_title = excluded.display_title,
+         updated_at = excluded.updated_at`,
+    )
+    .run(seriesId, season, value)
+}
+
 export function upsertPortalItem(item: PortalItem) {
   const stmt = getPortalDb().prepare(`
     INSERT INTO portal_items (
-      id, type, name, original_title, overview, date_created, premiere_date,
+      id, type, section, name, original_title, overview, date_created, premiere_date,
       production_year, genres, runtime_ticks, index_number, parent_index_number,
       series_id, series_name, image_url, backdrop_url, has_backdrop, mal_id
     ) VALUES (
-      @id, @type, @name, @original_title, @overview, @date_created, @premiere_date,
+      @id, @type, @section, @name, @original_title, @overview, @date_created, @premiere_date,
       @production_year, @genres, @runtime_ticks, @index_number, @parent_index_number,
       @series_id, @series_name, @image_url, @backdrop_url, @has_backdrop, @mal_id
     )
     ON CONFLICT(id) DO UPDATE SET
       type = excluded.type,
+      section = excluded.section,
       name = excluded.name,
       original_title = excluded.original_title,
       overview = excluded.overview,

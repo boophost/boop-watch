@@ -27,10 +27,30 @@ const stripHtml = (s: string): string =>
   s.replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
 
 /**
- * Search anime via AniList — the fallback for when Jikan (an unofficial MAL
- * proxy) can't reach MyAnimeList. AniList carries `idMal`, so hits map to a real
- * `mal_id` and stay addable to our MAL-id catalog. Entries without an idMal are
- * dropped (we can't add those). Best-effort: throws only on a hard request error.
+ * A result set at or below this size reads as "the search found nothing useful"
+ * and earns a widening pass (see `searchAnimeAniList`). Above it, AniList
+ * clearly matched something and extra queries would only add noise.
+ */
+const THIN_RESULT_COUNT = 5
+
+/** Cap on widening queries. Bounds both added latency and AniList rate-limit pressure. */
+const MAX_WIDENING_PASSES = 3
+
+/**
+ * Search anime via AniList — the primary index for the add-series UI (Jikan
+ * supplements it; see `metadata/mal.ts`). AniList carries `idMal`, so hits map
+ * to a real `mal_id` and stay addable to our MAL-id catalog. Entries without an
+ * idMal are dropped (we can't add those).
+ *
+ * A thin result set triggers a **widening pass**: the query is retried with its
+ * leading word trimmed, repeatedly, and any new hits are appended. AniList's
+ * matcher is literal over its own title/synonym list, so a title the user names
+ * slightly differently than AniList spells it misses outright — searching
+ * "The Super Dimension Fortress Macross" returns the two sequels but not the
+ * 1982 series, whose synonym AniList spells "Super Dimension*al* Fortress
+ * Macross". Trimming to "Fortress Macross" finds it. Widening only fires when
+ * the direct search already came back thin, so a query that matched cleanly is
+ * never diluted. Best-effort: throws only on a hard request error.
  */
 export async function searchAnimeAniList(
   query: string,
@@ -38,6 +58,26 @@ export async function searchAnimeAniList(
 ): Promise<AniListSearchHit[]> {
   const q = query.trim()
   if (!q) return []
+
+  const hits = await searchAniListOnce(q, limit)
+  const seen = new Set(hits.map((h) => h.mal_id))
+  const words = q.split(/\s+/)
+  for (let pass = 1; pass <= MAX_WIDENING_PASSES; pass++) {
+    if (hits.length >= THIN_RESULT_COUNT) break
+    // Stop before the query becomes a single bare word — one word out of
+    // context ("Reincarnation") matches half the medium and is pure noise.
+    if (pass >= words.length - 1) break
+    for (const h of await searchAniListOnce(words.slice(pass).join(' '), limit)) {
+      if (seen.has(h.mal_id)) continue
+      seen.add(h.mal_id)
+      hits.push(h)
+    }
+  }
+  return hits.slice(0, limit)
+}
+
+/** One AniList search request, mapped to hits. The unit `searchAnimeAniList` widens over. */
+async function searchAniListOnce(q: string, limit: number): Promise<AniListSearchHit[]> {
   const gql = `query($q:String,$n:Int){ Page(perPage:$n){ media(search:$q, type:ANIME, sort:SEARCH_MATCH){
     idMal title{ romaji english } description(asHtml:false) coverImage{ large medium }
     format status episodes seasonYear startDate{ year } } } }`

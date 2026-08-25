@@ -1,11 +1,12 @@
 /** PostHog reverse-proxy + runtime config (server-side). */
+import { cfgSafe } from './config.js'
 
 export const POSTHOG_INGEST_PREFIX = '/ingest'
 
 export type PosthogRegion = 'us' | 'eu'
 
 export function posthogRegion(): PosthogRegion {
-  const host = process.env.POSTHOG_HOST || ''
+  const host = cfgSafe('POSTHOG_HOST')
   return host.includes('eu') ? 'eu' : 'us'
 }
 
@@ -24,5 +25,5 @@ export function posthogUiHost(region: PosthogRegion = posthogRegion()): string {
 /** The UI host the browser SDK is actually configured with (env override wins).
  * Also the only origin accepted for client-supplied session-replay links. */
 export function posthogUiHostEffective(): string {
-  return (process.env.POSTHOG_UI_HOST || posthogUiHost()).replace(/\/+$/, '')
+  return (cfgSafe('POSTHOG_UI_HOST') || posthogUiHost()).replace(/\/+$/, '')
 }

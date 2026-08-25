@@ -16,6 +16,13 @@ data/
 *.sqlite
 *.sqlite-*
 
+# per-agent local worktrees (scripts/agent-env.mjs) — never commit
+.agent-envs/
+# ...and the ones the harness makes. These are real git repos, so an untracked
+# `git add -A` stages them as gitlinks — a commit that looks fine in --stat and
+# is unclonable.
+.claude/worktrees/
+
 # playwright mcp scratch output
 .playwright-mcp/
 

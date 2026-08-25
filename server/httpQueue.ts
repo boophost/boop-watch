@@ -90,10 +90,13 @@ type ServiceKey =
   | 'jikan'
   | 'tsukihime'
   | 'tosho'
+  | 'apibay'
   | 'anilist'
+  | 'tmdb'
   | 'kitsu'
   | 'fanart'
   | 'jimaku'
+  | 'opensubtitles'
   | 'aniskip'
   | 'itunes'
   | 'other'
@@ -102,12 +105,29 @@ type ServiceKey =
 // e.g. HTTPQ_JIKAN={"minGapMs":500}.
 const DEFAULTS: Record<ServiceKey, QueueConfig> = {
   jikan: { minGapMs: 400, concurrency: 1, timeoutMs: 10_000, retries: 3 },
-  tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 20_000, retries: 3 },
-  tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
+  // Measured from the cluster at 30-33s (and currently 502-ing), so the old 20s
+  // turned every fallback search into a timeout. Same reasoning as tosho below.
+  tsukihime: { minGapMs: 1300, concurrency: 1, timeoutMs: 60_000, retries: 3 },
+  // AnimeTosho's search is genuinely slow, not flaky: measured from the cluster
+  // it answers a broad query in 41-50s (the same query is fast from a desktop,
+  // so this is egress, not the index). At the old 20s it timed out on *every*
+  // request, so the whole primary provider was dead and only the TsukiHime
+  // fallback ran — which does not stock older episodes. `retries` stays at 3
+  // deliberately: it covers 429/503 only (a timeout throws straight out of the
+  // loop below and is never retried), so lowering it would just weaken
+  // rate-limit handling without shortening a single slow request.
+  tosho: { minGapMs: 500, concurrency: 1, timeoutMs: 75_000, retries: 3 },
+  apibay: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 3 },
   anilist: { minGapMs: 350, concurrency: 1, timeoutMs: 15_000, retries: 2 },
+  // TMDB retired its published 40-req/10s cap but still 429s under bursts;
+  // pace it like AniList and let Retry-After absorb the rest.
+  tmdb: { minGapMs: 250, concurrency: 2, timeoutMs: 15_000, retries: 2 },
   kitsu: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   fanart: { minGapMs: 300, concurrency: 1, timeoutMs: 15_000, retries: 2 },
   jimaku: { minGapMs: 500, concurrency: 1, timeoutMs: 20_000, retries: 2 },
+  // OpenSubtitles publishes a per-second cap and a daily download quota; pace
+  // it conservatively so a library-wide sweep degrades to slow, not banned.
+  opensubtitles: { minGapMs: 1200, concurrency: 1, timeoutMs: 30_000, retries: 2 },
   aniskip: { minGapMs: 350, concurrency: 2, timeoutMs: 5_000, retries: 1 },
   // iTunes Search allows ~20 req/min without a key — pace well under that.
   itunes: { minGapMs: 3100, concurrency: 1, timeoutMs: 10_000, retries: 1 },
@@ -244,7 +264,10 @@ export function limitedFetch(
         logRequest({ at: startedAt, key, method, url: logged, status: null, ms: Date.now() - startedAt, error: message })
         throw e
       }
-      if ((res.status === 429 || res.status === 503) && attempt < q.cfg.retries) {
+      // apibay sits behind Cloudflare and 403s the first request of a burst
+      // (observed: Season 5 missed, 6–9 succeeded on the same run). Retry it
+      // like a 429 — a real auth 403 on other services is unchanged.
+      if ((res.status === 429 || res.status === 503 || (key === 'apibay' && res.status === 403)) && attempt < q.cfg.retries) {
         const wait = retryAfterMs(res) ?? 2000 * (attempt + 1)
         q.retried++
         q.lastError = { at: Date.now(), message: `${res.status} from ${hostOf(url)}, retrying` }
@@ -278,10 +301,13 @@ const HOST_KEYS: Array<[RegExp, ServiceKey]> = [
   [/(^|\.)jikan\.moe$/i, 'jikan'],
   [/(^|\.)tsukihime\.org$/i, 'tsukihime'],
   [/(^|\.)animetosho\.\w+$/i, 'tosho'],
+  [/(^|\.)apibay\.org$/i, 'apibay'],
   [/(^|\.)anilist\.co$/i, 'anilist'],
+  [/(^|\.)themoviedb\.org$/i, 'tmdb'],
   [/(^|\.)kitsu\.(io|app)$/i, 'kitsu'],
   [/(^|\.)fanart\.tv$/i, 'fanart'],
   [/(^|\.)jimaku\.cc$/i, 'jimaku'],
+  [/(^|\.)opensubtitles\.com$/i, 'opensubtitles'],
   [/(^|\.)aniskip\.com$/i, 'aniskip'],
 ]
 

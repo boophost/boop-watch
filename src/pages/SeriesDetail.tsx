@@ -1,20 +1,29 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Ban,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Circle,
   ExternalLink,
   Loader2,
-  Play,
+  Search,
   Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
 import { ArtPicker } from '@/components/ArtPicker'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
+import { formatBytes } from '@/lib/format'
+import { EpisodeRow } from '@/components/series/EpisodeRow'
+import { AttentionBand, SeasonSummary } from '@/components/series/SeasonSummary'
+import {
+  matchesFilter,
+  type EpisodeFilter,
+  type SeriesStatus,
+} from '@/lib/seriesStatus'
 import {
   adminChaseChipLabel,
   formatAirShort,
@@ -34,6 +43,7 @@ interface SeriesDownload {
   eta: number
   isBatch: boolean
   episode: number | null
+  season?: number | null
 }
 
 interface BlacklistRow {
@@ -60,28 +70,15 @@ interface DownloadStatus {
   portalSeriesId?: string | null
 }
 
-// The best torrent covering a given episode: a batch (covers all) or a
-// single-episode release matching that number; most-complete wins.
-function episodeDownload(
-  epNum: number | null,
-  torrents: SeriesDownload[],
-): SeriesDownload | null {
-  if (epNum == null) return null
-  const covering = torrents.filter((t) => t.isBatch || t.episode === epNum)
-  return covering.sort((a, b) => b.progress - a.progress)[0] ?? null
+function mediaKey(
+  season: number | null | undefined,
+  episode: number | null | undefined,
+): string | null {
+  if (episode == null) return null
+  return season != null ? `${season}:${episode}` : String(episode)
 }
 
-function formatBytes(n: number): string {
-  if (!n || n < 0) return '—'
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let v = n
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
-}
+
 
 function isSeedingState(state: string): boolean {
   return state.includes('UP') || state === 'uploading' || state === 'stalledUP'
@@ -103,25 +100,6 @@ function stateLabel(state: string, progress: number): { text: string; tone: stri
   return { text: state, tone: 'text-muted-foreground' }
 }
 
-// Episode-row Download column: "Complete · seeding" only when the ep is on site
-// (pipeline ready). A finished torrent that isn't imported yet is "Downloaded".
-function episodeDownloadLabel(
-  state: string,
-  progress: number,
-  opts: { inLibrary: boolean; onSite: boolean },
-): { text: string; tone: string } {
-  if (progress < 1) return stateLabel(state, progress)
-  if (opts.onSite) {
-    if (isSeedingState(state)) return { text: 'Complete · seeding', tone: 'text-emerald-500' }
-    return { text: 'Complete', tone: 'text-emerald-500' }
-  }
-  if (opts.inLibrary) {
-    return { text: 'Downloaded · in library', tone: 'text-sky-500' }
-  }
-  if (isSeedingState(state)) return { text: 'Downloaded · seeding', tone: 'text-sky-500' }
-  return { text: 'Downloaded', tone: 'text-sky-500' }
-}
-
 interface MalImages {
   jpg?: { large_image_url?: string | null; image_url?: string | null }
   webp?: { large_image_url?: string | null; image_url?: string | null }
@@ -132,7 +110,6 @@ interface MalDetail {
   url: string
   title: string
   title_english?: string | null
-  title_japanese?: string | null
   type?: string
   source?: string
   episodes?: number | null
@@ -150,10 +127,12 @@ interface MalDetail {
 }
 
 interface EpisodeRow {
-  mal_id: number
+  mal_id: number | null
+  season?: number | null
   url: string
   title: string
-  title_japanese: string | null
+  /** `title` is a synthesized "Episode N" — no source has named it yet. */
+  title_pending?: boolean
   aired: string | null
   filler: boolean
   recap: boolean
@@ -164,6 +143,7 @@ interface EpisodeAudio { lang: string; label: string; codec: string; channels: s
 interface EpisodeMedia {
   id: string
   episode: number | null
+  season?: number | null
   resolution: string
   videoCodec: string
   audio: EpisodeAudio[]
@@ -216,16 +196,6 @@ function MediaCell({ m }: { m: EpisodeMedia | undefined }) {
   )
 }
 
-function formatAired(iso: string | null): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso.slice(0, 10)
-  return d.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
-}
 
 type StageTone = 'done' | 'active' | 'pending' | 'idle'
 interface Stage {
@@ -450,12 +420,128 @@ function EpisodeChasePanel({
   )
 }
 
+interface SeasonTitleRow {
+  season: number
+  episodes: number
+  year: number | null
+  displayTitle: string | null
+}
+
+/**
+ * Per-season custom title for the portal's season line. Blank clears the
+ * override, and the portal falls back to its own generic "Season N".
+ * Self-contained: owns its own fetch/state, keyed by catalog series id.
+ */
+function SeasonTitlesPanel({ id }: { id: number }) {
+  const [rows, setRows] = useState<SeasonTitleRow[]>([])
+  const [seriesName, setSeriesName] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [drafts, setDrafts] = useState<Record<number, string>>({})
+  const [busy, setBusy] = useState<number | null>(null)
+  const [msg, setMsg] = useState('')
+
+  const apply = useCallback((d: { seriesName?: string | null; seasons?: SeasonTitleRow[] }) => {
+    const seasons = d.seasons ?? []
+    setSeriesName(d.seriesName ?? null)
+    setRows(seasons)
+    setDrafts(Object.fromEntries(seasons.map((s) => [s.season, s.displayTitle ?? ''])))
+  }, [])
+
+  useEffect(() => {
+    if (!Number.isFinite(id)) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const r = await fetchAuth(`/api/series/${id}/season-titles`)
+        if (!r.ok) return
+        const d = (await r.json()) as { seriesName?: string | null; seasons?: SeasonTitleRow[] }
+        if (!cancelled) apply(d)
+      } catch {
+        /* panel just stays empty */
+      } finally {
+        if (!cancelled) setLoaded(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [id, apply])
+
+  const save = async (season: number) => {
+    setBusy(season)
+    setMsg('')
+    try {
+      const r = await fetchAuth(`/api/series/${id}/season-titles/${season}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayTitle: drafts[season] ?? '' }),
+      })
+      const d = await parseAuthJson<{ seriesName?: string | null; seasons?: SeasonTitleRow[]; error?: string }>(r)
+      if (!r.ok) throw new Error(d.error ?? 'Update failed')
+      apply(d)
+      setMsg(drafts[season]?.trim() ? `Saved season ${season}` : `Cleared season ${season}`)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Update failed')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (!loaded || rows.length === 0) return null
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+      <h3 className="text-sm font-medium text-muted-foreground">Season titles</h3>
+      <p className="mt-0.5 text-[11px] text-muted-foreground">
+        The season line on the portal title page{seriesName ? ` for ${seriesName}` : ''}. Leave blank
+        for the default ("Season 2").
+      </p>
+      <div className="mt-2 flex flex-col gap-2">
+        {rows.map((row) => (
+          <div key={row.season} className="flex items-center gap-2">
+            <span className="w-28 shrink-0 text-xs text-muted-foreground">
+              Season {row.season}
+              <span className="ml-1 text-[10px]">
+                ({row.episodes} ep{row.episodes === 1 ? '' : 's'}
+                {row.year != null ? `, ${row.year}` : ''})
+              </span>
+            </span>
+            <input
+              type="text"
+              placeholder={`Season ${row.season}`}
+              className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+              value={drafts[row.season] ?? ''}
+              onChange={(e) => setDrafts({ ...drafts, [row.season]: e.target.value })}
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy === row.season || (drafts[row.season] ?? '') === (row.displayTitle ?? '')}
+              onClick={() => void save(row.season)}
+            >
+              Save
+            </Button>
+          </div>
+        ))}
+      </div>
+      {msg ? <p className="mt-1.5 text-[11px] text-muted-foreground">{msg}</p> : null}
+    </div>
+  )
+}
+
 export default function SeriesDetail() {
   const { seriesId } = useParams<{ seriesId: string }>()
   const navigate = useNavigate()
   const id = Number(seriesId)
 
   const [series, setSeries] = useState<SeriesEntry | null>(null)
+  // Anime-only surfaces below (art picker, season mapping, sourcing, MAL
+  // labels) hang off this. The server 409s these routes for a TV/movie row —
+  // rendering them would just produce a page of failed requests.
+  const isAnime = series == null || series.section == null || series.section === 'anime'
+  // A film has no episode list and exactly one library file, so the episode
+  // table and the per-episode pipeline maths are both wrong for it.
+  const isMovie = series?.section === 'movies'
   const [mal, setMal] = useState<MalDetail | null>(null)
   const [malError, setMalError] = useState('')
   const [detailLoading, setDetailLoading] = useState(true)
@@ -471,6 +557,8 @@ export default function SeriesDetail() {
   const [dl, setDl] = useState<DownloadStatus | null>(null)
   const [busyHash, setBusyHash] = useState<string | null>(null)
   const [researchMsg, setResearchMsg] = useState('')
+  const [retriggerBusy, setRetriggerBusy] = useState(false)
+  const [retriggerMsg, setRetriggerMsg] = useState('')
 
   // Season-mapping editor (multi-season placement override).
   const [mapEdit, setMapEdit] = useState<{ tvdb_id: string; tvdb_season: string; episode_offset: string } | null>(null)
@@ -478,7 +566,36 @@ export default function SeriesDetail() {
   const [mapMsg, setMapMsg] = useState('')
 
 
-  const [libMedia, setLibMedia] = useState<Map<number, EpisodeMedia>>(new Map())
+  const [libMedia, setLibMedia] = useState<Map<string, EpisodeMedia>>(new Map())
+  // The film's single library file, whatever key it landed under.
+  const movieMedia = isMovie ? [...libMedia.values()][0] : undefined
+
+  const [status, setStatus] = useState<SeriesStatus | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [searchParams, setSearchParams] = useSearchParams()
+  // URL-backed so a filtered view is linkable and survives a reload — same
+  // reasoning as the Library page's section tabs.
+  const filter = (searchParams.get('show') ?? 'all') as EpisodeFilter
+  const setFilter = useCallback(
+    (f: EpisodeFilter) => {
+      const next = new URLSearchParams(searchParams)
+      if (f === 'all') next.delete('show')
+      else next.set('show', f)
+      setSearchParams(next, { replace: true })
+    },
+    [searchParams, setSearchParams],
+  )
+
+  const loadStatus = useCallback(async () => {
+    if (!Number.isFinite(id)) return
+    try {
+      const r = await fetchAuth(`/api/series/${id}/status`)
+      if (!r.ok) return
+      setStatus((await r.json()) as SeriesStatus)
+    } catch {
+      /* leave prior state */
+    }
+  }, [id])
 
   const loadDownloads = useCallback(async () => {
     if (!Number.isFinite(id)) return
@@ -497,7 +614,18 @@ export default function SeriesDetail() {
       const r = await fetchAuth(`/api/series/${id}/library`)
       if (!r.ok) return
       const { episodes } = (await r.json()) as { episodes: EpisodeMedia[] }
-      setLibMedia(new Map(episodes.filter((e) => e.episode != null).map((e) => [e.episode as number, e])))
+      setLibMedia(
+        new Map(
+          episodes.flatMap((e) => {
+            // A movie carries no episode number, so `mediaKey` yields null and the
+            // file would drop out of the map entirely — leaving "Library: None
+            // yet" next to a file that is plainly on disk. Fall back to the
+            // Jellyfin item id, which is unique and never collides with "s:e".
+            const k = mediaKey(e.season, e.episode) ?? e.id
+            return k ? ([[k, e]] as [string, EpisodeMedia][]) : []
+          }),
+        ),
+      )
     } catch {
       /* leave prior state */
     }
@@ -513,6 +641,26 @@ export default function SeriesDetail() {
       await loadDownloads()
     } catch {
       /* panel refresh shows the surviving state */
+    }
+  }
+
+  // Re-fire the "new title added" trigger for this series — re-runs the Show-
+  // added flow (mint wants for aired-but-missing episodes, chase them). Same
+  // event the scheduler emits on an add; fire-and-forget on the server.
+  const retriggerSearch = async () => {
+    setRetriggerBusy(true)
+    setRetriggerMsg('')
+    try {
+      const r = await fetchAuth(`/api/series/${id}/retrigger`, { method: 'POST' })
+      const raw = await parseAuthJson<{ ok?: boolean; error?: string }>(r)
+      if (!r.ok) throw new Error(raw.error ?? 'Could not start the search')
+      setRetriggerMsg('Search started — mints wants for missing episodes and chases them. Watch the Activity tab.')
+      // Give the chase a moment, then refresh the chase panel.
+      window.setTimeout(() => void loadDownloads(), 4000)
+    } catch (e) {
+      setRetriggerMsg(e instanceof Error ? e.message : 'Could not start the search')
+    } finally {
+      setRetriggerBusy(false)
     }
   }
 
@@ -686,11 +834,19 @@ export default function SeriesDetail() {
   }, [series, loadLibrary])
 
   useEffect(() => {
+    if (!series) return
+    void loadStatus()
+  }, [series, loadStatus])
+
+  useEffect(() => {
     const active = dl?.torrents.some((t) => t.progress < 1 && !t.state.includes('paused'))
     if (!active) return
-    const h = setInterval(() => void loadDownloads(), 5000)
+    const h = setInterval(() => {
+      void loadDownloads()
+      void loadStatus()
+    }, 5000)
     return () => clearInterval(h)
-  }, [dl, loadDownloads])
+  }, [dl, loadDownloads, loadStatus])
 
   if (detailLoading || !series) {
     return (
@@ -699,6 +855,17 @@ export default function SeriesDetail() {
       </div>
     )
   }
+
+  // Once the episode rows carry their own download, this section is only
+  // useful for what they do *not* cover — a season batch, a mislabelled
+  // release, a leftover. That is where orphans hide, so it stays visible.
+  const unmatchedOnly = !!status && !isMovie
+  const claimedHashes = new Set(
+    (status?.episodes ?? []).map((e) => e.torrent?.hash).filter(Boolean) as string[],
+  )
+  const shownTorrents = unmatchedOnly
+    ? (dl?.torrents ?? []).filter((t) => !claimedHashes.has(t.hash.toLowerCase()))
+    : (dl?.torrents ?? [])
 
   const img = heroImage(mal, series)
   const displayTitle = mal?.title ?? series.title
@@ -745,17 +912,13 @@ export default function SeriesDetail() {
             mal.title_english !== mal.title ? (
               <p className="text-sm text-muted-foreground">{mal.title_english}</p>
             ) : null}
-            {mal?.title_japanese ? (
-              <p className="text-sm text-muted-foreground">{mal.title_japanese}</p>
-            ) : null}
-
             {metaLine ? (
               <p className="text-sm text-muted-foreground">{metaLine}</p>
             ) : null}
 
             {mal?.score != null ? (
               <p className="text-sm">
-                <span className="font-medium text-foreground">MAL score:</span>{' '}
+                <span className="font-medium text-foreground">{isAnime ? 'MAL score:' : 'Score:'}</span>{' '}
                 {mal.score}
               </p>
             ) : null}
@@ -793,23 +956,48 @@ export default function SeriesDetail() {
             ) : null}
 
             <div className="flex flex-wrap gap-2 pt-1">
+              {isAnime ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void retriggerSearch()}
+                  disabled={retriggerBusy}
+                  title="Re-run the Show-added flow: mint wants for aired-but-missing episodes and chase them"
+                >
+                  {retriggerBusy ? (
+                    <Loader2 className="mr-1 size-3.5 animate-spin" />
+                  ) : (
+                    <Search className="mr-1 size-3.5 opacity-70" />
+                  )}
+                  Search now
+                </Button>
+              ) : null}
               {(mal?.url ?? series.url) ? (
                 <Button variant="outline" size="sm" asChild>
                   <a href={mal?.url ?? series.url!} target="_blank" rel="noreferrer">
-                    MyAnimeList
+                    {isAnime ? 'MyAnimeList' : 'TMDB'}
                     <ExternalLink className="ml-1 size-3.5 opacity-70" />
                   </a>
                 </Button>
               ) : null}
               {dl?.portalSeriesId ? (
                 <Button variant="outline" size="sm" asChild>
-                  <a href={`/series/${dl.portalSeriesId}`} target="_blank" rel="noreferrer">
+                  {/* A film lives at /movie/:id on the portal, not /series/:id. */}
+                  <a
+                    href={`${isMovie ? '/movie' : '/series'}/${dl.portalSeriesId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
                     View on site
                     <ExternalLink className="ml-1 size-3.5 opacity-70" />
                   </a>
                 </Button>
               ) : null}
             </div>
+
+            {retriggerMsg ? (
+              <p className="text-sm text-muted-foreground">{retriggerMsg}</p>
+            ) : null}
 
             {malError ? (
               <p className="text-sm text-amber-600 dark:text-amber-500">{malError}</p>
@@ -827,121 +1015,65 @@ export default function SeriesDetail() {
         </section>
 
         <div className="space-y-2">
-          <PipelineStrip
-            expected={dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null}
-            libCount={libMedia.size}
-            torrents={dl?.torrents ?? []}
-            onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
-            qbitConfigured={dl?.qbitConfigured ?? false}
-          />
+          {/* Quiet unless something is actually wrong — the page stays a content
+              page, but a split library or a stalled want no longer hides. */}
+          {status ? (
+            <AttentionBand
+              episodes={status.episodes}
+              libraryDirs={status.libraryDirs}
+              health={status.health}
+            />
+          ) : null}
+          {!isMovie && status ? (
+            <SeasonSummary
+              episodes={status.episodes}
+              expected={dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null}
+              filter={filter}
+              onFilter={setFilter}
+            />
+          ) : (
+            <PipelineStrip
+              expected={isMovie ? 1 : (dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null)}
+              libCount={libMedia.size}
+              torrents={dl?.torrents ?? []}
+              onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
+              qbitConfigured={dl?.qbitConfigured ?? false}
+            />
+          )}
           {dl?.nextChase && dl.nextChase.state !== 'ready' ? (
             <EpisodeChasePanel chase={dl.nextChase} onWantAction={wantAction} />
           ) : null}
         </div>
 
-        <ArtPicker seriesId={id} kind="banner" />
-
-        <ArtPicker seriesId={id} kind="poster" />
-
-        <section>
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold">Downloads</h2>
-            <p className="text-xs text-muted-foreground">
-              qBittorrent sources — not the library files below.
-            </p>
-          </div>
-          {!dl ? (
-            <p className="text-sm text-muted-foreground">Loading downloads…</p>
-          ) : !dl.qbitConfigured ? (
-            <p className="text-sm text-muted-foreground">
-              qBittorrent isn’t configured, so download status is unavailable.
-            </p>
-          ) : dl.qbitError ? (
-            <p className="text-sm text-amber-600 dark:text-amber-500">
-              qBittorrent: {dl.qbitError}
-            </p>
-          ) : dl.torrents.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              {dl.qbitSkipped
-                ? 'All expected episodes are on site — qBittorrent not queried.'
-                : 'No active torrents.'}
-            </p>
-          ) : (
-            <ul className="space-y-3">
-              {dl.torrents.map((t) => {
-                const st = stateLabel(t.state, t.progress)
-                const busy = busyHash === t.hash
-                return (
-                  <li
-                    key={t.hash}
-                    className="rounded-lg border border-border bg-card p-3"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium" title={t.name}>
-                          {t.name}
-                        </p>
-                        <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                          <span className={st.tone}>{st.text}</span>
-                          <span>·</span>
-                          <span>{(t.progress * 100).toFixed(t.progress >= 1 ? 0 : 1)}%</span>
-                          <span>·</span>
-                          <span>{formatBytes(t.size)}</span>
-                          <span>·</span>
-                          <span>{t.numSeeds} seeds</span>
-                          <span>·</span>
-                          <span>{t.isBatch ? 'Batch' : t.episode != null ? `Ep ${t.episode}` : 'Single'}</span>
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 gap-1">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 gap-1 px-2 text-amber-600 dark:text-amber-500"
-                          disabled={busy}
-                          title="Blacklist and remove this source, then search for a replacement release"
-                          onClick={() => void blacklistSource(t)}
-                        >
-                          <Ban className="size-3.5" />
-                          <span className="hidden sm:inline">
-                            {busy ? 'Working…' : 'Blacklist & replace'}
-                          </span>
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 gap-1 px-2 text-destructive"
-                          disabled={busy}
-                          title="Remove this download and its files"
-                          onClick={() => void removeDownload(t.hash, true)}
-                        >
-                          <Trash2 className="size-3.5" />
-                          <span className="hidden sm:inline">Remove</span>
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                      <div
-                        className={`h-full rounded-full ${t.progress >= 1 ? 'bg-emerald-500' : 'bg-sky-500'}`}
-                        style={{ width: `${Math.round(t.progress * 100)}%` }}
-                      />
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-
-          {researchMsg ? (
-            <p className="mt-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-              {researchMsg}
-            </p>
-          ) : null}
-
+        {/* Mapping, season titles and artwork are set once and then rarely
+            touched, so they no longer sit between you and the episode list.
+            Closed by default; the disclosure remembers nothing on purpose —
+            the default view should be the same for everyone. */}
+        <section className="rounded-lg border border-border bg-card">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen((v) => !v)}
+            aria-expanded={settingsOpen}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left"
+          >
+            {settingsOpen ? (
+              <ChevronDown className="size-4 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="size-4 text-muted-foreground" />
+            )}
+            <span className="text-sm font-medium">Series settings</span>
+            <span className="text-xs text-muted-foreground">
+              mapping{isAnime ? ', season titles, artwork' : ''}
+            </span>
+          </button>
+          {settingsOpen ? (
+            <div className="space-y-4 border-t border-border px-4 py-4">
           {/* Multi-season placement: which Jellyfin season this cour's episodes
-              land in, and the offset added to each release's episode number. */}
+              land in, and the offset added to each release's episode number.
+              Anime only — it maps MAL cours onto TVDB seasons, and its PATCH
+              route 409s for a TV/movie row, whose TMDB seasons already are the
+              library's seasons. */}
+          {isAnime ? (
           <div className="mt-4 rounded-md border border-border bg-muted/20 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-medium text-muted-foreground">Season mapping</h3>
@@ -1021,6 +1153,124 @@ export default function SeriesDetail() {
             )}
             {mapMsg ? <p className="mt-1.5 text-[11px] text-muted-foreground">{mapMsg}</p> : null}
           </div>
+          ) : null}
+
+          {isAnime ? <SeasonTitlesPanel id={id} /> : null}
+              {isAnime ? (
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <ArtPicker seriesId={id} kind="banner" />
+                  <ArtPicker seriesId={id} kind="poster" />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+
+        <section>
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold">
+              {unmatchedOnly ? 'Unmatched downloads' : 'Downloads'}
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              {unmatchedOnly
+                ? 'qBittorrent sources this series claims but no episode does — batches, mislabelled releases, leftovers. Per-episode downloads live in the episode rows above.'
+                : 'qBittorrent sources — not the library files below.'}
+            </p>
+          </div>
+          {!dl ? (
+            <p className="text-sm text-muted-foreground">Loading downloads…</p>
+          ) : !dl.qbitConfigured ? (
+            <p className="text-sm text-muted-foreground">
+              qBittorrent isn’t configured, so download status is unavailable.
+            </p>
+          ) : dl.qbitError ? (
+            <p className="text-sm text-amber-600 dark:text-amber-500">
+              qBittorrent: {dl.qbitError}
+            </p>
+          ) : shownTorrents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {dl.qbitSkipped
+                ? 'All expected episodes are on site — qBittorrent not queried.'
+                : unmatchedOnly
+                  ? 'Every active torrent is accounted for by an episode above.'
+                  : 'No active torrents.'}
+            </p>
+          ) : (
+            <ul className="space-y-3">
+              {shownTorrents.map((t) => {
+                const st = stateLabel(t.state, t.progress)
+                const busy = busyHash === t.hash
+                return (
+                  <li
+                    key={t.hash}
+                    className="rounded-lg border border-border bg-card p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium" title={t.name}>
+                          {t.name}
+                        </p>
+                        <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                          <span className={st.tone}>{st.text}</span>
+                          <span>·</span>
+                          <span>{(t.progress * 100).toFixed(t.progress >= 1 ? 0 : 1)}%</span>
+                          <span>·</span>
+                          <span>{formatBytes(t.size)}</span>
+                          <span>·</span>
+                          <span>{t.numSeeds} seeds</span>
+                          <span>·</span>
+                          <span>{t.isBatch ? (t.season != null ? `S${t.season} batch` : 'Batch') : t.episode != null ? `Ep ${t.episode}` : 'Single'}</span>
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 gap-1">
+                        {isAnime ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1 px-2 text-amber-600 dark:text-amber-500"
+                          disabled={busy}
+                          title="Blacklist and remove this source, then search for a replacement release"
+                          onClick={() => void blacklistSource(t)}
+                        >
+                          <Ban className="size-3.5" />
+                          <span className="hidden sm:inline">
+                            {busy ? 'Working…' : 'Blacklist & replace'}
+                          </span>
+                        </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1 px-2 text-destructive"
+                          disabled={busy}
+                          title="Remove this download and its files"
+                          onClick={() => void removeDownload(t.hash, true)}
+                        >
+                          <Trash2 className="size-3.5" />
+                          <span className="hidden sm:inline">Remove</span>
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className={`h-full rounded-full ${t.progress >= 1 ? 'bg-emerald-500' : 'bg-sky-500'}`}
+                        style={{ width: `${Math.round(t.progress * 100)}%` }}
+                      />
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+
+          {researchMsg ? (
+            <p className="mt-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              {researchMsg}
+            </p>
+          ) : null}
+
 
           {dl && dl.blacklist.length > 0 ? (
             <div className="mt-4">
@@ -1051,6 +1301,27 @@ export default function SeriesDetail() {
           ) : null}
         </section>
 
+        {isMovie ? (
+          <section>
+            <h2 className="mb-4 text-lg font-semibold">Library file</h2>
+            {movieMedia ? (
+              <div className="rounded-lg border border-border bg-card p-4">
+                <MediaCell m={movieMedia} />
+                {movieMedia.runtimeMin ? (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    Runtime {movieMedia.runtimeMin} min
+                    {movieMedia.container ? ` · ${movieMedia.container}` : ''}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Not in the library yet — it appears here once the Movie import flow places the file
+                and Jellyfin has scanned it.
+              </p>
+            )}
+          </section>
+        ) : (
         <section>
           <h2 className="mb-4 text-lg font-semibold">Episodes</h2>
           {epError ? (
@@ -1064,174 +1335,49 @@ export default function SeriesDetail() {
             </p>
           ) : null}
 
-          <div className="hidden overflow-hidden rounded-lg border border-border md:block">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-border bg-muted/50">
-                <tr>
-                  <th className="w-14 px-3 py-2 font-medium">Ep</th>
-                  <th className="px-3 py-2 font-medium">Title</th>
-                  <th className="w-48 px-3 py-2 font-medium">Library file</th>
-                  <th className="w-28 px-3 py-2 font-medium">Aired</th>
-                  <th className="w-24 px-3 py-2 font-medium">On site</th>
-                  <th className="w-44 px-3 py-2 font-medium">Download</th>
-                  <th className="w-16 px-3 py-2 font-medium" />
-                </tr>
-              </thead>
-              <tbody>
-                {episodes.map((ep) => (
-                  <tr
-                    key={`${ep.mal_id}-${ep.episode ?? ep.title}`}
-                    className="border-b border-border last:border-b-0"
-                  >
-                    <td className="px-3 py-2 align-top text-muted-foreground">
-                      {ep.episode ?? '—'}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <span className="font-medium">{ep.title}</span>
-                      {ep.title_japanese ? (
-                        <span className="mt-0.5 block text-xs text-muted-foreground">
-                          {ep.title_japanese}
-                        </span>
-                      ) : null}
-                      {ep.filler || ep.recap ? (
-                        <span className="mt-1 flex flex-wrap gap-1">
-                          {ep.filler ? (
-                            <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
-                              Filler
-                            </span>
-                          ) : null}
-                          {ep.recap ? (
-                            <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
-                              Recap
-                            </span>
-                          ) : null}
-                        </span>
-                      ) : null}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <MediaCell m={ep.episode != null ? libMedia.get(ep.episode) : undefined} />
-                    </td>
-                    <td className="px-3 py-2 align-top text-muted-foreground">
-                      {formatAired(ep.aired)}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      {dl?.siteEpisodes[String(ep.episode)] ? (
-                        <a
-                          href={`/watch/${dl.siteEpisodes[String(ep.episode)]}`}
-                          className="inline-flex items-center gap-1 text-emerald-600 underline-offset-4 hover:underline dark:text-emerald-500"
-                        >
-                          <Play className="size-3" />
-                          Watch
-                        </a>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      {(() => {
-                        const t = episodeDownload(ep.episode, dl?.torrents ?? [])
-                        if (!t) return <span className="text-muted-foreground">—</span>
-                        const onSite = !!dl?.siteEpisodes[String(ep.episode)]
-                        const inLibrary =
-                          ep.episode != null && libMedia.has(ep.episode)
-                        const st = episodeDownloadLabel(t.state, t.progress, { inLibrary, onSite })
-                        return (
-                          <div className="min-w-0">
-                            <span className={`text-xs ${st.tone}`}>
-                              {t.progress >= 1 ? st.text : `${(t.progress * 100).toFixed(0)}%`}
-                            </span>
-                            {t.progress < 1 ? (
-                              <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
-                                <div
-                                  className="h-full rounded-full bg-sky-500"
-                                  style={{ width: `${Math.round(t.progress * 100)}%` }}
-                                />
-                              </div>
-                            ) : null}
-                          </div>
-                        )
-                      })()}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <a
-                        href={ep.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
-                      >
-                        MAL
-                        <ExternalLink className="size-3" />
-                      </a>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <ul className="space-y-3 md:hidden">
-            {episodes.map((ep) => (
-              <li
-                key={`${ep.mal_id}-${ep.episode ?? ep.title}`}
-                className="rounded-lg border border-border bg-card p-3"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    Ep {ep.episode ?? '?'}
-                  </span>
-                  <a
-                    href={ep.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="shrink-0 text-xs text-primary"
-                  >
-                    MAL ↗
-                  </a>
-                </div>
-                <p className="mt-1 font-medium">{ep.title}</p>
-                {ep.title_japanese ? (
-                  <p className="text-xs text-muted-foreground">{ep.title_japanese}</p>
-                ) : null}
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {formatAired(ep.aired)}
-                </p>
-                {ep.episode != null && libMedia.get(ep.episode) ? (
-                  <div className="mt-2">
-                    <MediaCell m={libMedia.get(ep.episode)} />
+          {/* One render path. This used to be a desktop <table> plus a
+              separate mobile card list, and they had already drifted — mobile
+              silently dropped the Filler/Recap badges and the progress bar. */}
+          {status ? (
+            (() => {
+              const shown = status.episodes.filter((e) => matchesFilter(e, filter))
+              const epMeta = new Map(episodes.filter((e) => e.episode != null).map((e) => [e.episode as number, e]))
+              if (shown.length === 0) {
+                return (
+                  <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border py-16 text-center">
+                    <p className="text-sm text-muted-foreground">
+                      No episodes match “{filter}”.
+                    </p>
+                    {filter !== 'all' ? (
+                      <Button variant="secondary" size="sm" onClick={() => setFilter('all')}>
+                        Show all episodes
+                      </Button>
+                    ) : null}
                   </div>
-                ) : null}
-                {(() => {
-                  const t = episodeDownload(ep.episode, dl?.torrents ?? [])
-                  const watchId = dl?.siteEpisodes[String(ep.episode)]
-                  if (!t && !watchId) return null
-                  const inLibrary = ep.episode != null && libMedia.has(ep.episode)
-                  const st = t
-                    ? episodeDownloadLabel(t.state, t.progress, {
-                        inLibrary,
-                        onSite: !!watchId,
-                      })
-                    : null
-                  return (
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                      {watchId ? (
-                        <a
-                          href={`/watch/${watchId}`}
-                          className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-500"
-                        >
-                          <Play className="size-3" />
-                          Watch on site
-                        </a>
-                      ) : null}
-                      {t && st ? (
-                        <span className={st.tone}>
-                          {t.progress >= 1 ? st.text : `Downloading ${(t.progress * 100).toFixed(0)}%`}                        </span>
-                      ) : null}
-                    </div>
-                  )
-                })()}
-              </li>
-            ))}
-          </ul>
+                )
+              }
+              return (
+                <div className="overflow-hidden rounded-lg border border-border">
+                  {shown.map((e) => (
+                    <EpisodeRow
+                      key={e.episode}
+                      ep={{ ...e, title: e.title ?? epMeta.get(e.episode)?.title ?? null,
+                            airedAt: e.airedAt ?? epMeta.get(e.episode)?.aired ?? null }}
+                      malUrl={epMeta.get(e.episode)?.url ?? null}
+                      onWantAction={wantAction}
+                      onRemoveTorrent={(hash) => void removeDownload(hash, false)}
+                      onBlacklist={(hash) => {
+                        const t = dl?.torrents.find((x) => x.hash === hash)
+                        if (t) void blacklistSource(t)
+                      }}
+                    />
+                  ))}
+                </div>
+              )
+            })()
+          ) : (
+            <p className="text-sm text-muted-foreground">Loading episode status…</p>
+          )}
 
           {epLoading && episodes.length === 0 ? (
             <p className="mt-4 text-sm text-muted-foreground">Loading episodes…</p>
@@ -1256,6 +1402,7 @@ export default function SeriesDetail() {
             </div>
           ) : null}
         </section>
+        )}
       </main>
     </div>
   )

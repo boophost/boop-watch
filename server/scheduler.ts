@@ -28,10 +28,11 @@ import {
   type ScheduleSpec,
   type WeekDay,
 } from './flowsDb.js'
-import { listSeries, markTorrentsCompleted } from './db.js'
+import { listAnimeSeries, markTorrentsCompleted } from './db.js'
+import { sourcingReconcile, sourcingSweep, qbitReconcileUnsafe } from './sourcing.js'
 import { getAllPortalItems } from './portalDb.js'
 import { qbitList, qbitToItem, qbitConfigured } from './qbit.js'
-import { SCHEDULE_TZ, libraryAirings } from './schedule.js'
+import { scheduleTz, libraryAirings } from './schedule.js'
 import type { FlowItem, TriggerKind } from './flowNodes.js'
 
 const DAY_INDEX: Record<WeekDay, number> = {
@@ -43,7 +44,7 @@ const DAY_INDEX: Record<WeekDay, number> = {
 // stable regardless of the runtime's own timezone.
 function localParts(date: Date) {
   const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone: SCHEDULE_TZ,
+    timeZone: scheduleTz(),
     hourCycle: 'h23',
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   })
@@ -264,7 +265,7 @@ function dispatchEvent(kind: TriggerKind, items: FlowItem[], onDispatched: () =>
 // watermark held portal ids).
 async function watchNewItems(): Promise<void> {
   if (flowsWithTriggerType('trigger.new-item').length === 0) return
-  const series = listSeries()
+  const series = listAnimeSeries()
   const key = (s: { mal_id: number }) => String(s.mal_id)
   if (!triggerStateSeeded('catalog-item')) {
     triggerStateAdd('catalog-item', series.map(key))
@@ -343,6 +344,67 @@ async function watchReleases(): Promise<void> {
   }
 }
 
+// Periodic sourcing self-heal. Without this, a want stuck in 'sourced' because
+// its queued torrent vanished from qBittorrent (removed / no seeders / failed)
+// never recovers: the Chase-wants flow only re-sources 'open' wants, and
+// sink.qbittorrent refuses to re-queue the dead hash — so the episode stays
+// missing forever until someone runs reconcile by hand. This runs the same safe
+// fixer (server/sourcing.ts) hourly: dead-torrent orphans → failed, their
+// sourced wants → open, phantom-fulfilled wants (file gone from disk) → open.
+const RECONCILE_INTERVAL_MS = 60 * 60_000
+let lastReconcileAt = 0
+
+async function reconcileSourcing(): Promise<void> {
+  if (Date.now() - lastReconcileAt < RECONCILE_INTERVAL_MS) return
+  // qBit answering unreliably would turn live torrents into false orphans — skip
+  // this pass (retry next tick) rather than reopen wants off a bad read.
+  if (await qbitReconcileUnsafe()) return
+  // Take the flow lock so we never reconcile while a chase is mid-queue (a
+  // just-queued torrent not yet visible in qBit would read as an orphan). A
+  // running flow means try again next tick.
+  if (!acquireFlowLock()) return
+  try {
+    lastReconcileAt = Date.now()
+    const r = await sourcingReconcile(false)
+    if (r.orphanRowsClosed || r.wantsReopened || r.phantomFulfilledReopened) {
+      console.log('scheduler: sourcing reconcile —', JSON.stringify(r))
+    }
+  } finally {
+    releaseFlowLock()
+  }
+}
+
+// Periodic airing-shows want sweep. The release watcher above is the fast path,
+// but it is scrape-driven, season-blind and current-week-only — when it misses
+// (or files the want against the wrong cour) the aired episode is never chased
+// again. This pass re-derives wants from each airing series' own cached AniList
+// air dates, so a missed airing self-heals within the sweep window instead of
+// staying missing forever. Runs more often than reconcile because it is what
+// makes a new episode get picked up promptly; the AniList refresh underneath is
+// TTL-gated (6h/series), so a frequent sweep is nearly free.
+const SWEEP_INTERVAL_MS = 15 * 60_000
+let lastSweepAt = 0
+
+async function sweepAiringWants(): Promise<void> {
+  if (Date.now() - lastSweepAt < SWEEP_INTERVAL_MS) return
+  lastSweepAt = Date.now()
+  const r = await sourcingSweep(false)
+  for (const f of r.refreshFailures) {
+    console.error(`scheduler: sweep could not refresh episodes for mal ${f.mal_id} — ${f.error}`)
+  }
+  if (r.wantsOpened.length === 0) return
+  console.log(
+    'scheduler: airing sweep opened',
+    r.wantsOpened.map((w) => `${w.title} ep ${w.episode}`).join(', '),
+  )
+  // Chase immediately rather than waiting for the hourly Chase-wants schedule —
+  // "as quickly as possible" is the point of the sweep. fireTrigger takes the
+  // flow lock itself and no-ops when no flow subscribes to the trigger.
+  await fireTrigger('chase-wants', []).catch((e) =>
+    console.error('scheduler: sweep could not fire chase-wants', e),
+  )
+}
+
 // Watchers advance their watermark only after a fire is dispatched, so ticks
 // must not overlap — a slow flow (a tick can outlast TICK_MS) would otherwise
 // let the next tick re-detect an in-flight item. This guard drops any tick that
@@ -358,6 +420,11 @@ async function tick(): Promise<void> {
     await watchNewPortalItems().catch((e) => console.error('scheduler: watchNewPortalItems threw', e))
     await watchQbitComplete().catch((e) => console.error('scheduler: watchQbitComplete threw', e))
     await watchReleases().catch((e) => console.error('scheduler: watchReleases threw', e))
+    // Backstop the (scrape-driven) release watcher from our own air-date cache.
+    await sweepAiringWants().catch((e) => console.error('scheduler: sweepAiringWants threw', e))
+    // Self-heal orphaned sourcing state last, only when nothing else holds the
+    // flow lock this tick (gated to hourly internally).
+    await reconcileSourcing().catch((e) => console.error('scheduler: reconcileSourcing threw', e))
   } finally {
     ticking = false
   }

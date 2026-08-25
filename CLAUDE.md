@@ -10,7 +10,7 @@ Guidance for AI agents (and humans) working in this repo. Read this before editi
    exposes only the titles in one Jellyfin collection ("Public"), holds the Jellyfin admin API key
    **server-side**, and proxies posters + HLS so the token never reaches the browser. Live at
    `watch.boopurno.es`.
-2. An **authenticated library manager** at `/manage` (JWT) — a Jikan/MyAnimeList metadata catalog
+2. An **authenticated library manager** at `/manage` (**Supabase** auth) — a Jikan/MyAnimeList metadata catalog
    stored in SQLite (`series.sqlite`). This is the merged-in `n0es/anime-indexer`.
 
 It is a **React (Vite) + TypeScript SPA** served by an **Express + better-sqlite3** backend. There
@@ -21,7 +21,7 @@ It is a **React (Vite) + TypeScript SPA** served by an **Express + better-sqlite
 
 ```
 index.html              # Vite entry; <html class="dark">, loads Geist fonts
-vite.config.ts          # React + Tailwind v4; dev proxies /api and /img -> :3001
+vite.config.ts          # React + Tailwind v4; dev proxies /api+/img -> BACKEND_PORT (default 3001)
 src/                    # React SPA
   main.tsx              # imports index.css (shadcn) + kagura.css (portal)
   App.tsx               # routes: public portal at root, admin under /manage + /login
@@ -37,6 +37,10 @@ server/                 # Express backend (TypeScript, ESM)
   publicRoutes.ts       # public portal routes + JSON APIs (no auth)
   watch.ts, schedule.ts # player stream-info; animeschedule scraper + library matcher
   db.ts, jikan.ts       # series.sqlite + Jikan/MAL client (the /manage admin)
+  config.ts             # DB-backed app config (CONFIG_SPEC + cfg()); read this before process.env
+  configRefs.ts         # {{config.KEY}} in node config + the run-report secret redactor
+  sections.ts           # per-section registry: metadata provider, library root, path template
+  tmdb.ts, metadata/    # TMDB client (TV+movies) + the MetadataClient interface over mal/tmdb
 Dockerfile              # multi-stage node:22-alpine; builds dist + dist-server
 public/robots.txt       # Disallow: / (the portal is unlisted)
 ```
@@ -111,7 +115,8 @@ parallel *before* merge (not just on the one shared `boop-watch-dev` after). Wir
   previews parallel-safe: they can't collide on the shared library / qBittorrent. Portal, `/manage`,
   and flow **dry-runs** all work; live library imports do not. Capped at `MAX_PREVIEWS` (default 5).
 - `qa-agent` runs `scripts/qa-agent/run.mjs`: reads the PR's `## Test plan`, drives each item against
-  the preview (headless `claude` CLI + a minted admin JWT), **ticks `[x]`** the verified items on the
+  the preview (headless `claude` CLI + a minted admin JWT for `/api/*`, plus a real Supabase
+  browser session for `/manage` — see `scripts/qa-agent/supabase-session.mjs`), **ticks `[x]`** the verified items on the
   PR, and comments an evidence table. It **never merges or promotes** — a human still approves.
 - `preview-down` tears the env down on PR close (`kubectl delete -l boop-watch.dev/preview-pr=<N>`).
 
@@ -123,6 +128,38 @@ IngressRoutes + pod exec/cp in `link-apps`; a `CLAUDE_CODE_OAUTH_TOKEN` repo sec
 `claude setup-token` — uses your Claude subscription, not per-token API billing; `ANTHROPIC_API_KEY`
 also works); and wildcard `*-watch.boopurno.es` DNS. `preview-env.mjs` reads the *live* dev
 Deployment as its template, so it tracks dev's drift automatically.
+
+### Local agent environments (parallel agents on one machine)
+
+When several coding agents run on the same laptop, **do not share one checkout** — that's how
+agent A's edits get committed into agent B's branch. Use the same lifecycle shape as PR previews,
+but for *workspace* isolation:
+
+```bash
+npm run agent-env -- up   fix-subs              # worktree + branch + ports + DATA_DIR
+npm run agent-env -- ls
+npm run agent-env -- card fix-subs              # reprint the env card
+npm run agent-env -- run  fix-subs -- npm run server:dev
+npm run agent-env -- down fix-subs              # remove worktree (+ delete agent/<slug> branch)
+```
+
+**Key = kebab-case slug** (e.g. `fix-subs`). It becomes:
+
+| | |
+|---|---|
+| branch | `agent/<slug>` (from `origin/dev` by default; override with `--base`) |
+| worktree | `.agent-envs/<slug>/` (gitignored; registry at `.agent-envs/registry.json`) |
+| ports | unique `PORT`/`BACKEND_PORT` + Vite port (defaults start at 3101 / 5174) |
+| data | `<worktree>/data` (`DATA_DIR`); seeds from primary `data/series.sqlite` when present |
+
+`up` also blanks sink env (`QBIT_*`, `LIBRARY_DIR`) and `POSTHOG_KEY` — same parallel-safety idea
+as `preview-env` — and writes `.agent-env/{card.md,env,slot.json}` inside the worktree. Point the
+agent at that directory and have it `source .agent-env/env` (or use `agent-env run`). Cap:
+`MAX_AGENT_ENVS` (default 5). Fast boot: `--link-modules` symlinks the primary `node_modules`;
+`--no-install` skips deps entirely.
+
+This is the **pre-PR** isolation layer. Once the agent opens a feature → `dev` PR, CI's
+`preview-env` + `qa-agent` still handle the remote preview/QA path unchanged.
 
 ### Library-import flow (custom indexer → library)
 
@@ -165,21 +202,91 @@ and this is a deliberate choice (no tooling for it yet — see below), not a bug
 No import/export or diff tooling exists for this yet (discussed and deliberately deferred — this stays
 a manual process for now).
 
+### Configuration lives in the DB — `server/config.ts`, not `process.env`
+
+Most settings are rows in `app_config` (in `series.sqlite`), edited from **`/manage/settings`**, not
+env vars set in `link`. Read them with **`cfg('KEY')`** / `cfgNum` / `cfgBool` / `cfgSafe`, never
+`process.env` — `CONFIG_SPEC` in `server/config.ts` is the registry of every manageable key, and
+adding one there is what puts it on the settings page.
+
+**Precedence — a *present* env var wins over the database, even when its value is empty.** The test
+is `key in process.env`, not truthiness. This looks odd and it is load-bearing: `preview-env.mjs`
+and `agent-env.mjs` both disable the flow sink by injecting **explicit empty** `QBIT_*`/`LIBRARY_DIR`
+env vars over the inherited ones, while previews *seed their DB from dev*. If the database won,
+every preview would inherit dev's real qBittorrent credentials and could queue into the shared
+instance. Don't "fix" this to `??` or `||`.
+
+It also makes migration safe: set a value in the page, confirm the row reads **database**, *then*
+remove it from `link`. Putting it back in `link` overrides the DB again.
+
+**Secrets** (`secret: true` in the spec) are AES-256-GCM at rest under `CONFIG_KEY`, and the API
+never returns them — `listConfig()` omits the `value` property entirely rather than masking it. A
+missing or rotated `CONFIG_KEY` throws a specific error and surfaces on the settings row; it must
+never read as "unset", or a key rotation looks like an unconfigured provider.
+
+**Bootstrap vars stay in env** and are deliberately absent from `CONFIG_SPEC`: `DATA_DIR`,
+`DATABASE_PATH`, `PORT`, `NODE_ENV`, `JWT_SECRET`, `SUPABASE_*`, `CONFIG_KEY` — each is needed
+before the database, or before the login guarding the settings page, exists.
+
+**Flows read config two ways, and the difference is about secrets** (`server/configRefs.ts`):
+
+- **`{{config.KEY}}` inside any node's config field.** Resolved centrally in `flowExecutor.ts`
+  immediately before `impl.run(...)` — the one point every node's config passes through, so all
+  node types support it with no per-node code. **This is the secret-safe path**: the value is
+  substituted at the moment of use and never becomes an item, so it cannot reach
+  `NodeReport.samples`, which the editor renders and the run API returns. An unknown key is left
+  **verbatim** rather than blanked (a silently-empty typo reads as "the provider is
+  unauthenticated"); the run report notes which keys were used, unknown, or empty.
+- **The `value.config` node** puts a setting on the canvas as a text value. It **refuses secrets** —
+  they aren't even listed in its dropdown — and routes them to a `blocked` output naming the
+  reference syntax instead, because a value on the canvas is an item and items get rendered.
+
+**Redaction is a backstop, not the protection.** `redactSecrets()` scrubs live secret values out of
+run reports before they leave the executor, for the case where a node *echoes* a credential (an HTTP
+node naming the URL it called). Verified to fire: a graph that deliberately pushes a secret into an
+item reports `{"apiKey":"«redacted»"}`. Don't rely on it in place of `{{config.KEY}}`.
+
 ### Environment variables
+
+`CONFIG_KEY` — 32 random bytes, base64 (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`).
+Required before any secret can be stored; losing it means re-entering every secret.
+
+The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can now be set from
+`/manage/settings` instead, and env is the override rather than the source.
 - `JELLYFIN_URL` — base URL (default `http://jellyfin:8096`)
 - `JELLYFIN_API_KEY` — admin key, server-side only. **Required** for the public portal; if unset the
   portal routes 503 (the app still boots so `/manage` works).
-- `WATCH_COLLECTION_ID` — the "Public" BoxSet id (same requirement as above)
+- `WATCH_COLLECTION_ID` — the **anime** section's BoxSet id (the original "Public" collection; at
+  least one section collection is required alongside the API key)
+- `WATCH_COLLECTION_ID_TV`, `WATCH_COLLECTION_ID_MOVIES` — optional BoxSet ids for the **TV** and
+  **Movies** portal sections. Unset ⇒ that section is hidden (the header switcher only appears when
+  2+ sections are configured). Only the anime section runs the MAL/Jikan metadata enrichment;
+  TV/movies keep Jellyfin's own TVDB/TMDb metadata.
 - `SCHEDULE_TZ` — schedule timezone (default `TZ` env, else `America/New_York`)
 - `DATA_DIR` — where `series.sqlite` lives (default `./data`; set to a mounted volume in prod)
-- `JWT_SECRET`, `AUTH_USERNAME`, `AUTH_PASSWORD` — `/manage` login (defaults are insecure dev values)
+- `JWT_SECRET` — signs the legacy `/api/*` bearer token. **Not** how the browser logs in:
+  the `/manage` SPA authenticates through **Supabase** (`src/lib/AuthContext.tsx`), and
+  `requireAuth` validates a bearer token against `SUPABASE_URL/auth/v1/user`, keeping a
+  `jwt.verify` fallback for this secret. A self-minted JWT therefore reaches the API but can
+  never log the browser in — which is exactly what left the QA agent skipping every `/manage`
+  item (issue #293). `AUTH_USERNAME` / `AUTH_PASSWORD` are legacy and unused by the SPA.
 - `ADMIN_EMAILS` — comma-separated emails allowed on the admin-only APIs (the flow editor)
 - `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD` — qBittorrent WebUI for the flow sink node
   (unset ⇒ the "Send to qBittorrent" node errors at run time; dry runs still work)
+- `QBIT_CATEGORY` — qBit category the **code-built research flow** (`buildResearchGraph`, the
+  "Blacklist & replace" / research route) queues into (default `anime`). Saved flow graphs carry
+  their own category; this only covers the graph we construct in code. **Set `anime-dev` on staging**
+  so a dev instance sharing qBit with prod never queues into prod's `anime` category.
 - `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
-- `LIBRARY_DIR` — where the **library-import** flow places files (default `/library`);
-  point at the Jellyfin media library dir mounted into the pod (see below)
+- `TORRENT_APBAY_URL` — public Western TV/movie index for `enrich.torrent-search`’s `apibay`
+  provider (default `https://apibay.org`). Anime stays on Tosho/TsukiHime.
+- `LIBRARY_DIR` — where the **library-import** flow places the **anime** section's files
+  (default `/library`); point at the Jellyfin media library dir mounted into the pod (see below).
+  Keeps its historical meaning — it was the only library when the import sink was written.
+- `LIBRARY_DIR_TV`, `LIBRARY_DIR_MOVIES` — the same, for the **TV** and **Movies** sections
+  (defaults `/library-tv` / `/library-movies`). Read through `sectionConfig()` in
+  `server/sections.ts`, never off `process.env` at the call site.
 - `WORK_DIR` — flow scratch root (default `DATA_DIR`); must share a filesystem with `LIBRARY_DIR`
   (the boot guard `assertScratchVolumeSafe` refuses to start otherwise). `WORK_TTL_HOURS` (default
   24) and `WORK_MAX_GIB` (default 40) bound `WORK_DIR/work`: the periodic sweep drops entries past
@@ -192,6 +299,11 @@ a manual process for now).
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free
   personal key); unset ⇒ that source no-ops, the other three still gather
+- `TMDB_API_KEY` — themoviedb.org credential, the metadata source for the **TV** and **Movies**
+  sections (anime stays on AniList/Jikan). Accepts either a v3 API key (sent as `api_key`) or a v4
+  read access token (sent as a `Bearer` header) — the client sniffs which. Unset ⇒ TV/movie search
+  and add report themselves unavailable with a message naming this var; anime is unaffected.
+  `TMDB_URL` overrides the base (default `https://api.themoviedb.org/3`).
 - `JIKAN_URL` — Jikan base for all **id-based** MAL routes; default is the public
   `https://api.jikan.moe/v4` (see `k8s/jikan/` for self-hosting). `JIKAN_SEARCH_URL` — base for
   `/anime?q=` searches only, default public: a self-hosted instance without a search index will
@@ -234,8 +346,9 @@ Drive issues with the `boop-issues` MCP server / CLI (`mcp/issues-server.mjs` �
 
 ## Routes
 
-Public portal — SPA routes served by `index.html`: `/`, `/series/:id`, `/movie/:id`, `/watch/:id`,
-`/schedule`. They consume these **public JSON APIs / passthroughs** (no auth, all behind the scope
+Public portal — SPA routes served by `index.html`: `/` (anime), `/tv`, `/movies` (the three
+section browse pages), `/series/:id`, `/movie/:id`, `/watch/:id`, `/schedule`. `/api/catalog`,
+`/api/recent`, and `/api/featured` accept `?section=anime|tv|movies`. They consume these **public JSON APIs / passthroughs** (no auth, all behind the scope
 guard):
 
 | Route | Purpose |
@@ -248,9 +361,25 @@ guard):
 | `GET /api/sub/:id/:index` | Subtitle (ASS) delivery for client-side JASSUB |
 | `GET /health` | `ok` |
 
-Admin (JWT, `requireAuth`): `POST /api/login`, `/api/logout`, `GET /api/me`,
-`GET /api/search/anime`, `GET|POST /api/series`, `GET /api/series/:id/detail`,
-`/api/series/:id/episodes`, `DELETE /api/series/:id`.
+Admin (`requireAuth` — a Supabase session token, or a `JWT_SECRET`-signed token via the
+legacy fallback): `POST /api/login`, `/api/logout`, `GET /api/me`,
+`GET /api/sections`, `GET /api/search?section=&q=`, `GET|POST /api/series`,
+`GET /api/series/:id/detail`, `/api/series/:id/episodes`, `DELETE /api/series/:id`.
+
+Admin-only (`requireAuth + requireAdmin`): `GET /api/config`, `PUT|DELETE /api/config/:key` —
+the settings page. `GET` returns every `CONFIG_SPEC` key with its **source** (`env` / `database` /
+`default`); secret rows carry no `value` property at all. Unknown keys are refused rather than
+stored, so a typo can't sit in the table looking like it took effect.
+
+The manage APIs are **section-scoped**: `?section=anime|tv|movies` on `/api/search` and
+`/api/series` (absent ⇒ anime for search, the whole catalog for the list). `POST /api/series` takes
+`{ section, source_id }` and fills title/synopsis/poster/`imdb_id` from that section's provider when
+they aren't supplied — `{ mal_id, title }` still works and still means anime.
+`GET /api/sections` is the registry the UI reads (provider, whether it's configured, library root,
+path template, counts, and a best-effort cross-check against Jellyfin's own `/Library/VirtualFolders`).
+`GET /api/search/anime` is a **back-compat alias pinned to anime** — it ignores `?section=`.
+Anime-only routes (`episodes`, `banners`, `season-titles`, `mapping`, downloads, blacklist,
+research, retrigger) **409** on a TV/movie id via `animeSeriesOr()`, naming the section.
 
 Every public content route runs through the **scope guard**: it 403s/404s unless the id is in the
 Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
@@ -272,6 +401,35 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
   `req.params.splat`) — not the v4 bare `*` / `req.params[0]`.
 - **TypeScript is strict** (and the app build runs `noUnusedLocals`/`noUnusedParameters`). Use
   `import type` for type-only imports (verbatimModuleSyntax).
+
+## The catalog is sectioned — `mal_id` is not universal
+
+`series.sqlite`'s `series` table used to *be* the anime catalog: `mal_id INTEGER NOT NULL UNIQUE`
+was its identity. It now holds all three sections, so:
+
+- **Identity is the `(section, source, source_id)` triple**, enforced by `uq_series_source`.
+  `section` is the same `PortalSection` the portal uses; `source` is `'mal'` (anime) or `'tmdb'`
+  (TV/movies); `source_id` is that provider's id. Look titles up with `findBySource()`.
+- **`mal_id` is nullable** and identifies anime rows only. It keeps its own partial unique index
+  (`uq_series_mal`) and remains what the whole sourcing pipeline speaks — torrent search, wants,
+  torrents, library_files, episode caches. It is *not* being phased out; it is just not universal.
+- **Anime-only code takes `AnimeSeriesRow`**, not `SeriesRow` — it narrows `mal_id` to `number`.
+  Get rows from `listAnimeSeries()` / `findByMalId()` (both already typed that way), or narrow with
+  `isAnimeSeries()`. **Don't** add null checks to anime-only code to make the types pass; that
+  hides the section bug instead of catching it. In `server/index.ts`, anime-only routes go through
+  `animeSeriesOr(res, id, what)`, which 409s a TV/movie id with an explanatory message.
+- **`wants` / `torrents` / `library_files` carry both `mal_id` and `series_id`.** The anime
+  pipeline still keys on `mal_id` (unchanged, deliberately — that path works); new section-agnostic
+  code should use `series_id`. Converging them is future cleanup, not an invitation to do it inline.
+- **Per-section facts come from `sectionConfig()`** in `server/sections.ts` (provider, library root,
+  import path template) — never from `process.env` at the call site.
+- **Section-aware flow nodes.** `enrich.indexer-match`, `enrich.metadata`, `source.jellyfin` and
+  `sink.library-import` each take a `section` config, **defaulting to `anime`** so existing saved
+  graphs are unaffected. The indexer-match one is load-bearing: unscoped, a TV release can
+  token-match an anime row and the import files a real video into the wrong library, silently.
+- **Metadata goes through `clientForSection()`** (`server/metadata/`), not a direct AniList/Jikan or
+  TMDB call. `mal.ts` also owns `resolveCatalog()` — `enrich.metadata` in `flowNodes.ts` imports it
+  from there, so there is one anime-metadata path, not two.
 
 ## Data-source gotchas (load-bearing — don't relearn the hard way)
 

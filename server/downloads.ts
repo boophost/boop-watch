@@ -3,7 +3,7 @@
 // progress, and which episodes are already live on the public portal.
 
 import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
-import { getAllPortalItems } from './portalDb.js'
+import { getAllPortalItems, type PortalSection } from './portalDb.js'
 import { getSeriesById } from './db.js'
 import { jellyfinConfigured, jfJson, type JfItem, type JfMediaStream } from './jellyfin.js'
 
@@ -24,11 +24,24 @@ function tokens(s: string): string[] {
     .filter((t) => t.length >= 3 && !STOP.has(t) && !/^\d+$/.test(t))
 }
 
-/** Fraction of the series's distinctive tokens present in a candidate string. */
+/** Total character mass of a token set — the denominator for length-weighted
+ * overlap (long words are rarer, so they identify a series more strongly). */
+const weigh = (toks: string[]): number => toks.reduce((n, t) => n + t.length, 0)
+
+/** Fraction of the series's distinctive token *mass* present in a candidate,
+ * weighted by word length rather than word count. A plain word-count fraction
+ * lets a short filler token that happens to be a substring of an unrelated
+ * title carry a full point — e.g. "Lucky Star OVA" (tokens lucky/star) scores
+ * 1/2 = 0.5 against Re:Zero's "-Starting Life…-" because "star" ⊂ "starting",
+ * which is enough to steal every Re:Zero episode. Charging by length makes that
+ * lone short match worth only 4/9 ≈ 0.44, below the threshold, while a real
+ * name-only match ("Inuyashiki - 10") still clears it. Mirrors the fix in
+ * enrich.indexer-match's token matcher. */
 function overlap(candidate: string, seriesTokens: string[]): number {
   if (seriesTokens.length === 0) return 0
   const c = norm(candidate)
-  return seriesTokens.filter((t) => c.includes(t)).length / seriesTokens.length
+  const present = seriesTokens.filter((t) => c.includes(t))
+  return weigh(present) / weigh(seriesTokens)
 }
 
 /**
@@ -81,6 +94,8 @@ export interface SeriesDownload {
   eta: number
   isBatch: boolean
   episode: number | null
+  /** Parsed from the release name when present (Season 7 / S07). */
+  season: number | null
 }
 
 export interface SeriesDownloadStatus {
@@ -140,14 +155,26 @@ function resolvePortalSeriesId(
 
 /** Match site episodes + torrents for one series against shared portal/qBit snapshots.
  * When `tvdb_season` is set (a cour in a multi-season franchise), only that JF
- * season's episodes count as on-site — IndexNumber alone collides across seasons. */
+ * season's episodes count as on-site — IndexNumber alone collides across seasons.
+ *
+ * `siteEpisodes` is keyed by **MAL per-cour** episode number, matching how every
+ * consumer looks it up (the episodes list, the chase target). Jellyfin numbers a
+ * split season absolutely (Mushoku S1 = 23 eps = two MAL cours of 11 + 12), so we
+ * reverse `episode_offset` and drop anything outside this cour's own 1..`episodes`
+ * range — otherwise a cour claims its sibling's episodes (the "23/11 playable"
+ * bug) and an offset cour reads its siblings' ids for its own numbers. */
 export function matchSeriesDownloads(
   series: {
     mal_id?: number | null
+    section?: PortalSection
     title: string
     title_english?: string | null
     title_japanese?: string | null
     tvdb_season?: number | null
+    episode_offset?: number | null
+    episodes?: number | null
+    /** Release year — disambiguates a film from its sequel on the portal. */
+    year?: number | null
   },
   portalItems: ReturnType<typeof getAllPortalItems>,
   rawTorrents: QbitTorrent[] | null,
@@ -155,15 +182,57 @@ export function matchSeriesDownloads(
 ): SeriesDownloadStatus {
   const variantTokens = variantTokensForSeries(series)
   const season = series.tvdb_season ?? null
+  const offset = series.episode_offset ?? 0
+  // Only a cour that actually sits inside a shared season needs range-clamping;
+  // without a season mapping the JF numbers are already this row's own.
+  const courLength = season != null && series.episodes != null && series.episodes > 0 ? series.episodes : null
   const siteEpisodes: Record<string, string> = {}
+  const tvShow = series.section === 'tv'
   for (const it of portalItems) {
     if (it.type !== 'Episode' || it.index_number == null) continue
     if (season != null && it.parent_index_number !== season) continue
-    if (bestOverlap(it.series_name ?? it.name, variantTokens) >= 0.5) {
-      siteEpisodes[String(it.index_number)] = it.id
+    const number = season != null ? it.index_number - offset : it.index_number
+    // Before this cour starts, or past its end — belongs to a sibling cour.
+    if (number < 1) continue
+    if (courLength != null && number > courLength) continue
+    if (bestOverlap(it.series_name ?? it.name, variantTokens) < 0.5) continue
+    // Western TV is one catalog row per show, so IndexNumber collides across
+    // seasons (S1E1 vs S7E1). Key those as "season:episode"; anime cours stay
+    // on the bare episode number the rest of the chase pipeline already uses.
+    const key =
+      tvShow && it.parent_index_number != null ? `${it.parent_index_number}:${number}` : String(number)
+    siteEpisodes[key] = it.id
+  }
+  // A film is a portal item in its own right, not a parent with episodes: the
+  // loop above only ever matches `Episode`s, so the movies section reported
+  // "On site: Not yet" even with the film live on the portal. Resolve the Movie
+  // item itself and record it as the section's single on-site unit.
+  let portalSeriesId = resolvePortalSeriesId(series, portalItems)
+  if (series.section === 'movies') {
+    // Token overlap alone cannot separate a film from its sequel: `tokens()`
+    // drops bare numerals, so "Iron Man" and "Iron Man 2" both reduce to
+    // [iron, man] and both score 1.0 — the sequel would link to the original.
+    // Rank an exact normalised-title match, then a production-year agreement,
+    // above raw overlap.
+    const wantYear = series.year ?? null
+    const titles = [series.title, series.title_english, series.title_japanese]
+      .filter((t): t is string => !!t)
+      .map(norm)
+    let best: { id: string; rank: number } | null = null
+    for (const it of portalItems) {
+      if (it.type !== 'Movie') continue
+      const score = bestOverlap(it.name, variantTokens)
+      if (score < 0.5) continue
+      const exact = titles.includes(norm(it.name)) ? 2 : 0
+      const yearOk = wantYear != null && it.production_year === wantYear ? 1 : 0
+      const rank = exact + yearOk + score
+      if (!best || rank > best.rank) best = { id: it.id, rank }
+    }
+    if (best) {
+      siteEpisodes.movie = best.id
+      portalSeriesId = best.id
     }
   }
-  const portalSeriesId = resolvePortalSeriesId(series, portalItems)
 
   if (!qbit.configured || rawTorrents == null) {
     return {
@@ -196,6 +265,7 @@ export function matchSeriesDownloads(
       eta: t.eta,
       isBatch: isBatch(t.name),
       episode: parseEpisode(t.name),
+      season: parseSeason(t.name),
     }))
     .sort((a, b) => b.progress - a.progress)
 
@@ -306,6 +376,8 @@ export interface EpisodeAudio { lang: string; label: string; codec: string; chan
 export interface EpisodeMedia {
   id: string
   episode: number | null
+  /** Jellyfin ParentIndexNumber — set for TV so S1E1 and S7E1 don't collide. */
+  season: number | null
   resolution: string
   videoCodec: string
   audio: EpisodeAudio[]
@@ -318,8 +390,8 @@ export interface EpisodeMedia {
 /** Resolve a Jellyfin Series id for a catalog row. Prefer portal (mal_id / title),
  * then fall back to a Jellyfin library search — needed when the show is in the
  * media library but not (yet) in the Public collection / portal cache. */
-async function resolveJfSeriesId(series: {
-  mal_id: number
+export async function resolveJfSeriesId(series: {
+  mal_id?: number | null
   title: string
   title_english?: string | null
   title_japanese?: string | null
@@ -351,24 +423,66 @@ async function resolveJfSeriesId(series: {
   }
 }
 
-/** Media facts for every library episode of a series, keyed for the manage page.
- * Sourced from Jellyfin (one /Shows/{id}/Episodes call with stream fields). */
+/**
+ * The one library file behind a movies-section row, as a single-entry list.
+ *
+ * A film is not a series: `/Shows/{id}/Episodes` returns nothing for one, so the
+ * TV path below reported "no library files" for every imported movie — the
+ * manage page sat on "Library: None yet" with the file plainly on disk. Look up
+ * the Movie item directly instead, preferring the year to separate remakes.
+ */
+async function getMovieLibraryMedia(series: {
+  title: string
+  title_english?: string | null
+  year?: number | null
+}): Promise<JfItem[]> {
+  const terms = [series.title_english, series.title].filter((t): t is string => !!t && !!t.trim())
+  for (const term of terms) {
+    try {
+      const r = await jfJson<{ Items?: JfItem[] }>('/Items', {
+        Recursive: 'true',
+        IncludeItemTypes: 'Movie',
+        SearchTerm: term,
+        Fields: 'MediaStreams,MediaSources',
+        Limit: '25',
+      })
+      const items = r.Items ?? []
+      if (items.length === 0) continue
+      // A year match is the strongest signal we have; fall back to the single
+      // hit rather than guessing between several same-named films.
+      const byYear = series.year != null ? items.filter((it) => it.ProductionYear === series.year) : []
+      if (byYear.length > 0) return [byYear[0]]
+      if (items.length === 1) return items
+    } catch {
+      /* try the next title variant */
+    }
+  }
+  return []
+}
+
+/** Media facts for every library file behind a catalog row, for the manage page.
+ * TV/anime list their Jellyfin episodes; a movie resolves to its single file. */
 export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMedia[]> {
-  if (!jellyfinConfigured) return []
+  if (!jellyfinConfigured()) return []
   const series = getSeriesById(seriesId)
   if (!series) return []
 
-  const jfSeriesId = await resolveJfSeriesId(series)
-  if (!jfSeriesId) return []
-
   let episodes: JfItem[] = []
-  try {
-    const r = await jfJson<{ Items?: JfItem[] }>(`/Shows/${jfSeriesId}/Episodes`, {
-      Fields: 'MediaStreams,MediaSources',
-    })
-    episodes = r.Items ?? []
-  } catch {
-    return []
+  if (series.section === 'movies') {
+    episodes = await getMovieLibraryMedia(series)
+    if (episodes.length === 0) return []
+  } else {
+    const jfSeriesId = await resolveJfSeriesId(series)
+    if (!jfSeriesId) return []
+
+    try {
+      const r = await jfJson<{ Items?: JfItem[] }>(`/Shows/${jfSeriesId}/Episodes`, {
+        Fields: 'MediaStreams,MediaSources',
+      })
+      episodes = r.Items ?? []
+    } catch {
+      return []
+    }
   }
 
   // Multi-season franchise: a cour catalog row (tvdb_season set) only wants that
@@ -402,6 +516,7 @@ export async function getSeriesLibraryMedia(seriesId: number): Promise<EpisodeMe
     return {
       id: ep.Id,
       episode: ep.IndexNumber ?? null,
+      season: series.section === 'tv' ? (ep.ParentIndexNumber ?? null) : null,
       resolution: resLabel(video?.Height, video?.Width),
       videoCodec: (video?.Codec || '').toUpperCase(),
       audio,

@@ -1,6 +1,7 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './lib/AuthContext'
+import { setPageTitle } from './lib/pageMeta'
 import { APP_VERSION, APP_COMMIT } from './version'
 import Login from './pages/Login'
 import ManageLayout from './pages/manage/ManageLayout'
@@ -9,6 +10,7 @@ import Flows from './pages/manage/Flows'
 import Schedules from './pages/manage/Schedules'
 import Activity from './pages/manage/Activity'
 import Users from './pages/manage/Users'
+import Settings from './pages/manage/Settings'
 import Suggestions from './pages/manage/Suggestions'
 import AdminSeriesDetail from './pages/SeriesDetail'
 
@@ -74,12 +76,27 @@ function RequireAdmin() {
   return <Outlet />
 }
 
+function DocumentTitle() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    if (pathname.startsWith('/series/') || pathname.startsWith('/movie/') || pathname.startsWith('/watch/')) return
+    if (pathname === '/schedule') { setPageTitle('Schedule'); return }
+    if (pathname === '/tv') { setPageTitle('TV'); return }
+    if (pathname === '/movies') { setPageTitle('Movies'); return }
+    setPageTitle()
+  }, [pathname])
+  return null
+}
+
 export default function App() {
   return (
     <>
+      <DocumentTitle />
       <Routes>
-        {/* Public, no-login portal */}
+        {/* Public, no-login portal — one browse page per section */}
         <Route path="/" element={<Browse />} />
+        <Route path="/tv" element={<Browse />} />
+        <Route path="/movies" element={<Browse />} />
         <Route path="/series/:id" element={<Title />} />
         <Route path="/movie/:id" element={<Title />} />
         <Route path="/watch/:id" element={<Watch />} />
@@ -103,6 +120,7 @@ export default function App() {
             <Route path="series/:seriesId" element={<AdminSeriesDetail />} />
             <Route path="activity" element={<Activity />} />
             <Route path="users" element={<Users />} />
+            <Route path="settings" element={<Settings />} />
             <Route path="suggestions" element={<Suggestions />} />
             <Route path="flows" element={<Flows />} />
             <Route path="schedules" element={<Schedules />} />

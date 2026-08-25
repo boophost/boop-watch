@@ -1,6 +1,7 @@
 // Typed client for the public portal JSON APIs (server/publicRoutes.ts).
 
 import type { ChaseState, EpisodeChase } from '@/lib/chase'
+import type { Section } from '@/lib/sections'
 import { supabase } from './supabase'
 
 export type { ChaseState, EpisodeChase }
@@ -8,6 +9,7 @@ export type { ChaseState, EpisodeChase }
 export interface CatalogItem {
   id: string
   type?: string
+  section: Section
   name: string
   year: number | null
   genres: string[]
@@ -15,6 +17,8 @@ export interface CatalogItem {
 export interface Catalog {
   items: CatalogItem[]
   genres: string[]
+  /** Sections with a collection configured server-side (display order). */
+  sections: Section[]
 }
 
 export async function fetchAuth(url: string, options: RequestInit = {}) {
@@ -63,6 +67,7 @@ export interface RecentItem {
 export interface ItemSummary {
   id: string
   type: 'episode' | 'movie' | 'series'
+  section: Section
   seriesId: string | null
   name: string
   season: number | null
@@ -99,6 +104,12 @@ export interface SeasonInfo {
   episodes: number
   /** This season's own premiere year, distinct from the series' overall year. */
   year: number | null
+  /**
+   * Admin-authored season line ("Season 1 Part 2", "Diamond is Unbreakable").
+   * null when unset — there is no server-side fallback, the portal picks the
+   * default (generic "Season N", nothing for a single-season show).
+   */
+  displayTitle: string | null
 }
 export interface SeriesDetail {
   type: 'series'
@@ -194,15 +205,18 @@ async function getJSON<T>(url: string, attempt = 0): Promise<T> {
 
 export const getCatalog = () => getJSON<Catalog>('/api/catalog')
 
-// The browse grid and the header search palette both need the catalog; share one fetch.
+// The browse grid and the header search palette both need the catalog; share
+// one fetch. Always the full multi-section catalog — sections split client-side.
 let catalogPromise: Promise<Catalog> | null = null
 export const loadCatalog = (): Promise<Catalog> => (catalogPromise ??= getCatalog())
-export const getRecent = () => getJSON<{ items: RecentItem[] }>('/api/recent')
+export const getRecent = (section?: Section) =>
+  getJSON<{ items: RecentItem[] }>('/api/recent' + (section ? `?section=${section}` : ''))
 export const getItemSummaries = (ids: string[]) =>
   ids.length
     ? getJSON<{ items: ItemSummary[] }>(`/api/items/summary?ids=${encodeURIComponent(ids.join(','))}`)
     : Promise.resolve({ items: [] as ItemSummary[] })
-export const getFeatured = () => getJSON<{ items: FeaturedItem[] }>('/api/featured')
+export const getFeatured = (section?: Section) =>
+  getJSON<{ items: FeaturedItem[] }>('/api/featured' + (section ? `?section=${section}` : ''))
 export const getTitle = (id: string, season?: number | null) =>
   getJSON<TitleDetail>(
     `/api/catalog/${encodeURIComponent(id)}` +

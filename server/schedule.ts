@@ -2,9 +2,13 @@
 // filtered to titles in the library (the Jellyfin "Public" collection + the
 // /manage watchlist). Ported from the legacy server.
 import { getCollectionItems, type JfItem } from './jellyfin.js'
-import { listSeries } from './db.js'
+import { listAnimeSeries } from './db.js'
+import { cfgSafe } from './config.js'
 
-const SCHEDULE_TZ = process.env.SCHEDULE_TZ || process.env.TZ || 'America/New_York'
+// TZ stays an env-only fallback: it is a container-level setting, not one of
+// ours, and it is what SCHEDULE_TZ has always deferred to.
+const scheduleTz = (): string =>
+  cfgSafe('SCHEDULE_TZ') || process.env.TZ || 'America/New_York'
 const SCHEDULE_TTL_MS = 30 * 60 * 1000
 
 interface WeekRef { year: number; week: number }
@@ -171,9 +175,9 @@ async function getWeek(weekParam: string): Promise<ParsedWeek> {
   return loading
 }
 
-// tz-aware formatters (one absolute instant -> parts in SCHEDULE_TZ)
-const fmtKey = new Intl.DateTimeFormat('en-CA', { timeZone: SCHEDULE_TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
-const fmtTime = new Intl.DateTimeFormat('en-US', { timeZone: SCHEDULE_TZ, hour: '2-digit', minute: '2-digit' })
+// tz-aware formatters (one absolute instant -> parts in the schedule timezone)
+const fmtKey = new Intl.DateTimeFormat('en-CA', { timeZone: scheduleTz(), year: 'numeric', month: '2-digit', day: '2-digit' })
+const fmtTime = new Intl.DateTimeFormat('en-US', { timeZone: scheduleTz(), hour: '2-digit', minute: '2-digit' })
 
 const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MON_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -239,7 +243,7 @@ function buildDays(items: Airing[], allAirings: Airing[], now: Date): ScheduleDa
 // land in Jellyfin — treat each as a library series for matching.
 function watchlistItems(): JfItem[] {
   try {
-    return listSeries().map((s) => ({ Id: `mal:${s.mal_id}`, Name: s.title, Type: 'Series' }))
+    return listAnimeSeries().map((s) => ({ Id: `mal:${s.mal_id}`, Name: s.title, Type: 'Series' }))
   } catch {
     return [] // DB optional
   }
@@ -247,7 +251,10 @@ function watchlistItems(): JfItem[] {
 
 export async function getSchedule(weekParam: string): Promise<SchedulePayload> {
   const week = await getWeek(weekParam)
-  const resolveTitle = libraryResolver([...getCollectionItems(), ...watchlistItems()])
+  // Anime-section series only: the matcher is deliberately loose (shared
+  // distinctive tokens), and a live-action TV title sharing a word with an
+  // airing anime would otherwise false-positive onto the schedule.
+  const resolveTitle = libraryResolver([...getCollectionItems('anime'), ...watchlistItems()])
   const items = latestPerShow(
     week.airings.flatMap((it) => {
       const display = resolveTitle(it.title)
@@ -296,4 +303,4 @@ export async function libraryAirings(): Promise<LibraryAiring[]> {
   return out
 }
 
-export { SCHEDULE_TZ }
+export { scheduleTz }

@@ -4,17 +4,21 @@ import { Plus, Loader2 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import type { AnimeSearchHit } from '@/components/AddSeriesModal'
+import type { TitleSearchHit } from '@/components/AddSeriesModal'
+import type { PortalSection } from '@/lib/sections'
 
 /** A minimal shape of the catalog entries this bar filters over. */
 export interface CatalogLite {
   id: number
-  mal_id: number
+  /** Anime-only; null for TV and movies. The bar never keys on it. */
+  mal_id: number | null
   title: string
   image_url: string | null
 }
 
-interface AnimeSearchProps {
+interface TitleSearchProps {
+  /** Which section to search — decides the provider and where an add lands. */
+  section: PortalSection
   className?: string
   /** The already-loaded catalog — filtered client-side for the top tier. */
   catalog: CatalogLite[]
@@ -25,15 +29,16 @@ interface AnimeSearchProps {
 }
 
 /** Catalog-first search: filters the loaded catalog (navigate on click) and
- * offers a few AniList "add new" suggestions below a separator (add on click),
- * plus a button into the full add-series modal. */
-export function AnimeSearch({ className, catalog, onChanged, onOpenAddModal }: AnimeSearchProps) {
+ * offers a few provider "add new" suggestions below a separator (add on click),
+ * plus a button into the full add-title modal. The provider is whichever one
+ * owns `section` — AniList/MAL for anime, TMDB for TV and movies. */
+export function TitleSearch({ section, className, catalog, onChanged, onOpenAddModal }: TitleSearchProps) {
   const navigate = useNavigate()
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(false)
-  const [suggestions, setSuggestions] = useState<AnimeSearchHit[]>([])
+  const [suggestions, setSuggestions] = useState<TitleSearchHit[]>([])
   const [loading, setLoading] = useState(false)
-  const [addingMal, setAddingMal] = useState<number | null>(null)
+  const [addingId, setAddingId] = useState<number | null>(null)
   const [error, setError] = useState('')
   const wrapRef = useRef<HTMLDivElement>(null)
 
@@ -67,8 +72,8 @@ export function AnimeSearch({ className, catalog, onChanged, onOpenAddModal }: A
         setLoading(true)
         setError('')
         try {
-          const r = await fetchAuth(`/api/search/anime?q=${encodeURIComponent(t)}`)
-          const raw = await parseAuthJson<{ results?: AnimeSearchHit[]; error?: string }>(r)
+          const r = await fetchAuth(`/api/search?section=${section}&q=${encodeURIComponent(t)}`)
+          const raw = await parseAuthJson<{ results?: TitleSearchHit[]; error?: string }>(r)
           if (!r.ok) throw new Error(raw.error ?? 'Search failed')
           setSuggestions(raw.results ?? [])
         } catch (e) {
@@ -80,7 +85,7 @@ export function AnimeSearch({ className, catalog, onChanged, onOpenAddModal }: A
       })()
     }, 380)
     return () => window.clearTimeout(id)
-  }, [q])
+  }, [q, section])
 
   // Suggestions worth showing as "add new": not already in the catalog (those
   // already appear in the top tier) and not a redundant repeat.
@@ -95,15 +100,16 @@ export function AnimeSearch({ className, catalog, onChanged, onOpenAddModal }: A
     navigate(`/manage/series/${id}`)
   }
 
-  const addImmediately = async (hit: AnimeSearchHit) => {
-    setAddingMal(hit.mal_id)
+  const addImmediately = async (hit: TitleSearchHit) => {
+    setAddingId(hit.source_id)
     setError('')
     try {
       const r = await fetchAuth('/api/series', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mal_id: hit.mal_id,
+          section,
+          source_id: hit.source_id,
           title: hit.title,
           synopsis: hit.synopsis,
           image_url: hit.image_url,
@@ -113,12 +119,12 @@ export function AnimeSearch({ className, catalog, onChanged, onOpenAddModal }: A
       const raw = await parseAuthJson<{ error?: string }>(r)
       if (!r.ok && r.status !== 409) throw new Error(raw.error ?? 'Could not add')
       // Drop it from suggestions so the row reflects the add.
-      setSuggestions((s) => s.map((x) => (x.mal_id === hit.mal_id ? { ...x, inCatalog: true } : x)))
+      setSuggestions((s) => s.map((x) => (x.source_id === hit.source_id ? { ...x, inCatalog: true } : x)))
       onChanged?.()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not add')
     } finally {
-      setAddingMal(null)
+      setAddingId(null)
     }
   }
 
@@ -183,10 +189,10 @@ export function AnimeSearch({ className, catalog, onChanged, onOpenAddModal }: A
               </div>
               {addable.map((h) => (
                 <button
-                  key={`al-${h.mal_id}`}
+                  key={`hit-${h.source_id}`}
                   type="button"
                   role="option"
-                  disabled={h.inCatalog || addingMal === h.mal_id}
+                  disabled={h.inCatalog || addingId === h.source_id}
                   className="flex w-full items-center gap-3 border-b border-border/60 p-2.5 text-left last:border-b-0 hover:bg-primary/10 disabled:opacity-60"
                   onClick={() => void addImmediately(h)}
                 >
@@ -206,7 +212,7 @@ export function AnimeSearch({ className, catalog, onChanged, onOpenAddModal }: A
                   <span className="flex shrink-0 items-center gap-1 rounded bg-primary/15 px-2 py-1 text-[11px] font-medium text-primary">
                     {h.inCatalog ? (
                       'Added'
-                    ) : addingMal === h.mal_id ? (
+                    ) : addingId === h.source_id ? (
                       <Loader2 className="size-3 animate-spin" />
                     ) : (
                       <>

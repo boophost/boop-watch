@@ -17,6 +17,11 @@ function gitSha(): string {
   }
 }
 
+// Local agent envs (scripts/agent-env.mjs) set BACKEND_PORT so Vite can proxy to
+// a non-default Express port when several agents run side-by-side.
+const backendPort = process.env.BACKEND_PORT || '3001'
+const backendOrigin = `http://localhost:${backendPort}`
+
 export default defineConfig({
   define: {
     __APP_COMMIT__: JSON.stringify(gitSha()),
@@ -30,10 +35,10 @@ export default defineConfig({
   server: {
     host: true,
     proxy: {
-      '/api': 'http://localhost:3001',
-      '/img': 'http://localhost:3001',
-      '/config.js': 'http://localhost:3001',
-      '/ingest': 'http://localhost:3001',
+      '/api': backendOrigin,
+      '/img': backendOrigin,
+      '/config.js': backendOrigin,
+      '/ingest': backendOrigin,
     },
   },
 })
