@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url'
 import { fetchAnimeFull } from './jikan.js'
 import * as seriesDb from './db.js'
 import { getEpisodesForDisplay, isProperTitle } from './episodes.js'
+import { buildSeriesStatus } from './seriesStatus.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView, portalSeriesForCatalog } from './publicRoutes.js'
 import {
@@ -901,6 +902,33 @@ app.patch('/api/series/:id/mapping', requireAuth, requireAdmin, async (req, res)
 })
 
 // --- Series downloads / blacklist (manage series page) --------------------
+
+// One joined per-episode view: want + torrent + library file (with a real
+// on-disk check) + Jellyfin + portal, plus this series' slice of the sourcing
+// health checks and the directories it occupies on disk.
+//
+// Exists because those five facts lived in five places that never met, so the
+// page could only say "importing" for three materially different states. See
+// server/seriesStatus.ts for the full reasoning.
+app.get('/api/series/:id/status', requireAuth, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid id' })
+    return
+  }
+  try {
+    const status = await buildSeriesStatus(id)
+    if (!status) {
+      res.status(404).json({ error: 'Series not found' })
+      return
+    }
+    res.json(status)
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to build series status' })
+  }
+})
+
 
 // Download status for a series: matched qBittorrent torrents + which episodes
 // are already live on the public portal + this series' blacklist.

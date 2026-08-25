@@ -64,6 +64,7 @@ import { getFlow, parseComponent } from './flowsDb.js'
 import { deriveInterface, buildSpecResolver } from './flowComponents.js'
 import { cfgSafe, cfgNum, CONFIG_SPEC, isKnownConfigKey, isSecretKey } from './config.js'
 import { sectionLibraryRoot, sectionConfig } from './sections.js'
+import { resolveExistingPath } from './libraryPaths.js'
 
 const execFileP = promisify(execFile)
 
@@ -228,6 +229,53 @@ export interface RunContext {
   trigger?: TriggerEvent | null
   /** Sink that `trigger.fire` pushes deferred publishes onto. */
   fireQueue?: FireRequest[]
+  /** Run-scoped registry of GB-sized scratch intermediates (trimmed/muxed
+   * files). runFlow owns one per run and sweeps it when the run ends — see
+   * ScratchRegistry. Nodes that emit such files register them here so a
+   * completed (or failed) run leaves no orphaned scratch behind. */
+  scratch?: ScratchRegistry
+}
+
+// Run-scoped registry of GB-sized scratch intermediates produced by the
+// library-import flow (enrich.trim-audio-tracks, enrich.mux-tracks). The
+// sink.library-import node hardlinks the finished file into the media library,
+// so once a run ends the scratch copy is redundant — deleting it (on success
+// AND on failure) is what keeps steady-state scratch near zero instead of
+// leaving up to a TTL's worth of every intermediate the flow ever produced.
+// runFlow creates one per outermost run, threads it into every node's ctx, and
+// sweeps it in a finally. (Deleting the source is safe for the hardlink/copy
+// import methods the flow uses — the library path keeps its own inode/data. A
+// `symlink` import would be broken by this; the flow does not use it.)
+export interface ScratchRegistry {
+  /** Note a file this run wrote to scratch, to be removed when the run ends. */
+  register(p: string): void
+  /** Remove every registered file (best-effort); returns what was freed. */
+  cleanup(): { removed: number; freedBytes: number }
+}
+
+export function createScratchRegistry(): ScratchRegistry {
+  const files = new Set<string>()
+  return {
+    register(p) {
+      if (p) files.add(p)
+    },
+    cleanup() {
+      let removed = 0
+      let freedBytes = 0
+      for (const p of files) {
+        try {
+          const size = fs.statSync(p).size
+          fs.rmSync(p, { force: true })
+          removed++
+          freedBytes += size
+        } catch {
+          // already gone (e.g. moved into the library) or held open — skip
+        }
+      }
+      files.clear()
+      return { removed, freedBytes }
+    },
+  }
 }
 
 export interface NodeImpl {
@@ -3959,11 +4007,27 @@ export function assertScratchVolumeSafe(minGiB = cfgNum('WORK_MIN_GIB', 10)): vo
 
 // The library-import nodes (extract-subs, mux-tracks, …) drop intermediate
 // files — extracted subs, fonts, muxed MKVs — under DATA_DIR/work. Nothing ever
-// removed them, so on an unbounded local-path PVC they accumulated to 16GB,
-// filled the node's disk, and kubelet evicted prod (an outage). Prune entries
-// older than WORK_TTL_HOURS (default 24h) so scratch is self-limiting. The age
-// cutoff means an in-progress job (touched within the window) is never touched.
-export function pruneWorkDir(ttlHours = cfgNum('WORK_TTL_HOURS', 24)): { removed: number; freedMB: number } {
+// removed them, so on an unbounded local-path PVC they accumulated and filled
+// the node's disk, and kubelet evicted prod (an outage — a ~40G scratch runaway
+// even evicted a *different* app's DB, boophost/link#74).
+//
+// Two independent bounds, because either alone has a hole:
+//  1. Age — remove entries older than WORK_TTL_HOURS (default 24h). Keeps
+//     scratch self-limiting in steady state; the age cutoff means an in-progress
+//     job (touched within the window) is never touched.
+//  2. Space — after the age pass, if what remains still exceeds WORK_MAX_GIB
+//     (default 40), evict oldest-first until back under the ceiling. This is the
+//     part age *can't* do: the outage was 17 same-day .trimmed.mkv files, all
+//     younger than the TTL, so the age pass correctly skipped every one while
+//     the disk filled. A hard space ceiling stops that burst.
+//
+// The steady-state guard is really the per-run scratch cleanup (ScratchRegistry)
+// + the per-write free-space check; this sweep is the backstop for orphans a
+// crash left behind and for bursts between runs.
+export function pruneWorkDir(
+  ttlHours = cfgNum('WORK_TTL_HOURS', 24),
+  maxGiB = cfgNum('WORK_MAX_GIB', 40),
+): { removed: number; freedMB: number } {
   const workDir = path.join(WORK_DIR(), 'work')
   const cutoff = Date.now() - ttlHours * 3600_000
   let removed = 0
@@ -3974,14 +4038,20 @@ export function pruneWorkDir(ttlHours = cfgNum('WORK_TTL_HOURS', 24)): { removed
   } catch {
     return { removed: 0, freedMB: 0 } // no work dir yet
   }
+  // Pass 1 (age): drop entries whose newest write is past the TTL. Survivors
+  // carry their size + newest mtime forward so the space pass can rank them.
+  const survivors: { p: string; size: number; newest: number }[] = []
   for (const ent of entries) {
     const p = path.join(workDir, ent.name)
     try {
       // Use the *newest* mtime in the subtree so a dir with a recent write is
       // kept even if its own mtime is old (a job actively writing into it).
       const newest = newestMtime(p)
-      if (newest >= cutoff) continue
       const size = dirSize(p)
+      if (newest >= cutoff) {
+        survivors.push({ p, size, newest })
+        continue
+      }
       fs.rmSync(p, { recursive: true, force: true })
       removed++
       freedBytes += size
@@ -3989,10 +4059,91 @@ export function pruneWorkDir(ttlHours = cfgNum('WORK_TTL_HOURS', 24)): { removed
       // best-effort; a file held open or a race just gets skipped this pass
     }
   }
+  // Pass 2 (space): if the survivors still exceed the ceiling, evict
+  // oldest-first (newest mtimes — likely an active job — go last) until under.
+  const maxBytes = maxGiB * 2 ** 30
+  let liveBytes = survivors.reduce((n, s) => n + s.size, 0)
+  if (maxGiB > 0 && liveBytes > maxBytes) {
+    survivors.sort((a, b) => a.newest - b.newest)
+    for (const s of survivors) {
+      if (liveBytes <= maxBytes) break
+      try {
+        fs.rmSync(s.p, { recursive: true, force: true })
+        removed++
+        freedBytes += s.size
+        liveBytes -= s.size
+      } catch {
+        // held open / race — skip; still counts toward liveBytes so we don't
+        // over-evict trying to reclaim a file we can't remove
+        liveBytes -= s.size
+      }
+    }
+    console.warn(
+      `[work-prune] scratch over ${maxGiB}Gi ceiling — evicted oldest-first down to ` +
+        `~${Math.round(liveBytes / 2 ** 30)}Gi (raise WORK_MAX_GIB if this is legitimate load)`,
+    )
+  }
   if (removed > 0) {
     console.log(`[work-prune] removed ${removed} stale entries (~${Math.round(freedBytes / 1e6)}MB) from ${workDir}`)
   }
   return { removed, freedMB: Math.round(freedBytes / 1e6) }
+}
+
+// Refuse to write a GB-sized intermediate when the scratch volume can't hold it,
+// rather than filling the disk and evicting the pod (the failure this whole
+// module guards against). `needBytes` is estimated from the source size —
+// stream-copy output is ~the source size — plus a safety margin. Throws a clear
+// error the calling node turns into a per-item failure (routes the item to its
+// pass-through output with a note) instead of a silent disk-fill.
+function assertScratchFreeSpace(dir: string, needBytes: number): void {
+  let free: number
+  try {
+    // stat needs an existing path; the nodes mkdir `dir` before calling this.
+    const st = fs.statfsSync(dir)
+    free = st.bavail * st.bsize
+  } catch {
+    return // can't stat (unusual FS) — don't block; the ceiling/pruner backstop
+  }
+  const margin = 512 * 2 ** 20 // 512MiB headroom over the estimate
+  if (free < needBytes + margin) {
+    throw new Error(
+      `insufficient free space on scratch volume "${dir}": need ~${(needBytes / 2 ** 30).toFixed(1)}GiB ` +
+        `(+512MiB margin) but only ${(free / 2 ** 30).toFixed(1)}GiB free — refusing to write and fill the disk`,
+    )
+  }
+}
+
+// Best-effort current size of the scratch work dir, for a growth-visibility note
+// in the activity feed. Returns null when there's no work dir yet.
+function workDirUsageGiB(): number | null {
+  const workDir = path.join(WORK_DIR(), 'work')
+  try {
+    fs.accessSync(workDir)
+  } catch {
+    return null
+  }
+  return dirSize(workDir) / 2 ** 30
+}
+
+// Push a work-dir usage line into the run's activity feed so scratch growth is
+// visible before it becomes a disk-fill. Best-effort; never throws.
+function noteScratchUsage(ctx: RunContext): void {
+  try {
+    const gib = workDirUsageGiB()
+    if (gib != null) ctx.notes.push(`scratch work-dir now ~${gib.toFixed(1)}GiB (cleaned up when the run ends)`)
+  } catch {
+    /* visibility only — ignore */
+  }
+}
+
+// Source-file size for the free-space estimate; 0 if it can't be stat'd (the
+// guard then only enforces its margin, which is the safe direction).
+function safeStatSize(file: string): number {
+  try {
+    return fs.statSync(file).size
+  } catch {
+    return 0
+  }
 }
 
 function newestMtime(p: string): number {
@@ -4815,7 +4966,15 @@ const muxTracks: NodeImpl = {
             fresh = outM >= fs.statSync(primary).mtimeMs && outM >= fs.statSync(donor).mtimeMs
           } catch { /* no output yet */ }
           if (fresh) ctx.notes.push(`mux up-to-date, reusing ${path.basename(outPath)}`)
-          else await execFileP('ffmpeg', args, { timeout: 600_000, maxBuffer: 8 * 1024 * 1024 })
+          else {
+            // Output ≈ primary + the one appended donor track; require the
+            // primary's size (+margin) free before writing to avoid a disk-fill.
+            assertScratchFreeSpace(outDir, safeStatSize(primary))
+            await execFileP('ffmpeg', args, { timeout: 600_000, maxBuffer: 8 * 1024 * 1024 })
+          }
+          // Own the intermediate: redundant once library-import places it, so
+          // the run sweeps it whether it succeeds or fails.
+          ctx.scratch?.register(outPath)
         }
         muxed.push({
           ...item,
@@ -4835,6 +4994,7 @@ const muxTracks: NodeImpl = {
         ? `dry run — would mux ${muxed.length} file(s), ${skipped.length} skipped`
         : `muxed ${muxed.length} file(s), ${skipped.length} skipped`,
     )
+    if (!ctx.dryRun && muxed.length > 0) noteScratchUsage(ctx)
     return { muxed, skipped }
   },
 }
@@ -4905,10 +5065,16 @@ const trimAudioTracks: NodeImpl = {
           continue
         }
         fs.mkdirSync(outDir, { recursive: true })
+        // Stream copy drops tracks, so the output is ≤ the source; require that
+        // much free before writing rather than filling the disk.
+        assertScratchFreeSpace(outDir, safeStatSize(file))
         const args = ['-y', '-v', 'error', '-i', file, '-map', '0']
         for (const s of drop) args.push('-map', `-0:${s.index}`)
         args.push('-c', 'copy', dest)
         await execFileP('ffmpeg', args, { timeout: 300_000 })
+        // Own the intermediate: it's redundant once library-import places it, so
+        // the run sweeps it whether it succeeds or fails.
+        ctx.scratch?.register(dest)
         trimmed.push({
           ...item,
           [fileField]: dest,
@@ -4924,6 +5090,7 @@ const trimAudioTracks: NodeImpl = {
         ? `dry run — would trim ${trimmed.length} file(s), ${unchanged.length} already clean`
         : `trimmed ${trimmed.length} file(s), ${unchanged.length} already clean`,
     )
+    if (!ctx.dryRun && trimmed.length > 0) noteScratchUsage(ctx)
     return { trimmed, unchanged }
   },
 }
@@ -5477,93 +5644,6 @@ async function findSiblingEpisodeFile(destDir: string, marker: string, excludeBa
   return null
 }
 
-/**
- * Two imports of the same show can render different folder names: `{show}
- * ({production_year})` carries the *cour's* year onto a *franchise* folder, so
- * Slime S1 wants "… Slime (2018)" and S4 wants "… Slime (2026)" — and when the
- * metadata hasn't resolved, `sanitizeSegments` drops the empty "()" and yields a
- * third variant. `Season {season:2}` likewise renders "Season 04" where an older
- * import wrote "Season 4". Normalising those away lets us reuse the directory
- * that already holds the show instead of splitting it in two.
- */
-function normalizeDirName(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/\s*\((?:19|20)\d{2}\)\s*$/, '')
-      // Punctuation is the other way these names drift, and it is the way that
-      // actually bit us. Our template renders a MAL title ("ReZERO -Starting
-      // Life in Another World"); the folder already on disk came from Sonarr via
-      // TVDB ("Re - ZERO, Starting Life in Another World"). Same show, same
-      // words, different dashes and commas — so the year/padding rules above
-      // both matched and the twin got created anyway. Fold punctuation to
-      // spaces, then drop spaces entirely, because the disagreement is often
-      // *inside* a word ("ReZERO" vs "Re - ZERO").
-      .replace(/[^a-z0-9]+/g, ' ')
-      .trim()
-      .replace(/^season\s*0*(\d+)$/, 'season $1')
-      .replace(/\s+/g, '')
-  )
-}
-
-/** The directory to use for one templated segment: an existing directory that
- * differs only by a `(year)` suffix or season padding, else `wanted` itself.
- *
- * Note we deliberately do NOT short-circuit on `existsSync(wanted)`: once a
- * `… (2026)` twin exists alongside the legacy `…` folder, returning the exact
- * templated name would keep every import landing in the twin, and Jellyfin
- * indexes it as a second, separate (and non-Public) series — the episodes never
- * surface on the portal, so the chase sits at "importing" forever. Always run
- * the normalised match and pick the canonical twin so both folders converge. */
-async function resolveDirSegment(parent: string, wanted: string): Promise<string> {
-  let entries: fs.Dirent[]
-  try {
-    entries = await fsp.readdir(parent, { withFileTypes: true })
-  } catch {
-    return wanted
-  }
-  const target = normalizeDirName(wanted)
-  const matches = entries
-    .filter((e) => e.isDirectory() && normalizeDirName(e.name) === target)
-    .map((e) => e.name)
-    .sort()
-  if (matches.length <= 1) return matches[0] ?? wanted
-  // A duplicate pair already exists, so a previous import split this show. Pick
-  // the directory that actually holds the library rather than trusting name
-  // order: the twin we minted has one season in it, the real folder has every
-  // season. Choosing by name here is what would keep every future import
-  // landing in the twin, leaving Jellyfin with two series and the chase stuck
-  // at "importing". Ties break by name so the result stays deterministic.
-  const weighed = await Promise.all(
-    matches.map(async (name) => {
-      let count = 0
-      try {
-        count = (await fsp.readdir(path.join(parent, name))).length
-      } catch {
-        count = 0
-      }
-      return { name, count }
-    }),
-  )
-  weighed.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
-  return weighed[0].name
-}
-
-/** Re-point a templated relative path at the directories already on disk. */
-async function resolveExistingPath(root: string, rel: string): Promise<string> {
-  const parts = rel.split('/')
-  const file = parts.pop() as string
-  let dir = root
-  const resolved: string[] = []
-  // Sequential by necessity: each segment is resolved inside the directory the
-  // previous one picked.
-  for (const seg of parts) {
-    const use = await resolveDirSegment(dir, seg)
-    resolved.push(use)
-    dir = path.join(dir, use)
-  }
-  return [...resolved, file].join('/')
-}
 
 const libraryImport: NodeImpl = {
   spec: {
@@ -6361,6 +6441,10 @@ const subflow: NodeImpl = {
       },
       qualifyId: (id) => (ctx.nodeId ? `${ctx.nodeId}/${id}` : id),
       hooks: ctx.hooks,
+      // Share the parent's scratch registry so any GB-sized intermediates this
+      // subflow writes are swept by the outermost run (after the parent has
+      // consumed the subflow's outputs), not prematurely when it returns.
+      scratch: ctx.scratch,
       // This flow's own graph may itself contain flow.subflow nodes
       // referencing further published components — resolve those too so
       // nested composites of composites validate correctly.

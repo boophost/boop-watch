@@ -2,7 +2,7 @@
 /**
  * Autonomous QA agent for a feature PR's preview environment.
  *
- *   node scripts/qa-agent/run.mjs <prNumber> [--dry-run]
+ *   node scripts/qa-agent/run.mjs <prNumber> [--dry-run|--print-prompt]
  *
  * Reads the PR's `## Test plan`, drives each item against the preview env
  * (`BASE_URL`) with a minted admin token, and — for each item the agent verifies
@@ -18,6 +18,10 @@
  *   JWT_SECRET         mints the admin token (server jwt.verify fallback)
  *   QA_ADMIN_EMAIL     admin email, must be in the preview's ADMIN_EMAILS
  *                      (default ethanwhi@gmail.com)
+ *   SUPABASE_SERVICE_ROLE_KEY  mints a REAL /manage browser session. Without it
+ *                      the agent can only reach /api/*, and every /manage UI item
+ *                      degrades to `skip` — see supabase-session.mjs for why the
+ *                      JWT above cannot be used for the browser (issue #293).
  *   QA_PLAYWRIGHT=1    allow the Playwright MCP for UI checks (optional)
  *   CLAUDE_CODE_OAUTH_TOKEN  subscription auth for the `claude` CLI (from
  *                      `claude setup-token`). Add CLAUDE_CODE_OAUTH_TOKEN_2..N
@@ -37,9 +41,10 @@ import { createHmac } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CHECKBOX_RE } from '../lib/promotion-checklist.mjs'
 import { filterCredentials, areAllCooling, getEarliestReset, recordCooldown, credentialPool } from './cooldown.mjs'
+import { trySupabaseSession } from './supabase-session.mjs'
 import { ghApi } from './gh.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -192,19 +197,35 @@ function kubeNote(pr) {
   ].join('\n')
 }
 
-function buildPrompt({ baseUrl, token, prTitle, changedFiles, items, pr }) {
+// Exported for testing: the prompt is the whole contract with the agent, and a
+// mis-rendered browser/session note fails silently (the agent just skips things)
+// rather than erroring, so being able to assert on it matters.
+export function buildPrompt({ baseUrl, token, prTitle, changedFiles, items, pr, manageSession, forceBrowser }) {
   const template = readFileSync(join(HERE, 'prompt.md'), 'utf8')
-  const playwrightNote = browserWorks()
+  const playwrightNote = (forceBrowser ?? browserWorks())
     ? [
         'A real browser is available via the Playwright MCP (`mcp__playwright__*`) —',
         '  **use it for any item about rendering, clicking, menus, dialogs, or layout**; those are',
         '  client-rendered (React SPA), so an HTTP call cannot prove them. Navigate to',
         `  \`${baseUrl}\`, interact, and take a snapshot/screenshot as evidence.`,
         '  The public portal (`/`, `/series/:id`, `/watch/:id`, `/schedule`) needs no login.',
-        '  `/manage` is behind Supabase auth: seed a session before navigating, e.g.',
-        '  `mcp__playwright__browser_evaluate` with',
-        "  `() => localStorage.setItem('sb-<ref>-auth-token', JSON.stringify({access_token:'<TOKEN>',token_type:'bearer',expires_at:9999999999,refresh_token:'x',user:{id:'qa',email:'qa@local'}}))`",
-        '  then reload. If a UI check genuinely cannot be driven, say exactly what blocked it.',
+        manageSession
+          ? [
+              '  `/manage` is behind Supabase auth and a **real session has been minted for you**.',
+              '  localStorage is per-origin, so the order matters — do exactly this:',
+              `  1. \`browser_navigate\` to \`${baseUrl}/\` (loads the origin; you will be logged out)`,
+              '  2. `browser_evaluate` with this EXACT function (a genuine session — do not edit or shorten it):',
+              '',
+              `     () => { localStorage.setItem(${JSON.stringify(manageSession.key)}, ${JSON.stringify(JSON.stringify(manageSession.session))}); }`,
+              '',
+              `  3. \`browser_navigate\` to the \`/manage\` page you want (e.g. \`${baseUrl}/manage\`)`,
+              '',
+              '  You should land on the admin UI, not a login form. Seeding before step 1 writes to',
+              '  about:blank and silently does nothing. If you still see a login form after step 3,',
+              '  say so in the evidence — never fall back to HTTP to pass a UI item.',
+            ].join('\n')
+          : '  `/manage` could not be given a session on this run, so mark `/manage` UI items `skip` and say the session was unavailable.',
+        '  If a UI check genuinely cannot be driven, say exactly what blocked it.',
       ].join('\n')
     : 'No browser is available — verify via HTTP; mark genuinely UI-only items `skip`.'
   return template
@@ -294,10 +315,47 @@ function runAgent(prompt, cred) {
     if (err instanceof RateLimitError) throw err
     result = raw // some versions print the text directly
   }
+  return parseVerdicts(result)
+}
+
+// Pull the verdict(s) out of the agent's final message. The model is asked for
+// one JSON object per line inside a ```json block (prompt.md), which makes
+// partial recovery trivial — a single malformed line (an unescaped quote or
+// stray newline in an `evidence` string) no longer sinks the whole run. We still
+// accept the older `{"verdicts":[...]}` / bare-array shapes. Returns
+// `{ verdicts, unreadable }`: `unreadable` is a tail of the output when nothing
+// at all could be salvaged, so the caller can report instead of crashing.
+function parseVerdicts(result) {
+  const tail = result.slice(-800).trim()
   const blocks = [...result.matchAll(/```json\s*([\s\S]*?)```/g)]
-  if (!blocks.length) throw new Error(`agent produced no json verdict block:\n${result.slice(-500)}`)
-  const parsed = JSON.parse(blocks[blocks.length - 1][1])
-  return parsed.verdicts ?? []
+  if (!blocks.length) return { verdicts: [], unreadable: tail }
+  const block = blocks[blocks.length - 1][1].trim()
+
+  const isVerdict = (v) => v && typeof v === 'object' && typeof v.index === 'number'
+
+  // Whole-block parse first — handles {"verdicts":[...]}, a bare [...] array, or
+  // a single {...} object. JSONL (the format we now ask for) fails here and
+  // falls through to the line-by-line salvage below.
+  try {
+    const whole = JSON.parse(block)
+    const verdicts = Array.isArray(whole) ? whole : (whole.verdicts ?? [whole])
+    if (Array.isArray(verdicts) && verdicts.some(isVerdict)) {
+      return { verdicts: verdicts.filter(isVerdict), unreadable: null }
+    }
+  } catch { /* fall through to line-by-line salvage */ }
+
+  // Salvage line-by-line: keep every line that parses to a verdict object, drop
+  // the rest. One stray line no longer discards the good ones.
+  const verdicts = []
+  for (const line of block.split(/\r?\n/)) {
+    const s = line.trim().replace(/,\s*$/, '') // tolerate trailing array commas
+    if (!s || '{}[]'.includes(s)) continue
+    try {
+      const obj = JSON.parse(s)
+      if (isVerdict(obj)) verdicts.push(obj)
+    } catch { /* skip this unparseable line */ }
+  }
+  return verdicts.length ? { verdicts, unreadable: null } : { verdicts: [], unreadable: tail }
 }
 
 class RateLimitError extends Error {
@@ -346,6 +404,29 @@ function buildComment(items, verdicts, baseUrl) {
   ].join('\n')
 }
 
+// Posted when the agent ran but its verdict block couldn't be parsed at all.
+// Better than a silent exit-1: the human sees QA ran, that nothing was ticked,
+// and the tail of the raw output to judge from.
+function buildUnreadableComment(items, baseUrl, tail) {
+  const fenced = tail.replace(/```/g, '`​``') // neutralize fences in the tail
+  return [
+    BODY_MARKER,
+    '### 🤖 QA agent — verdict unreadable',
+    '',
+    `Ran against the preview env (${baseUrl}) but did not emit a parseable JSON verdict block, so none of the ${items.length} item(s) were checked off. A human should review the run and the output below.`,
+    '',
+    '<details><summary>Output tail</summary>',
+    '',
+    '```',
+    fenced,
+    '```',
+    '',
+    '</details>',
+    '',
+    '_Automated QA — not a merge approval._',
+  ].join('\n')
+}
+
 async function upsertComment(pr, body) {
   const comments = await ghApi('GET', `/repos/${REPO}/issues/${pr}/comments?per_page=100`)
   const existing = comments.find((c) => c.body?.includes(BODY_MARKER))
@@ -361,6 +442,10 @@ async function upsertComment(pr, body) {
 async function main() {
   const args = process.argv.slice(2)
   const dryRun = args.includes('--dry-run')
+  // Print the assembled prompt and stop. The prompt is what the agent actually
+  // acts on, and a mis-rendered browser/session note fails *silently* — the
+  // agent just skips things. Being able to look at it is the cheapest guard.
+  const printPrompt = args.includes('--print-prompt')
   const pr = Number(args.find((a) => /^\d+$/.test(a)))
   const baseUrl = (process.env.BASE_URL || '').replace(/\/$/, '')
   if (!pr || !baseUrl) {
@@ -388,6 +473,25 @@ async function main() {
   }
   const changedFiles = files.map((f) => `- \`${f.filename}\``).join('\n')
 
+  // Mint a real /manage session up front. Best-effort by design: losing it costs
+  // the /manage items, not the whole run.
+  const manageSession = dryRun
+    ? null
+    : await trySupabaseSession({
+        baseUrl,
+        serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+        email: (process.env.QA_ADMIN_EMAIL || process.env.ADMIN_EMAILS || '').split(',')[0].trim(),
+      })
+  if (manageSession) console.log(`/manage session minted for ${manageSession.session.user?.email ?? 'admin'} (${manageSession.key})`)
+
+  // Before the credential gate on purpose: rendering the prompt needs no Claude
+  // account, and the gate would otherwise make this unusable exactly when you
+  // most want to look at the prompt.
+  if (printPrompt) {
+    console.log(buildPrompt({ baseUrl, token: '<redacted>', prTitle: prData.title, changedFiles, items, pr, manageSession }))
+    return
+  }
+
   // Fail fast on a missing credential rather than letting the CLI hang until the
   // timeout — surface the config gap on the PR so a human can fix it.
   const allCreds = credentialPool()
@@ -399,11 +503,14 @@ async function main() {
   if (!dryRun) console.log(`Claude credentials available: ${creds.map((c) => c.name).join(', ')}`)
 
   let verdicts
+  let unreadable = null
   if (dryRun) {
     verdicts = items.map((_, i) => ({ index: i, status: 'pass', evidence: 'dry-run: not actually verified' }))
   } else {
     try {
-      verdicts = runAgentWithFailover(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items, pr }), creds)
+      const res = runAgentWithFailover(buildPrompt({ baseUrl, token: mintToken(), prTitle: prData.title, changedFiles, items, pr, manageSession }), creds)
+      verdicts = res.verdicts
+      unreadable = res.unreadable
     } catch (err) {
       // Every credential is capped — nothing was verified, but that's not a QA
       // failure either. Say so on the PR, tick nothing, and exit clean so the
@@ -415,6 +522,15 @@ async function main() {
       }
       throw err
     }
+  }
+
+  // The agent ran but emitted no parseable verdict block at all (malformed JSON,
+  // or none emitted). Don't crash — post what we have so the run isn't silently
+  // lost to a red X, and leave every item unchecked for a human to review.
+  if (unreadable && !verdicts.length) {
+    await upsertComment(pr, buildUnreadableComment(items, baseUrl, unreadable))
+    console.log('QA ran but produced no parseable verdicts — posted the output tail for a human.')
+    return
   }
 
   const passedIdx = verdicts.filter((v) => v.status === 'pass').map((v) => v.index)
@@ -448,6 +564,9 @@ async function refreshPromotion() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, matching gh.mjs: `file://` + a Windows path yields two slashes
+// where Node emits three, so the entry guard never fires and the script exits 0
+// having done nothing — which reads exactly like a silent success.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => { console.error(String(err?.message || err)); process.exit(1) })
 }

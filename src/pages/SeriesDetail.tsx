@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Ban,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Circle,
   ExternalLink,
   Loader2,
-  Play,
   Search,
   Trash2,
 } from 'lucide-react'
@@ -16,6 +16,15 @@ import { Button } from '@/components/ui/button'
 import type { SeriesEntry } from '@/components/SeriesList'
 import { ArtPicker } from '@/components/ArtPicker'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
+import { formatBytes } from '@/lib/format'
+import { EpisodeRow } from '@/components/series/EpisodeRow'
+import { AttentionBand, SeasonSummary } from '@/components/series/SeasonSummary'
+import { SeasonSwitch } from '@/components/series/SeasonSwitch'
+import {
+  matchesFilter,
+  type EpisodeFilter,
+  type SeriesStatus,
+} from '@/lib/seriesStatus'
 import {
   adminChaseChipLabel,
   formatAirShort,
@@ -70,41 +79,7 @@ function mediaKey(
   return season != null ? `${season}:${episode}` : String(episode)
 }
 
-// The best torrent covering a given episode: a batch (covers all, or this
-// season when the release is season-tagged) or a single-episode release
-// matching that number; most-complete wins.
-function episodeDownload(
-  epNum: number | null,
-  torrents: SeriesDownload[],
-  season?: number | null,
-): SeriesDownload | null {
-  if (epNum == null) return null
-  const covering = torrents.filter((t) => {
-    if (season != null && t.season != null && t.season !== season) return false
-    return t.isBatch || t.episode === epNum
-  })
-  return covering.sort((a, b) => b.progress - a.progress)[0] ?? null
-}
 
-function formatEpNum(ep: { season?: number | null; episode: number | null }): string {
-  if (ep.episode == null) return '—'
-  if (ep.season != null) {
-    return `S${String(ep.season).padStart(2, '0')}E${String(ep.episode).padStart(2, '0')}`
-  }
-  return String(ep.episode)
-}
-
-function formatBytes(n: number): string {
-  if (!n || n < 0) return '—'
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let v = n
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
-}
 
 function isSeedingState(state: string): boolean {
   return state.includes('UP') || state === 'uploading' || state === 'stalledUP'
@@ -124,25 +99,6 @@ function stateLabel(state: string, progress: number): { text: string; tone: stri
   if (state === 'error' || state === 'missingFiles')
     return { text: 'Error', tone: 'text-destructive' }
   return { text: state, tone: 'text-muted-foreground' }
-}
-
-// Episode-row Download column: "Complete · seeding" only when the ep is on site
-// (pipeline ready). A finished torrent that isn't imported yet is "Downloaded".
-function episodeDownloadLabel(
-  state: string,
-  progress: number,
-  opts: { inLibrary: boolean; onSite: boolean },
-): { text: string; tone: string } {
-  if (progress < 1) return stateLabel(state, progress)
-  if (opts.onSite) {
-    if (isSeedingState(state)) return { text: 'Complete · seeding', tone: 'text-emerald-500' }
-    return { text: 'Complete', tone: 'text-emerald-500' }
-  }
-  if (opts.inLibrary) {
-    return { text: 'Downloaded · in library', tone: 'text-sky-500' }
-  }
-  if (isSeedingState(state)) return { text: 'Downloaded · seeding', tone: 'text-sky-500' }
-  return { text: 'Downloaded', tone: 'text-sky-500' }
 }
 
 interface MalImages {
@@ -241,16 +197,6 @@ function MediaCell({ m }: { m: EpisodeMedia | undefined }) {
   )
 }
 
-function formatAired(iso: string | null): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso.slice(0, 10)
-  return d.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
-}
 
 type StageTone = 'done' | 'active' | 'pending' | 'idle'
 interface Stage {
@@ -625,6 +571,33 @@ export default function SeriesDetail() {
   // The film's single library file, whatever key it landed under.
   const movieMedia = isMovie ? [...libMedia.values()][0] : undefined
 
+  const [status, setStatus] = useState<SeriesStatus | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [searchParams, setSearchParams] = useSearchParams()
+  // URL-backed so a filtered view is linkable and survives a reload — same
+  // reasoning as the Library page's section tabs.
+  const filter = (searchParams.get('show') ?? 'all') as EpisodeFilter
+  const setFilter = useCallback(
+    (f: EpisodeFilter) => {
+      const next = new URLSearchParams(searchParams)
+      if (f === 'all') next.delete('show')
+      else next.set('show', f)
+      setSearchParams(next, { replace: true })
+    },
+    [searchParams, setSearchParams],
+  )
+
+  const loadStatus = useCallback(async () => {
+    if (!Number.isFinite(id)) return
+    try {
+      const r = await fetchAuth(`/api/series/${id}/status`)
+      if (!r.ok) return
+      setStatus((await r.json()) as SeriesStatus)
+    } catch {
+      /* leave prior state */
+    }
+  }, [id])
+
   const loadDownloads = useCallback(async () => {
     if (!Number.isFinite(id)) return
     try {
@@ -862,11 +835,19 @@ export default function SeriesDetail() {
   }, [series, loadLibrary])
 
   useEffect(() => {
+    if (!series) return
+    void loadStatus()
+  }, [series, loadStatus])
+
+  useEffect(() => {
     const active = dl?.torrents.some((t) => t.progress < 1 && !t.state.includes('paused'))
     if (!active) return
-    const h = setInterval(() => void loadDownloads(), 5000)
+    const h = setInterval(() => {
+      void loadDownloads()
+      void loadStatus()
+    }, 5000)
     return () => clearInterval(h)
-  }, [dl, loadDownloads])
+  }, [dl, loadDownloads, loadStatus])
 
   if (detailLoading || !series) {
     return (
@@ -875,6 +856,17 @@ export default function SeriesDetail() {
       </div>
     )
   }
+
+  // Once the episode rows carry their own download, this section is only
+  // useful for what they do *not* cover — a season batch, a mislabelled
+  // release, a leftover. That is where orphans hide, so it stays visible.
+  const unmatchedOnly = !!status && !isMovie
+  const claimedHashes = new Set(
+    (status?.episodes ?? []).map((e) => e.torrent?.hash).filter(Boolean) as string[],
+  )
+  const shownTorrents = unmatchedOnly
+    ? (dl?.torrents ?? []).filter((t) => !claimedHashes.has(t.hash.toLowerCase()))
+    : (dl?.torrents ?? [])
 
   const img = heroImage(mal, series)
   const displayTitle = mal?.title ?? series.title
@@ -902,7 +894,7 @@ export default function SeriesDetail() {
         </h1>
       </header>
 
-      <main className="mx-auto max-w-5xl space-y-10 p-4 md:p-6">
+      <main className="mx-auto max-w-7xl space-y-10 p-4 md:p-6">
         <section className="flex flex-col gap-6 md:flex-row md:gap-8">
           <div className="mx-auto w-48 shrink-0 self-start overflow-hidden rounded-lg border border-border bg-muted md:mx-0 md:w-56">
             {img ? (
@@ -1015,7 +1007,10 @@ export default function SeriesDetail() {
             {synopsis ? (
               <div className="pt-2">
                 <h2 className="mb-2 text-sm font-medium text-foreground">Synopsis</h2>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
+                {/* Capped independently of the page: the wider container is for the
+                    episode table, and a synopsis set to the full 7xl width would run
+                    to ~200 characters a line, which is harder to read, not easier. */}
+                <p className="max-w-prose whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
                   {synopsis.replace(/\r\n/g, '\n')}
                 </p>
               </div>
@@ -1024,124 +1019,64 @@ export default function SeriesDetail() {
         </section>
 
         <div className="space-y-2">
-          <PipelineStrip
-            expected={isMovie ? 1 : (dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null)}
-            libCount={libMedia.size}
-            torrents={dl?.torrents ?? []}
-            onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
-            qbitConfigured={dl?.qbitConfigured ?? false}
-          />
+          {/* Quiet unless something is actually wrong — the page stays a content
+              page, but a split library or a stalled want no longer hides. */}
+          {status ? (
+            <AttentionBand
+              episodes={status.episodes}
+              libraryDirs={status.libraryDirs}
+              health={status.health}
+            />
+          ) : null}
+          {/* Optional-chained on purpose: during a rollout a browser holding new
+              JS can be served by a pod that predates this field, and reading
+              `.length` off undefined takes the whole page down rather than
+              degrading to "no switcher". */}
+          {status?.siblings?.length ? <SeasonSwitch siblings={status.siblings} /> : null}
+          {!isMovie && status ? (
+            <SeasonSummary
+              episodes={status.episodes}
+              expected={dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null}
+              filter={filter}
+              onFilter={setFilter}
+            />
+          ) : (
+            <PipelineStrip
+              expected={isMovie ? 1 : (dl?.expectedForPipeline ?? mal?.episodes ?? series.episodes ?? null)}
+              libCount={libMedia.size}
+              torrents={dl?.torrents ?? []}
+              onSiteCount={dl ? Object.keys(dl.siteEpisodes).length : 0}
+              qbitConfigured={dl?.qbitConfigured ?? false}
+            />
+          )}
           {dl?.nextChase && dl.nextChase.state !== 'ready' ? (
             <EpisodeChasePanel chase={dl.nextChase} onWantAction={wantAction} />
           ) : null}
         </div>
 
-        {isAnime ? (
-          <div className="grid gap-6 lg:grid-cols-2">
-            <ArtPicker seriesId={id} kind="banner" />
-            <ArtPicker seriesId={id} kind="poster" />
-          </div>
-        ) : null}
-
-        <section>
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold">Downloads</h2>
-            <p className="text-xs text-muted-foreground">
-              qBittorrent sources — not the library files below.
-            </p>
-          </div>
-          {!dl ? (
-            <p className="text-sm text-muted-foreground">Loading downloads…</p>
-          ) : !dl.qbitConfigured ? (
-            <p className="text-sm text-muted-foreground">
-              qBittorrent isn’t configured, so download status is unavailable.
-            </p>
-          ) : dl.qbitError ? (
-            <p className="text-sm text-amber-600 dark:text-amber-500">
-              qBittorrent: {dl.qbitError}
-            </p>
-          ) : dl.torrents.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              {dl.qbitSkipped
-                ? 'All expected episodes are on site — qBittorrent not queried.'
-                : 'No active torrents.'}
-            </p>
-          ) : (
-            <ul className="space-y-3">
-              {dl.torrents.map((t) => {
-                const st = stateLabel(t.state, t.progress)
-                const busy = busyHash === t.hash
-                return (
-                  <li
-                    key={t.hash}
-                    className="rounded-lg border border-border bg-card p-3"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium" title={t.name}>
-                          {t.name}
-                        </p>
-                        <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                          <span className={st.tone}>{st.text}</span>
-                          <span>·</span>
-                          <span>{(t.progress * 100).toFixed(t.progress >= 1 ? 0 : 1)}%</span>
-                          <span>·</span>
-                          <span>{formatBytes(t.size)}</span>
-                          <span>·</span>
-                          <span>{t.numSeeds} seeds</span>
-                          <span>·</span>
-                          <span>{t.isBatch ? (t.season != null ? `S${t.season} batch` : 'Batch') : t.episode != null ? `Ep ${t.episode}` : 'Single'}</span>
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 gap-1">
-                        {isAnime ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 gap-1 px-2 text-amber-600 dark:text-amber-500"
-                          disabled={busy}
-                          title="Blacklist and remove this source, then search for a replacement release"
-                          onClick={() => void blacklistSource(t)}
-                        >
-                          <Ban className="size-3.5" />
-                          <span className="hidden sm:inline">
-                            {busy ? 'Working…' : 'Blacklist & replace'}
-                          </span>
-                        </Button>
-                        ) : null}
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 gap-1 px-2 text-destructive"
-                          disabled={busy}
-                          title="Remove this download and its files"
-                          onClick={() => void removeDownload(t.hash, true)}
-                        >
-                          <Trash2 className="size-3.5" />
-                          <span className="hidden sm:inline">Remove</span>
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                      <div
-                        className={`h-full rounded-full ${t.progress >= 1 ? 'bg-emerald-500' : 'bg-sky-500'}`}
-                        style={{ width: `${Math.round(t.progress * 100)}%` }}
-                      />
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-
-          {researchMsg ? (
-            <p className="mt-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-              {researchMsg}
-            </p>
-          ) : null}
-
+        {/* Mapping, season titles and artwork are set once and then rarely
+            touched, so they no longer sit between you and the episode list.
+            Closed by default; the disclosure remembers nothing on purpose —
+            the default view should be the same for everyone. */}
+        <section className="rounded-lg border border-border bg-card">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen((v) => !v)}
+            aria-expanded={settingsOpen}
+            className="flex w-full items-center gap-2 px-4 py-3 text-left"
+          >
+            {settingsOpen ? (
+              <ChevronDown className="size-4 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="size-4 text-muted-foreground" />
+            )}
+            <span className="text-sm font-medium">Series settings</span>
+            <span className="text-xs text-muted-foreground">
+              mapping{isAnime ? ', season titles, artwork' : ''}
+            </span>
+          </button>
+          {settingsOpen ? (
+            <div className="space-y-4 border-t border-border px-4 py-4">
           {/* Multi-season placement: which Jellyfin season this cour's episodes
               land in, and the offset added to each release's episode number.
               Anime only — it maps MAL cours onto TVDB seasons, and its PATCH
@@ -1230,6 +1165,121 @@ export default function SeriesDetail() {
           ) : null}
 
           {isAnime ? <SeasonTitlesPanel id={id} /> : null}
+              {isAnime ? (
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <ArtPicker seriesId={id} kind="banner" />
+                  <ArtPicker seriesId={id} kind="poster" />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+
+        <section>
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold">
+              {unmatchedOnly ? 'Unmatched downloads' : 'Downloads'}
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              {unmatchedOnly
+                ? 'qBittorrent sources this series claims but no episode does — batches, mislabelled releases, leftovers. Per-episode downloads live in the episode rows above.'
+                : 'qBittorrent sources — not the library files below.'}
+            </p>
+          </div>
+          {!dl ? (
+            <p className="text-sm text-muted-foreground">Loading downloads…</p>
+          ) : !dl.qbitConfigured ? (
+            <p className="text-sm text-muted-foreground">
+              qBittorrent isn’t configured, so download status is unavailable.
+            </p>
+          ) : dl.qbitError ? (
+            <p className="text-sm text-amber-600 dark:text-amber-500">
+              qBittorrent: {dl.qbitError}
+            </p>
+          ) : shownTorrents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {dl.qbitSkipped
+                ? 'All expected episodes are on site — qBittorrent not queried.'
+                : unmatchedOnly
+                  ? 'Every active torrent is accounted for by an episode above.'
+                  : 'No active torrents.'}
+            </p>
+          ) : (
+            <ul className="space-y-3">
+              {shownTorrents.map((t) => {
+                const st = stateLabel(t.state, t.progress)
+                const busy = busyHash === t.hash
+                return (
+                  <li
+                    key={t.hash}
+                    className="rounded-lg border border-border bg-card p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium" title={t.name}>
+                          {t.name}
+                        </p>
+                        <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                          <span className={st.tone}>{st.text}</span>
+                          <span>·</span>
+                          <span>{(t.progress * 100).toFixed(t.progress >= 1 ? 0 : 1)}%</span>
+                          <span>·</span>
+                          <span>{formatBytes(t.size)}</span>
+                          <span>·</span>
+                          <span>{t.numSeeds} seeds</span>
+                          <span>·</span>
+                          <span>{t.isBatch ? (t.season != null ? `S${t.season} batch` : 'Batch') : t.episode != null ? `Ep ${t.episode}` : 'Single'}</span>
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 gap-1">
+                        {isAnime ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1 px-2 text-amber-600 dark:text-amber-500"
+                          disabled={busy}
+                          title="Blacklist and remove this source, then search for a replacement release"
+                          onClick={() => void blacklistSource(t)}
+                        >
+                          <Ban className="size-3.5" />
+                          <span className="hidden sm:inline">
+                            {busy ? 'Working…' : 'Blacklist & replace'}
+                          </span>
+                        </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1 px-2 text-destructive"
+                          disabled={busy}
+                          title="Remove this download and its files"
+                          onClick={() => void removeDownload(t.hash, true)}
+                        >
+                          <Trash2 className="size-3.5" />
+                          <span className="hidden sm:inline">Remove</span>
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className={`h-full rounded-full ${t.progress >= 1 ? 'bg-emerald-500' : 'bg-sky-500'}`}
+                        style={{ width: `${Math.round(t.progress * 100)}%` }}
+                      />
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+
+          {researchMsg ? (
+            <p className="mt-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              {researchMsg}
+            </p>
+          ) : null}
+
 
           {dl && dl.blacklist.length > 0 ? (
             <div className="mt-4">
@@ -1294,191 +1344,49 @@ export default function SeriesDetail() {
             </p>
           ) : null}
 
-          <div className="hidden overflow-hidden rounded-lg border border-border md:block">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-border bg-muted/50">
-                <tr>
-                  <th className="w-20 px-3 py-2 font-medium">Ep</th>
-                  <th className="px-3 py-2 font-medium">Title</th>
-                  <th className="w-48 px-3 py-2 font-medium">Library file</th>
-                  <th className="w-28 px-3 py-2 font-medium">Aired</th>
-                  <th className="w-24 px-3 py-2 font-medium">On site</th>
-                  <th className="w-44 px-3 py-2 font-medium">Download</th>
-                  <th className="w-16 px-3 py-2 font-medium" />
-                </tr>
-              </thead>
-              <tbody>
-                {episodes.map((ep) => {
-                  const k = mediaKey(ep.season, ep.episode)
-                  const watchId = k ? dl?.siteEpisodes[k] : undefined
-                  const inLibrary = k != null && libMedia.has(k)
-                  return (
-                  <tr
-                    key={`${ep.season ?? 'x'}-${ep.episode ?? ep.title}`}
-                    className="border-b border-border last:border-b-0"
-                  >
-                    <td className="px-3 py-2 align-top whitespace-nowrap text-muted-foreground">
-                      {formatEpNum(ep)}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <span className={ep.title_pending ? 'text-muted-foreground' : 'font-medium'}>
-                        {ep.title}
-                      </span>
-                      {ep.title_pending ? (
-                        <span
-                          className="mt-1 block w-fit rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground"
-                          title="No source has published a title for this episode yet"
-                        >
-                          Untitled
-                        </span>
-                      ) : null}
-                      {ep.filler || ep.recap ? (
-                        <span className="mt-1 flex flex-wrap gap-1">
-                          {ep.filler ? (
-                            <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
-                              Filler
-                            </span>
-                          ) : null}
-                          {ep.recap ? (
-                            <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
-                              Recap
-                            </span>
-                          ) : null}
-                        </span>
-                      ) : null}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <MediaCell m={k ? libMedia.get(k) : undefined} />
-                    </td>
-                    <td className="px-3 py-2 align-top text-muted-foreground">
-                      {formatAired(ep.aired)}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      {watchId ? (
-                        <a
-                          href={`/watch/${watchId}`}
-                          className="inline-flex items-center gap-1 text-emerald-600 underline-offset-4 hover:underline dark:text-emerald-500"
-                        >
-                          <Play className="size-3" />
-                          Watch
-                        </a>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      {(() => {
-                        const t = episodeDownload(ep.episode, dl?.torrents ?? [], ep.season)
-                        if (!t) return <span className="text-muted-foreground">—</span>
-                        const st = episodeDownloadLabel(t.state, t.progress, {
-                          inLibrary,
-                          onSite: !!watchId,
-                        })
-                        return (
-                          <div className="min-w-0">
-                            <span className={`text-xs ${st.tone}`}>
-                              {t.progress >= 1 ? st.text : `${(t.progress * 100).toFixed(0)}%`}
-                            </span>
-                            {t.progress < 1 ? (
-                              <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
-                                <div
-                                  className="h-full rounded-full bg-sky-500"
-                                  style={{ width: `${Math.round(t.progress * 100)}%` }}
-                                />
-                              </div>
-                            ) : null}
-                          </div>
-                        )
-                      })()}
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <a
-                        href={ep.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
-                      >
-                        {isAnime ? 'MAL' : 'TMDB'}
-                        <ExternalLink className="size-3" />
-                      </a>
-                    </td>
-                  </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <ul className="space-y-3 md:hidden">
-            {episodes.map((ep) => {
-              const k = mediaKey(ep.season, ep.episode)
-              const watchId = k ? dl?.siteEpisodes[k] : undefined
-              return (
-              <li
-                key={`${ep.season ?? 'x'}-${ep.episode ?? ep.title}`}
-                className="rounded-lg border border-border bg-card p-3"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    {formatEpNum(ep)}
-                  </span>
-                  <a
-                    href={ep.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="shrink-0 text-xs text-primary"
-                  >
-                    {isAnime ? 'MAL' : 'TMDB'} ↗
-                  </a>
-                </div>
-                <p className={`mt-1 ${ep.title_pending ? 'text-muted-foreground' : 'font-medium'}`}>
-                  {ep.title}
-                </p>
-                {ep.title_pending ? (
-                  <span className="mt-1 inline-block rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
-                    Untitled
-                  </span>
-                ) : null}
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {formatAired(ep.aired)}
-                </p>
-                {k && libMedia.get(k) ? (
-                  <div className="mt-2">
-                    <MediaCell m={libMedia.get(k)} />
+          {/* One render path. This used to be a desktop <table> plus a
+              separate mobile card list, and they had already drifted — mobile
+              silently dropped the Filler/Recap badges and the progress bar. */}
+          {status ? (
+            (() => {
+              const shown = status.episodes.filter((e) => matchesFilter(e, filter))
+              const epMeta = new Map(episodes.filter((e) => e.episode != null).map((e) => [e.episode as number, e]))
+              if (shown.length === 0) {
+                return (
+                  <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border py-16 text-center">
+                    <p className="text-sm text-muted-foreground">
+                      No episodes match “{filter}”.
+                    </p>
+                    {filter !== 'all' ? (
+                      <Button variant="secondary" size="sm" onClick={() => setFilter('all')}>
+                        Show all episodes
+                      </Button>
+                    ) : null}
                   </div>
-                ) : null}
-                {(() => {
-                  const t = episodeDownload(ep.episode, dl?.torrents ?? [], ep.season)
-                  if (!t && !watchId) return null
-                  const inLibrary = k != null && libMedia.has(k)
-                  const st = t
-                    ? episodeDownloadLabel(t.state, t.progress, {
-                        inLibrary,
-                        onSite: !!watchId,
-                      })
-                    : null
-                  return (
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                      {watchId ? (
-                        <a
-                          href={`/watch/${watchId}`}
-                          className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-500"
-                        >
-                          <Play className="size-3" />
-                          Watch on site
-                        </a>
-                      ) : null}
-                      {t && st ? (
-                        <span className={st.tone}>
-                          {t.progress >= 1 ? st.text : `Downloading ${(t.progress * 100).toFixed(0)}%`}                        </span>
-                      ) : null}
-                    </div>
-                  )
-                })()}
-              </li>
+                )
+              }
+              return (
+                <div className="overflow-hidden rounded-lg border border-border">
+                  {shown.map((e) => (
+                    <EpisodeRow
+                      key={e.episode}
+                      ep={{ ...e, title: e.title ?? epMeta.get(e.episode)?.title ?? null,
+                            airedAt: e.airedAt ?? epMeta.get(e.episode)?.aired ?? null }}
+                      malUrl={epMeta.get(e.episode)?.url ?? null}
+                      onWantAction={wantAction}
+                      onRemoveTorrent={(hash) => void removeDownload(hash, false)}
+                      onBlacklist={(hash) => {
+                        const t = dl?.torrents.find((x) => x.hash === hash)
+                        if (t) void blacklistSource(t)
+                      }}
+                    />
+                  ))}
+                </div>
               )
-            })}
-          </ul>
+            })()
+          ) : (
+            <p className="text-sm text-muted-foreground">Loading episode status…</p>
+          )}
 
           {epLoading && episodes.length === 0 ? (
             <p className="mt-4 text-sm text-muted-foreground">Loading episodes…</p>
