@@ -96,6 +96,15 @@ export interface SeriesHealth {
   fulfilledWantsMissingFile: { want_id: number; episode: number | null; library_path: string | null }[]
 }
 
+export interface SeriesSibling {
+  id: number
+  title: string
+  season: number | null
+  episodeOffset: number
+  episodes: number | null
+  isSelf: boolean
+}
+
 export interface SeriesStatus {
   seriesId: number
   section: string
@@ -104,6 +113,8 @@ export interface SeriesStatus {
   episodeOffset: number
   episodes: EpisodeStatus[]
   libraryDirs: string[]
+  /** Optional: a server older than this field simply omits it. */
+  siblings?: SeriesSibling[]
   health: SeriesHealth | null
   unmatchedTorrents: {
     hash: string
@@ -196,4 +207,20 @@ export function summarizeIssues(episodes: EpisodeStatus[]): { code: EpisodeIssue
     }
   }
   return [...by.entries()].map(([code, eps]) => ({ code, episodes: eps.sort((a, b) => a - b) }))
+}
+
+/**
+ * A short label for a cour, for the season switcher.
+ *
+ * Titles are long and near-identical across cours ("Mushoku Tensei: Jobless
+ * Reincarnation Season 2 Part 2"), so the switcher shows the *shape* — season
+ * number and the episode range this cour occupies within it — and keeps the
+ * full title as a tooltip.
+ */
+export function siblingLabel(s: SeriesSibling): string {
+  const season = s.season != null ? `S${s.season}` : '—'
+  if (s.episodes == null) return season
+  const from = s.episodeOffset + 1
+  const to = s.episodeOffset + s.episodes
+  return from === 1 ? `${season} · 1-${to}` : `${season} · ${from}-${to}`
 }

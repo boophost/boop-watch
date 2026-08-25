@@ -22,7 +22,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import {
-  getSeriesById, getCachedEpisodes, listLibraryFiles, listWants,
+  getSeriesById, getCachedEpisodes, listLibraryFiles, listSeries, listWants,
   type LibraryFileRow, type SeriesRow, type WantRow, type TorrentRow,
 } from './db.js'
 import { getDb } from './db.js'
@@ -117,6 +117,23 @@ export interface EpisodeStatus {
   issues: EpisodeIssue[]
 }
 
+/**
+ * Another catalog row for the same show — a different cour or season.
+ *
+ * The catalog splits a show by cour (Mushoku Tensei is five rows across three
+ * TVDB seasons), and until now the only way from one to another was to go back
+ * to the catalog and search the title again. They are found by shared
+ * `tvdb_id`, which is exactly what the season mapping already means.
+ */
+export interface SeriesSibling {
+  id: number
+  title: string
+  season: number | null
+  episodeOffset: number
+  episodes: number | null
+  isSelf: boolean
+}
+
 export interface SeriesStatus {
   seriesId: number
   section: string
@@ -127,6 +144,8 @@ export interface SeriesStatus {
   /** Directories under the section library root that read as this series. More
    * than one means the library is split across folders. */
   libraryDirs: string[]
+  /** Every cour of this show, this one included, in broadcast order. */
+  siblings: SeriesSibling[]
   health: SeriesHealth | null
   /** Torrents for this series that map to no episode — where orphans hide. */
   unmatchedTorrents: SeriesDownload[]
@@ -202,6 +221,28 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
   const libRoot = sectionLibraryRoot((series.section ?? 'anime') as 'anime' | 'tv' | 'movies')
 
   const health = malId != null ? await seriesHealth(malId, { live: raw }) : null
+
+  // Sibling cours: same section, same tvdb_id. Sorted by season then offset,
+  // which is broadcast order — `added_at` (what listSeries returns) is the order
+  // someone happened to add them, which for a back-filled show is meaningless.
+  const siblings: SeriesSibling[] =
+    series.tvdb_id == null
+      ? []
+      : listSeries((series.section ?? 'anime') as 'anime' | 'tv' | 'movies')
+          .filter((r) => r.tvdb_id === series.tvdb_id)
+          .sort(
+            (a, b) =>
+              (a.tvdb_season ?? 0) - (b.tvdb_season ?? 0) ||
+              (a.episode_offset ?? 0) - (b.episode_offset ?? 0),
+          )
+          .map((r) => ({
+            id: r.id,
+            title: r.title,
+            season: r.tvdb_season ?? null,
+            episodeOffset: r.episode_offset ?? 0,
+            episodes: r.episodes ?? null,
+            isSelf: r.id === seriesId,
+          }))
 
   // Index every source by its own numbering, then read them through `episode`.
   const wantByEp = new Map<number, WantRow>()
@@ -424,6 +465,7 @@ export async function buildSeriesStatus(seriesId: number): Promise<SeriesStatus 
     episodeOffset: offset,
     episodes,
     libraryDirs,
+    siblings,
     health,
     unmatchedTorrents,
     qbitConfigured: configured,
