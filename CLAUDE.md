@@ -10,7 +10,7 @@ Guidance for AI agents (and humans) working in this repo. Read this before editi
    exposes only the titles in one Jellyfin collection ("Public"), holds the Jellyfin admin API key
    **server-side**, and proxies posters + HLS so the token never reaches the browser. Live at
    `watch.boopurno.es`.
-2. An **authenticated library manager** at `/manage` (JWT) — a Jikan/MyAnimeList metadata catalog
+2. An **authenticated library manager** at `/manage` (**Supabase** auth) — a Jikan/MyAnimeList metadata catalog
    stored in SQLite (`series.sqlite`). This is the merged-in `n0es/anime-indexer`.
 
 It is a **React (Vite) + TypeScript SPA** served by an **Express + better-sqlite3** backend. There
@@ -115,7 +115,8 @@ parallel *before* merge (not just on the one shared `boop-watch-dev` after). Wir
   previews parallel-safe: they can't collide on the shared library / qBittorrent. Portal, `/manage`,
   and flow **dry-runs** all work; live library imports do not. Capped at `MAX_PREVIEWS` (default 5).
 - `qa-agent` runs `scripts/qa-agent/run.mjs`: reads the PR's `## Test plan`, drives each item against
-  the preview (headless `claude` CLI + a minted admin JWT), **ticks `[x]`** the verified items on the
+  the preview (headless `claude` CLI + a minted admin JWT for `/api/*`, plus a real Supabase
+  browser session for `/manage` — see `scripts/qa-agent/supabase-session.mjs`), **ticks `[x]`** the verified items on the
   PR, and comments an evidence table. It **never merges or promotes** — a human still approves.
 - `preview-down` tears the env down on PR close (`kubectl delete -l boop-watch.dev/preview-pr=<N>`).
 
@@ -263,7 +264,12 @@ The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can
   TV/movies keep Jellyfin's own TVDB/TMDb metadata.
 - `SCHEDULE_TZ` — schedule timezone (default `TZ` env, else `America/New_York`)
 - `DATA_DIR` — where `series.sqlite` lives (default `./data`; set to a mounted volume in prod)
-- `JWT_SECRET`, `AUTH_USERNAME`, `AUTH_PASSWORD` — `/manage` login (defaults are insecure dev values)
+- `JWT_SECRET` — signs the legacy `/api/*` bearer token. **Not** how the browser logs in:
+  the `/manage` SPA authenticates through **Supabase** (`src/lib/AuthContext.tsx`), and
+  `requireAuth` validates a bearer token against `SUPABASE_URL/auth/v1/user`, keeping a
+  `jwt.verify` fallback for this secret. A self-minted JWT therefore reaches the API but can
+  never log the browser in — which is exactly what left the QA agent skipping every `/manage`
+  item (issue #293). `AUTH_USERNAME` / `AUTH_PASSWORD` are legacy and unused by the SPA.
 - `ADMIN_EMAILS` — comma-separated emails allowed on the admin-only APIs (the flow editor)
 - `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD` — qBittorrent WebUI for the flow sink node
   (unset ⇒ the "Send to qBittorrent" node errors at run time; dry runs still work)
@@ -347,7 +353,8 @@ guard):
 | `GET /api/sub/:id/:index` | Subtitle (ASS) delivery for client-side JASSUB |
 | `GET /health` | `ok` |
 
-Admin (JWT, `requireAuth`): `POST /api/login`, `/api/logout`, `GET /api/me`,
+Admin (`requireAuth` — a Supabase session token, or a `JWT_SECRET`-signed token via the
+legacy fallback): `POST /api/login`, `/api/logout`, `GET /api/me`,
 `GET /api/sections`, `GET /api/search?section=&q=`, `GET|POST /api/series`,
 `GET /api/series/:id/detail`, `/api/series/:id/episodes`, `DELETE /api/series/:id`.
 
