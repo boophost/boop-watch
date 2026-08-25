@@ -10,7 +10,7 @@ Guidance for AI agents (and humans) working in this repo. Read this before editi
    exposes only the titles in one Jellyfin collection ("Public"), holds the Jellyfin admin API key
    **server-side**, and proxies posters + HLS so the token never reaches the browser. Live at
    `watch.boopurno.es`.
-2. An **authenticated library manager** at `/manage` (JWT) — a Jikan/MyAnimeList metadata catalog
+2. An **authenticated library manager** at `/manage` (**Supabase** auth) — a Jikan/MyAnimeList metadata catalog
    stored in SQLite (`series.sqlite`). This is the merged-in `n0es/anime-indexer`.
 
 It is a **React (Vite) + TypeScript SPA** served by an **Express + better-sqlite3** backend. There
@@ -115,7 +115,8 @@ parallel *before* merge (not just on the one shared `boop-watch-dev` after). Wir
   previews parallel-safe: they can't collide on the shared library / qBittorrent. Portal, `/manage`,
   and flow **dry-runs** all work; live library imports do not. Capped at `MAX_PREVIEWS` (default 5).
 - `qa-agent` runs `scripts/qa-agent/run.mjs`: reads the PR's `## Test plan`, drives each item against
-  the preview (headless `claude` CLI + a minted admin JWT), **ticks `[x]`** the verified items on the
+  the preview (headless `claude` CLI + a minted admin JWT for `/api/*`, plus a real Supabase
+  browser session for `/manage` — see `scripts/qa-agent/supabase-session.mjs`), **ticks `[x]`** the verified items on the
   PR, and comments an evidence table. It **never merges or promotes** — a human still approves.
 - `preview-down` tears the env down on PR close (`kubectl delete -l boop-watch.dev/preview-pr=<N>`).
 
@@ -263,7 +264,12 @@ The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can
   TV/movies keep Jellyfin's own TVDB/TMDb metadata.
 - `SCHEDULE_TZ` — schedule timezone (default `TZ` env, else `America/New_York`)
 - `DATA_DIR` — where `series.sqlite` lives (default `./data`; set to a mounted volume in prod)
-- `JWT_SECRET`, `AUTH_USERNAME`, `AUTH_PASSWORD` — `/manage` login (defaults are insecure dev values)
+- `JWT_SECRET` — signs the legacy `/api/*` bearer token. **Not** how the browser logs in:
+  the `/manage` SPA authenticates through **Supabase** (`src/lib/AuthContext.tsx`), and
+  `requireAuth` validates a bearer token against `SUPABASE_URL/auth/v1/user`, keeping a
+  `jwt.verify` fallback for this secret. A self-minted JWT therefore reaches the API but can
+  never log the browser in — which is exactly what left the QA agent skipping every `/manage`
+  item (issue #293). `AUTH_USERNAME` / `AUTH_PASSWORD` are legacy and unused by the SPA.
 - `ADMIN_EMAILS` — comma-separated emails allowed on the admin-only APIs (the flow editor)
 - `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD` — qBittorrent WebUI for the flow sink node
   (unset ⇒ the "Send to qBittorrent" node errors at run time; dry runs still work)
@@ -281,6 +287,14 @@ The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can
 - `LIBRARY_DIR_TV`, `LIBRARY_DIR_MOVIES` — the same, for the **TV** and **Movies** sections
   (defaults `/library-tv` / `/library-movies`). Read through `sectionConfig()` in
   `server/sections.ts`, never off `process.env` at the call site.
+- `WORK_DIR` — flow scratch root (default `DATA_DIR`); must share a filesystem with `LIBRARY_DIR`
+  (the boot guard `assertScratchVolumeSafe` refuses to start otherwise). `WORK_TTL_HOURS` (default
+  24) and `WORK_MAX_GIB` (default 40) bound `WORK_DIR/work`: the periodic sweep drops entries past
+  the TTL, then evicts oldest-first if what remains still exceeds the GiB ceiling (a same-day burst
+  the TTL can't catch). Steady-state scratch is kept near zero by per-run cleanup (`trim-audio-tracks`
+  /`mux-tracks` intermediates are deleted when the run ends) + a free-space check before each
+  multi-GB write; the sweep is the backstop. `WORK_MIN_GIB` (default 10) is the boot-guard capacity
+  floor used only when there's no `LIBRARY_DIR` to compare against.
 - `JIMAKU_API_KEY`, `JIMAKU_URL` — external subtitle fallback (`enrich.fetch-subs`);
   unset ⇒ that node routes every item to "missed" (the embedded-sub branch still works)
 - `FANART_API_KEY`, `FANART_URL` — extra season-banner candidates from fanart.tv (free
@@ -347,7 +361,8 @@ guard):
 | `GET /api/sub/:id/:index` | Subtitle (ASS) delivery for client-side JASSUB |
 | `GET /health` | `ok` |
 
-Admin (JWT, `requireAuth`): `POST /api/login`, `/api/logout`, `GET /api/me`,
+Admin (`requireAuth` — a Supabase session token, or a `JWT_SECRET`-signed token via the
+legacy fallback): `POST /api/login`, `/api/logout`, `GET /api/me`,
 `GET /api/sections`, `GET /api/search?section=&q=`, `GET|POST /api/series`,
 `GET /api/series/:id/detail`, `/api/series/:id/episodes`, `DELETE /api/series/:id`.
 

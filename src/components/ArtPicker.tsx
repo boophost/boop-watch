@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, Trash2, Upload } from 'lucide-react'
+import {
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
 
@@ -30,7 +33,10 @@ const KINDS: Record<ArtKind, { title: string; blurb: string; empty: string; aspe
     blurb: "Shown on the browse grid and this season's card — defaults to Jellyfin's own poster",
     empty: 'No posters found for this title',
     aspect: 'aspect-[2/3]',
-    cols: 'grid-cols-3 sm:grid-cols-4',
+    // Three across, not four: these sit two-pickers-wide, so a fourth column
+    // put each poster at ~150px — too small to judge artwork on, which is what
+    // the dialog above is for, but the grid should not need rescuing either.
+    cols: 'grid-cols-2 sm:grid-cols-3',
   },
 }
 
@@ -45,6 +51,12 @@ export function ArtPicker({ seriesId, kind }: { seriesId: number; kind: ArtKind 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Clicking a thumbnail opens it large instead of selecting it outright.
+  // The thumbnails are ~150px wide inside a two-column layout, which is not
+  // enough to judge artwork by, and the old behaviour committed the choice on
+  // that glance — with no undo beyond picking a different one. The full-size
+  // `preview` URL was already coming back from the API and going unused.
+  const [previewing, setPreviewing] = useState<Art | null>(null)
 
   const load = useCallback(async () => {
     if (!Number.isFinite(seriesId)) return
@@ -82,8 +94,9 @@ export function ArtPicker({ seriesId, kind }: { seriesId: number; kind: ArtKind 
     }
   }
 
-  const choose = (id: number) =>
-    run(
+  const choose = (id: number) => {
+    setPreviewing(null)
+    return run(
       () =>
         fetchAuth(`/api/series/${seriesId}/banners/select`, {
           method: 'POST',
@@ -92,6 +105,7 @@ export function ArtPicker({ seriesId, kind }: { seriesId: number; kind: ArtKind 
         }),
       'Failed to select',
     )
+  }
 
   const upload = (file: File) =>
     run(
@@ -154,8 +168,8 @@ export function ArtPicker({ seriesId, kind }: { seriesId: number; kind: ArtKind 
               key={b.id}
               type="button"
               disabled={busy}
-              onClick={() => void choose(b.id)}
-              title={b.selected ? `Selected ${kind}` : `Use this ${b.source} ${kind}`}
+              onClick={() => setPreviewing(b)}
+              title={b.selected ? `Selected ${kind} — click to view full size` : `View this ${b.source} ${kind} full size`}
               className={`group relative block overflow-hidden rounded-lg border text-left transition disabled:opacity-60 ${
                 b.selected ? 'border-ring ring-2 ring-ring/40' : 'border-border hover:border-ring/60'
               }`}
@@ -204,6 +218,58 @@ export function ArtPicker({ seriesId, kind }: { seriesId: number; kind: ArtKind 
           ))}
         </div>
       )}
+
+      {/* Preview-then-commit. Deliberately a dialog rather than hover-to-expand:
+          hover does not exist on a phone, and this page is used on one. The
+          image is capped by viewport height so a tall poster cannot push the
+          Save button off-screen. */}
+      <Dialog open={previewing != null} onOpenChange={(o) => { if (!o) setPreviewing(null) }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="capitalize">{previewing?.source} {kind}</DialogTitle>
+            <DialogDescription>
+              {previewing?.width && previewing?.height
+                ? `${previewing.width}×${previewing.height}`
+                : 'Dimensions unknown'}
+              {previewing?.selected ? ' · currently selected' : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {previewing ? (
+            <img
+              src={previewing.preview}
+              alt={`${previewing.source} ${kind}, full size`}
+              className="max-h-[60vh] w-full rounded-lg bg-muted object-contain"
+            />
+          ) : null}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button variant="ghost" onClick={() => setPreviewing(null)} disabled={busy}>
+              Cancel
+            </Button>
+            {previewing?.source === 'upload' ? (
+              <Button
+                variant="ghost"
+                className="text-destructive"
+                disabled={busy}
+                onClick={() => {
+                  const id = previewing.id
+                  setPreviewing(null)
+                  void remove(id)
+                }}
+              >
+                <Trash2 className="size-4" />
+                Delete
+              </Button>
+            ) : null}
+            <Button
+              disabled={busy || !previewing || previewing.selected}
+              onClick={() => previewing && void choose(previewing.id)}
+            >
+              <Check className="size-4" />
+              {previewing?.selected ? `Already the ${kind}` : `Use this ${kind}`}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   )
 }
