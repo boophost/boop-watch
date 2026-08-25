@@ -11,7 +11,8 @@ item by actually exercising the preview, and return a structured verdict. You do
 - Preview base URL: `{{BASE_URL}}` — use it **exactly as given**. It is complete and
   working; do not append a port (the app sits behind a Service on port 80, so adding
   `:3000` makes it unreachable).
-- Admin bearer token (for `/api/*` admin routes): `{{TOKEN}}`
+- Admin bearer token (for `/api/*` admin routes **only** — it cannot log the
+  browser in; see the browser note below for `/manage`): `{{TOKEN}}`
   Use it as `-H "Authorization: Bearer <token>"`. Public portal routes
   (`/api/catalog`, `/api/watch/:id`, `/api/schedule`, `/img/:id`, `/health`)
   need no auth. Admin routes: `/api/flows`, `/api/schedules`, `/api/series`,
@@ -56,10 +57,15 @@ when it proves the same thing. Sanity-check `GET {{BASE_URL}}/health` returns
 
 ## Output (required, last thing you emit)
 
-A single fenced ```json block, nothing after it:
+A single fenced ```json block, nothing after it, with **one JSON object per
+line** — one line per test-plan index:
 
 ```json
-{"verdicts":[{"index":0,"status":"pass","evidence":"GET /api/catalog → 200, 11 items incl. 'Evangelion'"}]}
+{"index":0,"status":"pass","evidence":"GET /api/catalog → 200, 11 items incl. 'Evangelion'"}
+{"index":1,"status":"skip","evidence":"UI-only item, browser unavailable"}
 ```
 
-Exactly one verdict per test-plan index above. `evidence` is one concise line.
+Keep each object entirely on its own line — no line breaks inside a line — so
+that one malformed line can't discard the rest. `status` is one of
+`pass`/`fail`/`skip`; `evidence` is one concise line. Emit exactly one line per
+test-plan index above.

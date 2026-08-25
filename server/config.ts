@@ -134,6 +134,8 @@ export const CONFIG_SPEC: ConfigFieldSpec[] = [
     help: 'Must be on the media NFS (e.g. /data/.boopwork), not the node PVC — extract/mux write multi-GB files here. Empty falls back to DATA_DIR.' },
   { key: 'WORK_MIN_GIB', label: 'Minimum free space (GiB)', group: 'Flow scratch', default: '10',
     help: 'Startup refuses to run scratch-writing flows below this, so a misconfigured scratch dir fails loudly at deploy rather than filling the node.' },
+  { key: 'WORK_MAX_GIB', label: 'Scratch size ceiling (GiB)', group: 'Flow scratch', default: '40',
+    help: 'After the age pass, if scratch still exceeds this the sweep evicts oldest-first until under — the bound a same-day burst needs, which the TTL alone cannot provide.' },
   { key: 'WORK_TTL_HOURS', label: 'Scratch retention (hours)', group: 'Flow scratch',
     help: 'How long work directories survive before pruning.' },
 ]

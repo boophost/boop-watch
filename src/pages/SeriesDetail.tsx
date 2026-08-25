@@ -19,6 +19,7 @@ import { fetchAuth, parseAuthJson } from '@/lib/api'
 import { formatBytes } from '@/lib/format'
 import { EpisodeRow } from '@/components/series/EpisodeRow'
 import { AttentionBand, SeasonSummary } from '@/components/series/SeasonSummary'
+import { SeasonSwitch } from '@/components/series/SeasonSwitch'
 import {
   matchesFilter,
   type EpisodeFilter,
@@ -893,7 +894,7 @@ export default function SeriesDetail() {
         </h1>
       </header>
 
-      <main className="mx-auto max-w-5xl space-y-10 p-4 md:p-6">
+      <main className="mx-auto max-w-7xl space-y-10 p-4 md:p-6">
         <section className="flex flex-col gap-6 md:flex-row md:gap-8">
           <div className="mx-auto w-48 shrink-0 self-start overflow-hidden rounded-lg border border-border bg-muted md:mx-0 md:w-56">
             {img ? (
@@ -1006,7 +1007,10 @@ export default function SeriesDetail() {
             {synopsis ? (
               <div className="pt-2">
                 <h2 className="mb-2 text-sm font-medium text-foreground">Synopsis</h2>
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
+                {/* Capped independently of the page: the wider container is for the
+                    episode table, and a synopsis set to the full 7xl width would run
+                    to ~200 characters a line, which is harder to read, not easier. */}
+                <p className="max-w-prose whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
                   {synopsis.replace(/\r\n/g, '\n')}
                 </p>
               </div>
@@ -1024,6 +1028,11 @@ export default function SeriesDetail() {
               health={status.health}
             />
           ) : null}
+          {/* Optional-chained on purpose: during a rollout a browser holding new
+              JS can be served by a pod that predates this field, and reading
+              `.length` off undefined takes the whole page down rather than
+              degrading to "no switcher". */}
+          {status?.siblings?.length ? <SeasonSwitch siblings={status.siblings} /> : null}
           {!isMovie && status ? (
             <SeasonSummary
               episodes={status.episodes}
