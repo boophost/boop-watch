@@ -113,9 +113,28 @@ const PREF_KEY = 'bw:pref'
 // the sentinel 'off'), because a sub choice is meaningful within a season but the
 // old single global release-group string reset on every episode whose track
 // lacked a bracket group. See `subScope` / `SubTrack.sel`.
-type Pref = { audioLang?: string; quality?: string; subs?: Record<string, string> }
+// Volume + mute ride along here too: like audio language and quality they are a
+// property of how this person listens, not of the title, so they persist across
+// every episode and every visit on this browser.
+type Pref = {
+  audioLang?: string; quality?: string; subs?: Record<string, string>
+  volume?: number; muted?: boolean
+}
 const readPref = (): Pref => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') } catch { return {} } }
 const savePref = (patch: Pref) => { try { localStorage.setItem(PREF_KEY, JSON.stringify({ ...readPref(), ...patch })) } catch { /* ignore */ } }
+
+// The saved volume, read once per mount. It reaches the player as a prop, and a
+// prop that tracked the live volume would re-assert itself on the next render
+// and fight the viewer's own slider — so this value must never update. A stored
+// value from another origin (or an old build) is clamped rather than trusted:
+// NaN or 2 would leave the player silent or blaring with no way to tell why.
+const startVolume = (): { volume: number; muted: boolean } => {
+  const { volume, muted } = readPref()
+  return {
+    volume: typeof volume === 'number' && volume >= 0 && volume <= 1 ? volume : 1,
+    muted: muted === true,
+  }
+}
 
 // The scope a subtitle choice is remembered under: a series' season for episodes
 // (so it carries across every episode of that season), else the item id.
@@ -168,6 +187,13 @@ export default function Watch() {
   const [audioIndex, setAudioIndex] = useState<string | null>(null)
   const [subIndex, setSubIndex] = useState<string>('') // '' = off
   const [qKey, setQKey] = useState<string>('auto')
+
+  // Read once (lazy initialiser), never set — see startVolume().
+  const [volumePref] = useState(startVolume)
+  // Last volume seen from the player, written to storage once the viewer stops
+  // moving the slider (see onVolumeChange).
+  const pendingVolume = useRef<Pref | null>(null)
+  const volumeTimer = useRef<number | null>(null)
 
   const playerRef = useRef<MediaPlayerInstance | null>(null)
   const subRef = useRef<any>(null)
@@ -346,6 +372,26 @@ export default function Watch() {
       if (play) p.play().catch(() => {})
     }
   }
+
+  // Dragging the volume slider fires this continuously, so coalesce the writes
+  // and keep the last value. Muting is stored alongside the level because the
+  // two are one setting to the viewer: restoring 0.8 on a player they left
+  // muted would be a surprise, in the loud direction.
+  const onVolumeChange = ({ volume, muted }: { volume: number; muted: boolean }) => {
+    pendingVolume.current = { volume, muted }
+    if (volumeTimer.current) clearTimeout(volumeTimer.current)
+    volumeTimer.current = window.setTimeout(() => {
+      volumeTimer.current = null
+      if (pendingVolume.current) { savePref(pendingVolume.current); pendingVolume.current = null }
+    }, 400)
+  }
+
+  // Leaving the page mid-debounce (clicking the next episode right after
+  // turning the volume down) must not drop the write.
+  useEffect(() => () => {
+    if (volumeTimer.current) clearTimeout(volumeTimer.current)
+    if (pendingVolume.current) { savePref(pendingVolume.current); pendingVolume.current = null }
+  }, [])
 
   // Surface a skip button while the playhead sits inside an intro/outro segment.
   const onTimeUpdate = () => {
@@ -735,9 +781,12 @@ export default function Watch() {
                 aspectRatio="16/9"
                 autoPlay
                 playsInline
+                volume={volumePref.volume}
+                muted={volumePref.muted}
                 onProviderChange={onProviderChange}
                 onCanPlay={onCanPlay}
                 onTimeUpdate={onTimeUpdate}
+                onVolumeChange={onVolumeChange}
                 onEnded={onEnded}
                 onPlay={() => presenceRef.current(false)}
                 onPlaying={() => {
