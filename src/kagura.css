@@ -1118,26 +1118,82 @@
 
   /* Phone layout: brand collapses to just the mark, the search takes the
      centre column, and the control bar flows left-to-right instead of
-     right-aligning via the spacer. The back-link + SxEy chip + title get
-     their own uncramped .subbar row. */
+     right-aligning via the spacer. */
   @media (max-width: 760px) {
     & .topbar { padding: 0 calc(12px + var(--safe-right)) 0 calc(12px + var(--safe-left)); gap: 10px;
       grid-template-columns: auto minmax(0, 1fr) auto; }
     & .topbar .brand .label { display: none; }
-    & .subbar { padding: 8px calc(12px + var(--safe-right)) 8px calc(12px + var(--safe-left)); }
-    & .subbar .back { max-width: 45vw; }
+
+    /* Four things do not fit on one phone-width line: the series title, the
+       SxEy chip, the episode title and the admin shortcut all ellipsised down
+       to a few characters each. Give them two rows instead — series (with the
+       back arrow) + shortcut, then chip + episode title — so both titles get
+       most of the width and stay readable. The areas are fixed rather than
+       flex-wrapped because DOM order puts the admin link last, and it belongs
+       on the first row. */
+    /* :has(.back) — the loading and error states render a bare .subbar with a
+       single child, which has no second row to lay out. */
+    & .subbar:has(.back) {
+      display: grid; align-items: center;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas: "back back manage" "ep title title";
+      gap: 2px 8px;
+      padding: 6px calc(12px + var(--safe-right)) 7px calc(12px + var(--safe-left));
+    }
+    & .subbar .back { grid-area: back; font-size: 13.5px; }
+    & .subbar .ep { grid-area: ep; justify-self: start; }
+    & .subbar .t { grid-area: title; }
+    /* Icon-only here: the gear + its 40px box is the whole control (the label
+       is on the link's aria-label), which buys the series title ~70px. */
+    & .subbar .manage-link { grid-area: manage; margin-left: 0;
+      width: 40px; height: 40px; padding: 0; justify-content: center; }
+    & .subbar .manage-link .bl { display: none; }
+
     /* The player shell also carries the phone tab bar, so the last episode row
        has to clear it. */
     & .wrap { padding: 12px calc(12px + var(--safe-right)) calc(12px + var(--mobnav-space)) calc(12px + var(--safe-left));
       gap: 14px; }
-    & .pbar { gap: 6px; }
+
+    /* Audio / subtitles / quality / theater stay on one line at any phone
+       width: nothing wraps, and what doesn't fit is taken out of the trigger
+       labels (widest first) rather than out of the row. Each control keeps its
+       icon, so a truncated value is still attributable to the right control.
+       These are all written through .pbar rather than as bare descendants:
+       the touch-target block at the end of this file also matches
+       `.player .pmenu > summary`, and being later it would otherwise win. */
+    & .pbar { gap: 6px; flex-wrap: nowrap; }
     & .pbar .spacer { display: none; }
-    & .pmenu > summary .pmlabel { max-width: 96px; }
+    /* The floor goes on the flex item, not on the label inside it: the trigger
+       is white-space:nowrap, so its min-content width is the *whole* label and
+       min-width:auto would stop it shrinking at all — while a floor on the
+       label alone lets the item shrink under its own contents, spilling the
+       text out past the rounded box. 78px is the icon, the padding and ~4 more
+       characters: enough to tell "1080p" from "Auto". */
+    & .pbar .pmenu { flex: 0 1 auto; min-width: 78px; }
+    & .pbar .pmenu > summary { max-width: 100%; min-width: 0; padding: 0 10px; gap: 6px; }
+    & .pbar .pmenu > summary .pmlabel { max-width: none; min-width: 0; }
+    /* The prefix only restates the icon ("Subtitles: English" next to the
+       captions glyph); the value is what the viewer is reading. */
+    & .pbar .pmenu > summary .pmpre { display: none; }
+    /* The chevron is ~20px per control — three controls' worth of label. The
+       open state still shows (highlighted trigger + the sheet itself). */
+    & .pbar .pmenu > summary > svg:last-child { display: none; }
+    /* Next / theater collapse to their icons: both are one-tap actions whose
+       glyph carries the meaning, and neither has a value to show. */
+    & .pbar .pctl { flex: none; padding: 0 11px; }
+    & .pbar .pctl-label { display: none; }
   }
   /* Under 640px the search collapses to an icon (see the .kagura phone header),
      which frees the room the brand label needs — so give it back. */
   @media (max-width: 640px) {
     & .topbar .brand .label { display: block; }
+    /* Last resort below ~340px, where five controls at their label floor no
+       longer fit: scroll the row rather than clip the last control off the
+       edge. Scoped to the width where the pickers are fixed-position bottom
+       sheets — above it .pop is absolutely positioned inside .pbar and an
+       overflow container would clip it. */
+    & .pbar { overflow-x: auto; scrollbar-width: none; }
+    & .pbar::-webkit-scrollbar { display: none; }
   }
 
   /* ── Track pickers as bottom sheets ────────────────────────────────────
@@ -1174,13 +1230,31 @@
   }
 }
 
-/* Theater mode: fill the viewport in-page (no real fullscreen). Toggled on <body>. */
-body.theater { overflow: hidden; }
-body.theater .app-version { display: none; } /* fixed badge, z-index above the overlay */
+/* Theater mode: the video takes the whole first viewport in-page (no real
+   fullscreen), and the page still scrolls — episode list, OST and comments sit
+   below the fold, so the viewer reaches them without leaving theater. Toggled
+   on <body>. */
+body.theater .app-version { display: none; } /* fixed badge, z-index above the video */
 body.theater .player .topbar, body.theater .player .subbar { display: none; }
-body.theater .player .wrap { display: block; max-width: none; margin: 0; padding: 0; height: 100vh; height: 100dvh; }
-body.theater .player .col-eps, body.theater .player .col-ost { display: none; }
-body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
+/* Both navs would print over the video (the tab bar right on top of the control
+   bar). Theater's own control bar carries the way out. */
+body.theater .player .snav, body.theater .player .mob-nav { display: none; }
+body.theater .player .shell-main { padding-bottom: 0; }
+/* One column, ordered the way the phone layout already orders it. The columns
+   go display:contents so their children order against each other. */
+body.theater .player .wrap { display: flex; flex-direction: column; gap: 16px;
+  align-items: stretch; /* the grid layout's align-items:start shrink-wraps flex items */
+  max-width: none; margin: 0; padding: 0 0 calc(28px + var(--safe-bottom)); }
+body.theater .player .col-main, body.theater .player .col-side { display: contents; }
+body.theater .player .col-eps { order: 1; max-height: min(60dvh, 520px); }
+body.theater .player .col-ost { order: 2; }
+body.theater .player .comments { order: 3; }
+/* The video is full-bleed; everything under it keeps a readable measure. */
+body.theater .player .col-eps,
+body.theater .player .col-ost,
+body.theater .player .comments { width: min(100% - 28px, 1100px); margin-inline: auto; }
+body.theater .player .col-video { order: 0; flex: none; z-index: 1;
+  height: 100vh; height: 100dvh; background: #000; display: flex; flex-direction: column; }
 /* Keep .vid in block flow (not flex): JASSUB inserts a 0-width anchor div right
    after the <video> and positions its subtitle canvas relative to it, assuming
    the anchor shares the video's left edge. A flex row would push that anchor to
@@ -1188,7 +1262,6 @@ body.theater .player .col-video { position: fixed; inset: 0; z-index: 100; backg
    video by absolute positioning instead. */
 body.theater .player .vid { flex: 1; min-height: 0; border-radius: 0; box-shadow: none; position: relative;
   aspect-ratio: auto; max-height: none; margin: 0; /* the flex column sizes the box here, not the 16/9 (auto margins would stop it stretching) */ }
-body.theater .player .comments { display: none; }
 /* aspect-ratio: the player carries an inline 16/9 (React prop), and on an
    absolutely-positioned box the ratio wins over width — on a portrait phone it
    derives ~1500px from the viewport height and crops the frame. Filling the
@@ -1206,9 +1279,16 @@ body.theater .player .pbar { margin: 0; gap: 8px;
 
 /* Pseudo-fullscreen: last-resort fallback when neither element fullscreen nor
    native video fullscreen is available. The Watch page toggles body.fs *with*
-   body.theater — the theater layout does the filling, and this hides the
-   control bar so only the player remains. Exit via the player's own
-   fullscreen button. */
+   body.theater — the theater layout does the sizing, and this hides the control
+   bar so only the player remains. Unlike theater it is standing in for real
+   fullscreen, so it pins the video over the page and nothing scrolls or shows
+   beneath it. Exit via the player's own fullscreen button (or by rotating back
+   to portrait, which is what put a phone here). */
+body.fs { overflow: hidden; }
+body.fs .player .col-video { position: fixed; inset: 0; z-index: 100; height: auto; }
+body.fs .player .col-eps,
+body.fs .player .col-ost,
+body.fs .player .comments { display: none; }
 body.fs .player .pbar { display: none; }
 body.fs .player .vds-player[data-controls] .vds-overlay-btns { bottom: 86px; }
 
