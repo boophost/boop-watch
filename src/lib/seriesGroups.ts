@@ -24,10 +24,15 @@ export interface SeriesEntry {
   url: string | null
   added_at: string
   episodes?: number | null
+  /** Release year — the only thing a film has to put in a chip. */
+  year?: number | null
   tvdb_id?: number | null
   tvdb_season?: number | null
   episode_offset?: number | null
   mapping_source?: string | null
+  /** TV only: the seasons this show has in the library, from the portal cache.
+   *  Anime reads its seasons off sibling rows instead, and a film has none. */
+  librarySeasons?: Array<{ season: number; episodes: number }> | null
   nextChase?: EpisodeChase | null
 }
 
@@ -51,9 +56,13 @@ export interface SeriesGroup {
   rows: SeriesEntry[]
   /** Distinct TVDB seasons these cours span (0 when none of them is mapped). */
   seasons: number
-  /** True when the rows carry no `tvdb_id` at all. Nothing can be grouped, and
-   *  the import sink falls back to "Season 1, no offset" for them — worth
-   *  saying out loud rather than rendering as an ordinary row. */
+  /** Anime only: the rows carry no `tvdb_id` at all, so nothing can be grouped
+   *  and the import sink falls back to "Season 1, no offset" for them — worth
+   *  saying out loud rather than rendering as an ordinary row.
+   *
+   *  Never true outside anime. A TMDB row has no `tvdb_id` by design (its own
+   *  seasons *are* the library's), so flagging one would be warning about the
+   *  normal case — the fastest way to teach someone to ignore the badge. */
   unmapped: boolean
   /** Seasons below the highest one that no row covers, e.g. `[1]` for a show
    *  whose catalog starts at season 2. Empty when the run is complete. */
@@ -268,7 +277,9 @@ export function groupSeries(rows: SeriesEntry[]): SeriesGroup[] {
       poster: members.find((r) => r.image_url)?.image_url ?? null,
       rows: members,
       seasons: seasons.size,
-      unmapped: members.every((r) => r.tvdb_id == null),
+      unmapped:
+        members.every((r) => (r.section ?? 'anime') === 'anime') &&
+        members.every((r) => r.tvdb_id == null),
       missingSeasons: missingSeasonsIn(members),
       overlapping: overlaps.ids,
       overlapDetail: overlaps.detail,
@@ -277,10 +288,18 @@ export function groupSeries(rows: SeriesEntry[]): SeriesGroup[] {
   })
 }
 
-/** "3 seasons · 5 cours" — the line under a group's title. */
+/**
+ * "3 seasons · 5 cours" — the line under a group's title.
+ *
+ * Cours are only counted where they mean something: anime splits a show across
+ * rows, so "5 cours" is a real fact about the catalog. A TV row is the whole
+ * show, so it only ever reports its seasons.
+ */
 export function groupSubtitle(group: SeriesGroup): string {
   const parts: string[] = []
-  if (group.seasons > 1) parts.push(`${group.seasons} seasons`)
+  const librarySeasons = group.rows[0]?.librarySeasons?.length ?? 0
+  const seasons = Math.max(group.seasons, librarySeasons)
+  if (seasons > 1) parts.push(`${seasons} seasons`)
   if (group.rows.length > 1) parts.push(`${group.rows.length} cours`)
   return parts.join(' · ')
 }

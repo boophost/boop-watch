@@ -123,10 +123,16 @@ function variantTokensForSeries(series: {
     .filter((t) => t.length > 0)
 }
 
-/** Portal-scoped Series match only (mal_id, then title overlap) — no live
+/**
+ * Portal-scoped Series match only (mal_id, then title overlap) — no live
  * Jellyfin fallback, since a series absent from the Public collection has no
- * public page to link to. */
-function resolvePortalSeriesId(
+ * public page to link to.
+ *
+ * Local and synchronous, which is why the catalog list can afford it per row:
+ * TV rows need it to find the show's seasons, which for a TMDB title live in
+ * the library rather than in sibling catalog rows the way anime cours do.
+ */
+export function resolvePortalSeriesId(
   series: {
     mal_id?: number | null
     title: string

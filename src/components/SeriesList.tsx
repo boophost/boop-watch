@@ -48,6 +48,22 @@ function ChaseChip({ chase }: { chase: EpisodeChase }) {
   )
 }
 
+/**
+ * What a row's own chip says.
+ *
+ * "no mapping" is anime vocabulary — a TMDB row has no season mapping to be
+ * missing, so a TV or movie row with nothing to report shows no chip at all
+ * rather than borrowing a warning from the other section's model. Without a
+ * season there is likewise no shape to name, and "— · 1-12" reads as a broken
+ * label rather than as a missing mapping.
+ */
+function courChipLabel(r: SeriesEntry): string | null {
+  if (r.tvdb_season != null) return courShapeLabel(courShapeOf(r))
+  if (r.section === 'movies') return r.year != null ? String(r.year) : null
+  if (r.episodes != null) return `${r.episodes} episodes`
+  return (r.section ?? 'anime') === 'anime' ? 'no mapping' : null
+}
+
 function Poster({ url, className }: { url: string | null; className: string }) {
   return (
     <div className={`shrink-0 overflow-hidden rounded-md bg-muted ${className}`}>
@@ -74,6 +90,8 @@ function GroupRow({ group, onRemove }: { group: SeriesGroup; onRemove: (id: numb
   const single = group.rows.length === 1 ? group.rows[0] : null
   const subtitle = groupSubtitle(group)
   const missing = group.missingSeasons
+  // Present only for a TV row (see SeriesEntry.librarySeasons).
+  const librarySeasons = group.rows.length === 1 ? group.rows[0].librarySeasons : null
 
   return (
     <li className="flex gap-3 rounded-lg border border-border bg-card p-3 shadow-sm transition-colors hover:bg-muted/40">
@@ -130,26 +148,39 @@ function GroupRow({ group, onRemove }: { group: SeriesGroup; onRemove: (id: numb
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
-          {group.rows.map((r) => (
-            <Link
-              key={r.id}
-              to={`/manage/series/${r.id}`}
-              title={r.title}
-              className={`rounded-md border px-2.5 py-1 font-mono text-[11px] tabular-nums outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${
-                group.overlapping.includes(r.id)
-                  ? 'border-amber-500/40 text-amber-300 hover:border-amber-500/70'
-                  : 'border-border text-muted-foreground hover:border-ring/60 hover:text-foreground'
-              }`}
-            >
-              {/* Without a season there is no shape to name, and "— · 1-12"
-                  reads as a broken label rather than as a missing mapping. */}
-              {r.tvdb_season != null
-                ? courShapeLabel(courShapeOf(r))
-                : r.episodes != null
-                  ? `${r.episodes} episodes`
-                  : 'no mapping'}
-            </Link>
-          ))}
+          {/* Two sources for the same idea, "which seasons does this show
+              have". Anime splits a show across catalog rows, so each chip is a
+              cour and links to its own page. A TV row *is* the show, so its
+              chips come from the library and all describe this one row —
+              rendered as plain text, because five chips linking to the same
+              place would just be five ways to press the title. */}
+          {librarySeasons
+            ? librarySeasons.map((c) => (
+                <span
+                  key={c.season}
+                  className="rounded-md border border-border px-2.5 py-1 font-mono text-[11px] tabular-nums text-muted-foreground"
+                >
+                  S{c.season} · {c.episodes} ep{c.episodes === 1 ? '' : 's'}
+                </span>
+              ))
+            : group.rows.map((r) => {
+                const label = courChipLabel(r)
+                if (!label) return null
+                return (
+                  <Link
+                    key={r.id}
+                    to={`/manage/series/${r.id}`}
+                    title={r.title}
+                    className={`rounded-md border px-2.5 py-1 font-mono text-[11px] tabular-nums outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${
+                      group.overlapping.includes(r.id)
+                        ? 'border-amber-500/40 text-amber-300 hover:border-amber-500/70'
+                        : 'border-border text-muted-foreground hover:border-ring/60 hover:text-foreground'
+                    }`}
+                  >
+                    {label}
+                  </Link>
+                )
+              })}
           {missing.length > 0 ? (
             <span className="rounded-md border border-dashed border-border px-2.5 py-1 text-[11px] text-muted-foreground">
               {missing.map((s) => `S${s}`).join(', ')} not in the catalog
