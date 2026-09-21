@@ -24,8 +24,12 @@ export interface SeriesEntry {
   url: string | null
   added_at: string
   episodes?: number | null
-  /** Release year — the only thing a film has to put in a chip. */
+  /** Release year — the only thing a film has to put in a chip, and the
+   *  release-date sort's fallback when there is no full date. */
   year?: number | null
+  /** MAL's air-date string ("Jan 6, 2026 to Mar 24, 2026"). Anime only in
+   *  practice; TMDB rows carry a year and nothing finer. */
+  aired?: string | null
   tvdb_id?: number | null
   tvdb_season?: number | null
   episode_offset?: number | null
@@ -302,4 +306,106 @@ export function groupSubtitle(group: SeriesGroup): string {
   if (seasons > 1) parts.push(`${seasons} seasons`)
   if (group.rows.length > 1) parts.push(`${group.rows.length} cours`)
   return parts.join(' · ')
+}
+
+// ---------------------------------------------------------------------------
+// Sorting and filtering the grouped list
+// ---------------------------------------------------------------------------
+
+export type CatalogSort = 'added' | 'title' | 'released'
+
+export const SORT_LABELS: Record<CatalogSort, string> = {
+  added: 'Recently added',
+  title: 'Title (A–Z)',
+  released: 'Release date',
+}
+
+export const isCatalogSort = (s: string): s is CatalogSort =>
+  s === 'added' || s === 'title' || s === 'released'
+
+/** SQLite's `datetime('now')` is UTC without a zone marker. */
+function addedMs(row: SeriesEntry): number {
+  const t = Date.parse(row.added_at.includes('T') ? row.added_at : row.added_at.replace(' ', 'T') + 'Z')
+  return Number.isFinite(t) ? t : 0
+}
+
+/**
+ * When a row was released, to the best precision the section has.
+ *
+ * Anime carries MAL's air-date string — "Oct 5, 2024 to Mar 15, 2025", or just
+ * "Apr 2019" or "2019" for older entries — so the start of it is parsed first.
+ * TMDB rows only ever have a year. Null when there is nothing at all, which
+ * sorts such rows last rather than pretending they are from 1970.
+ */
+export function releasedMs(row: SeriesEntry): number | null {
+  const start = row.aired?.split(/\s+to\s+/i)[0]?.trim()
+  if (start && !/not available|\?/i.test(start)) {
+    const t = Date.parse(start)
+    if (Number.isFinite(t)) return t
+  }
+  if (row.year != null) return Date.UTC(row.year, 0, 1)
+  return null
+}
+
+// Library-style title sort: "The Bear" files under B, the way Jellyfin shelves
+// it on the portal, so the two surfaces agree about where a show lives.
+function titleKey(title: string): string {
+  return title.trim().replace(/^(the|a|an)\s+/i, '').toLocaleLowerCase()
+}
+
+/**
+ * Order groups for display. Every key is the *show's*, not one cour's:
+ *
+ *  - **Recently added** uses the newest row in the group, so adding a new cour
+ *    brings its whole show back to the top — which is when you want to see it.
+ *  - **Release date** uses the newest *release* in the group, newest first, so
+ *    a show whose latest season is airing now sits with the current season
+ *    rather than wherever its 2019 first season would put it. Rows with no date
+ *    at all go last.
+ *
+ * Ties fall back to the title, so the order is stable across reloads.
+ */
+export function sortGroups(groups: SeriesGroup[], sort: CatalogSort): SeriesGroup[] {
+  const byTitle = (a: SeriesGroup, b: SeriesGroup) =>
+    titleKey(a.title).localeCompare(titleKey(b.title))
+  const out = [...groups]
+  if (sort === 'title') return out.sort(byTitle)
+  if (sort === 'added') {
+    const key = (g: SeriesGroup) => Math.max(...g.rows.map(addedMs))
+    return out.sort((a, b) => key(b) - key(a) || byTitle(a, b))
+  }
+  const key = (g: SeriesGroup) => {
+    const dates = g.rows.map(releasedMs).filter((t): t is number => t != null)
+    return dates.length ? Math.max(...dates) : null
+  }
+  return out.sort((a, b) => {
+    const ka = key(a)
+    const kb = key(b)
+    if (ka == null && kb == null) return byTitle(a, b)
+    if (ka == null) return 1
+    if (kb == null) return -1
+    return kb - ka || byTitle(a, b)
+  })
+}
+
+const foldText = (s: string) =>
+  s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase()
+
+/**
+ * Narrow the list to groups matching a query.
+ *
+ * Matches the show's display name *and* every member's own titles — romaji and
+ * English — so "tensei shitara" still finds Slime although its group is named
+ * in English, and "part 2" finds the Mushoku group through its cour. Accents
+ * and case are ignored; each space-separated word must appear somewhere.
+ */
+export function filterGroups(groups: SeriesGroup[], query: string): SeriesGroup[] {
+  const words = foldText(query).split(/\s+/).filter(Boolean)
+  if (words.length === 0) return groups
+  return groups.filter((g) => {
+    const hay = foldText(
+      [g.title, ...g.rows.flatMap((r) => [r.title, r.title_english ?? ''])].join(' '),
+    )
+    return words.every((w) => hay.includes(w))
+  })
 }

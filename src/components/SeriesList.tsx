@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { fetchAuth } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Plus, Trash2, TriangleAlert } from 'lucide-react'
@@ -7,8 +7,11 @@ import { adminChaseChipLabel, type EpisodeChase } from '@/lib/chase'
 import {
   courShapeLabel,
   courShapeOf,
+  filterGroups,
   groupSeries,
   groupSubtitle,
+  sortGroups,
+  type CatalogSort,
   type SeriesEntry,
   type SeriesGroup,
 } from '@/lib/seriesGroups'
@@ -16,18 +19,25 @@ import type { PortalSection } from '@/lib/sections'
 
 export type { SeriesEntry } from '@/lib/seriesGroups'
 
+export type CatalogView = 'list' | 'grid'
+
 interface SeriesListProps {
   /** Which section is being shown — decides the empty-state wording. */
   section?: PortalSection
   /** The loaded catalog (owned by the parent so the search bar shares it). */
   series: SeriesEntry[]
   loading: boolean
-  /** One row per show rather than per cour. See src/lib/seriesGroups.ts. */
-  grouped?: boolean
+  /** Both views show one entry per show (see src/lib/seriesGroups.ts); this
+   *  only picks the layout. */
+  view?: CatalogView
+  sort?: CatalogSort
+  /** Narrows the list in place; see filterGroups for what it matches. */
+  query?: string
   /** Refresh the catalog after a change (e.g. remove). */
   onChanged: () => void
-  /** Open the add-series modal (the first grid cell is an add card). */
-  onAddClick: () => void
+  /** Open the add-title modal, seeded with a query when the filter found
+   *  nothing (the title may simply not be in the catalog yet). */
+  onAddClick: (query?: string) => void
 }
 
 function ChaseChip({ chase }: { chase: EpisodeChase }) {
@@ -78,130 +88,192 @@ function Poster({ url, className }: { url: string | null; className: string }) {
   )
 }
 
-/**
- * One show: its cours as season chips, each linking to that cour's page.
- *
- * Laid out as a full-width row rather than a grid cell because the chips are
- * the point and they need the width — a five-cour show does not fit a third of
- * the page. A single-cour group renders the same way with one chip, so the
- * list stays one shape instead of two.
- */
-function GroupRow({ group, onRemove }: { group: SeriesGroup; onRemove: (id: number) => void }) {
-  const single = group.rows.length === 1 ? group.rows[0] : null
-  const subtitle = groupSubtitle(group)
-  const missing = group.missingSeasons
+/** Status badges for a show: unmapped, overlapping cours, and its chase. */
+function GroupBadges({ group }: { group: SeriesGroup }) {
+  return (
+    <>
+      {/* A row with no tvdb_id cannot be grouped, and its imports fall back to
+          Season 1 — the second half is why this is worth a badge rather than
+          just an absence. */}
+      {group.unmapped ? (
+        <span
+          title="No season mapping — imports fall back to Season 1 with no offset"
+          className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-400"
+        >
+          <TriangleAlert className="size-2.5" />
+          unmapped
+        </span>
+      ) : null}
+      {group.overlapping.length > 0 ? (
+        <span
+          title={`Two cours both claim ${group.overlapDetail ?? 'the same episodes'}. Sometimes a wrong episode offset, sometimes the provider counting a recap the library does not — worth checking before either cour sources again.`}
+          className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-400"
+        >
+          <TriangleAlert className="size-2.5" />
+          episode overlap
+        </span>
+      ) : null}
+      {group.nextChase ? <ChaseChip chase={group.nextChase} /> : null}
+    </>
+  )
+}
+
+function groupKeyLabel(group: SeriesGroup): string {
+  const r = group.rows[0]
+  if (r.tvdb_id != null) return `tvdb ${r.tvdb_id}`
+  if (r.mal_id != null) return `mal ${r.mal_id}`
+  if (r.source_id != null) return `tmdb ${r.source_id}`
+  return ''
+}
+
+/** The show's seasons as chips, plus a note for any hole in the run. */
+function GroupChips({ group }: { group: SeriesGroup }) {
   // Present only for a TV row (see SeriesEntry.librarySeasons).
   const librarySeasons = group.rows.length === 1 ? group.rows[0].librarySeasons : null
+  return (
+    <>
+      {/* Two sources for the same idea, "which seasons does this show have".
+          Anime splits a show across catalog rows, so each chip is a cour and
+          links to its own page. A TV row *is* the show, so its chips come from
+          the library and all describe this one row — rendered as plain text,
+          because five chips linking to the same place would just be five ways
+          to press the title. */}
+      {librarySeasons
+        ? librarySeasons.map((c) => (
+            <span
+              key={c.season}
+              className="rounded-md border border-border px-2.5 py-1 font-mono text-[11px] tabular-nums text-muted-foreground"
+            >
+              S{c.season} · {c.episodes} ep{c.episodes === 1 ? '' : 's'}
+            </span>
+          ))
+        : group.rows.map((r) => {
+            const label = courChipLabel(r)
+            if (!label) return null
+            return (
+              <Link
+                key={r.id}
+                to={`/manage/series/${r.id}`}
+                title={r.title}
+                className={`rounded-md border px-2.5 py-1 font-mono text-[11px] tabular-nums outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${
+                  group.overlapping.includes(r.id)
+                    ? 'border-amber-500/40 text-amber-300 hover:border-amber-500/70'
+                    : 'border-border text-muted-foreground hover:border-ring/60 hover:text-foreground'
+                }`}
+              >
+                {label}
+              </Link>
+            )
+          })}
+      {group.missingSeasons.length > 0 ? (
+        <span className="rounded-md border border-dashed border-border px-2.5 py-1 text-[11px] text-muted-foreground">
+          {group.missingSeasons.map((s) => `S${s}`).join(', ')} not in the catalog
+        </span>
+      ) : null}
+    </>
+  )
+}
 
+/**
+ * Remove, offered only where "the row" is unambiguous — a single-cour show.
+ * One cour of a multi-cour show is removed from that cour's own page, since a
+ * chip is too small a target for something destructive.
+ */
+function RemoveButton({ group, onRemove }: { group: SeriesGroup; onRemove: (id: number) => void }) {
+  const single = group.rows.length === 1 ? group.rows[0] : null
+  if (!single) return null
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="h-7 shrink-0 gap-1 px-2"
+      onClick={() => void onRemove(single.id)}
+      aria-label={`Remove ${single.title}`}
+    >
+      <Trash2 className="size-3" />
+      Remove
+    </Button>
+  )
+}
+
+/**
+ * List layout: one full-width row per show. Chips get the width a grid cell
+ * does not have, so a five-cour show reads on one line.
+ */
+function GroupRow({ group, onRemove }: { group: SeriesGroup; onRemove: (id: number) => void }) {
+  const subtitle = groupSubtitle(group)
+  const href = `/manage/series/${group.rows[0].id}`
   return (
     <li className="flex gap-3 rounded-lg border border-border bg-card p-3 shadow-sm transition-colors hover:bg-muted/40">
       <Link
-        to={`/manage/series/${group.rows[0].id}`}
+        to={href}
         aria-label={group.title}
         className="shrink-0 outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring"
       >
         <Poster url={group.poster} className="h-[68px] w-12" />
       </Link>
-
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
           <Link
-            to={`/manage/series/${group.rows[0].id}`}
+            to={href}
             className="font-medium leading-snug outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
           >
             {group.title}
           </Link>
-          {subtitle ? (
-            <span className="text-xs text-muted-foreground">{subtitle}</span>
-          ) : null}
-          {/* A row with no tvdb_id cannot be grouped, and its imports fall
-              back to Season 1 — the second half is why this is worth a badge
-              rather than just an absence. */}
-          {group.unmapped ? (
-            <span
-              title="No season mapping — imports fall back to Season 1 with no offset"
-              className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-400"
-            >
-              <TriangleAlert className="size-2.5" />
-              unmapped
-            </span>
-          ) : null}
-          {group.overlapping.length > 0 ? (
-            <span
-              title={`Two cours both claim ${group.overlapDetail ?? 'the same episodes'}. Sometimes a wrong episode offset, sometimes the provider counting a recap the library does not — worth checking before either cour sources again.`}
-              className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-400"
-            >
-              <TriangleAlert className="size-2.5" />
-              episode overlap
-            </span>
-          ) : null}
-          {group.nextChase ? <ChaseChip chase={group.nextChase} /> : null}
-          <span className="ml-auto font-mono text-[10px] text-muted-foreground">
-            {group.rows[0].tvdb_id != null
-              ? `tvdb ${group.rows[0].tvdb_id}`
-              : group.rows[0].mal_id != null
-                ? `mal ${group.rows[0].mal_id}`
-                : group.rows[0].source_id != null
-                  ? `tmdb ${group.rows[0].source_id}`
-                  : ''}
+          {subtitle ? <span className="text-xs text-muted-foreground">{subtitle}</span> : null}
+          <GroupBadges group={group} />
+          <span className="ml-auto font-mono text-[10px] text-muted-foreground">{groupKeyLabel(group)}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <GroupChips group={group} />
+          <span className="ml-auto">
+            <RemoveButton group={group} onRemove={onRemove} />
           </span>
         </div>
+      </div>
+    </li>
+  )
+}
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          {/* Two sources for the same idea, "which seasons does this show
-              have". Anime splits a show across catalog rows, so each chip is a
-              cour and links to its own page. A TV row *is* the show, so its
-              chips come from the library and all describe this one row —
-              rendered as plain text, because five chips linking to the same
-              place would just be five ways to press the title. */}
-          {librarySeasons
-            ? librarySeasons.map((c) => (
-                <span
-                  key={c.season}
-                  className="rounded-md border border-border px-2.5 py-1 font-mono text-[11px] tabular-nums text-muted-foreground"
-                >
-                  S{c.season} · {c.episodes} ep{c.episodes === 1 ? '' : 's'}
-                </span>
-              ))
-            : group.rows.map((r) => {
-                const label = courChipLabel(r)
-                if (!label) return null
-                return (
-                  <Link
-                    key={r.id}
-                    to={`/manage/series/${r.id}`}
-                    title={r.title}
-                    className={`rounded-md border px-2.5 py-1 font-mono text-[11px] tabular-nums outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${
-                      group.overlapping.includes(r.id)
-                        ? 'border-amber-500/40 text-amber-300 hover:border-amber-500/70'
-                        : 'border-border text-muted-foreground hover:border-ring/60 hover:text-foreground'
-                    }`}
-                  >
-                    {label}
-                  </Link>
-                )
-              })}
-          {missing.length > 0 ? (
-            <span className="rounded-md border border-dashed border-border px-2.5 py-1 text-[11px] text-muted-foreground">
-              {missing.map((s) => `S${s}`).join(', ')} not in the catalog
-            </span>
-          ) : null}
-          {/* Remove stays per-cour, so it is only offered where "the row" is
-              unambiguous. Removing one cour of a five-cour show is a job for
-              the flat view (or that cour's own page), not for a chip. */}
-          {single ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="ml-auto h-7 shrink-0 gap-1 px-2"
-              onClick={() => void onRemove(single.id)}
-              aria-label={`Remove ${single.title}`}
-            >
-              <Trash2 className="size-3" />
-              Remove
-            </Button>
-          ) : null}
+/**
+ * Grid layout: one card per show — the old grid's shape (poster, synopsis,
+ * footer) carrying the grouped data, so switching view changes the layout and
+ * nothing else.
+ */
+function GroupCard({ group, onRemove }: { group: SeriesGroup; onRemove: (id: number) => void }) {
+  const subtitle = groupSubtitle(group)
+  const href = `/manage/series/${group.rows[0].id}`
+  const synopsis = group.rows.find((r) => r.synopsis)?.synopsis ?? null
+  return (
+    <li className="flex gap-3 rounded-lg border border-border bg-card p-3 shadow-sm transition-colors hover:bg-muted/40">
+      <Link
+        to={href}
+        aria-label={group.title}
+        className="shrink-0 self-start outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <Poster url={group.poster} className="h-28 w-20" />
+      </Link>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <div>
+          <Link
+            to={href}
+            className="font-medium leading-snug outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {group.title}
+          </Link>
+          {subtitle ? <span className="mt-0.5 block text-xs text-muted-foreground">{subtitle}</span> : null}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
+          <GroupBadges group={group} />
+        </div>
+        {synopsis ? <p className="line-clamp-2 text-xs text-muted-foreground">{synopsis}</p> : null}
+        <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
+          <GroupChips group={group} />
+        </div>
+        <div className="mt-auto flex items-center justify-between gap-2 pt-1">
+          <span className="font-mono text-[10px] text-muted-foreground">{groupKeyLabel(group)}</span>
+          <RemoveButton group={group} onRemove={onRemove} />
         </div>
       </div>
     </li>
@@ -212,12 +284,16 @@ export function SeriesList({
   section = 'anime',
   series,
   loading,
-  grouped = false,
+  view = 'list',
+  sort = 'added',
+  query = '',
   onChanged,
   onAddClick,
 }: SeriesListProps) {
-  const navigate = useNavigate()
-  const groups = useMemo(() => (grouped ? groupSeries(series) : []), [grouped, series])
+  const groups = useMemo(
+    () => filterGroups(sortGroups(groupSeries(series), sort), query),
+    [series, sort, query],
+  )
 
   const remove = async (id: number) => {
     await fetchAuth(`/api/series/${id}`, { method: 'DELETE' })
@@ -230,96 +306,58 @@ export function SeriesList({
 
   const addLabel =
     section === 'movies' ? 'Add a movie' : section === 'tv' ? 'Add a show' : 'Add a series'
+  const trimmed = query.trim()
 
-  if (grouped) {
+  // A filter that matches nothing usually means "not in the catalog yet", so
+  // the empty state offers the add flow with the query already typed.
+  if (trimmed && groups.length === 0) {
     return (
-      <ul className="flex flex-col gap-2.5">
-        {groups.map((g) => (
-          <GroupRow key={g.key} group={g} onRemove={remove} />
-        ))}
+      <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border px-4 py-10 text-center">
+        <p className="text-sm text-muted-foreground">Nothing in this catalog matches “{trimmed}”.</p>
+        <Button type="button" size="sm" variant="outline" className="gap-1" onClick={() => onAddClick(trimmed)}>
+          <Plus className="size-4" />
+          Search to add “{trimmed}”
+        </Button>
+      </div>
+    )
+  }
+
+  if (view === 'grid') {
+    return (
+      <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <li>
           <button
             type="button"
-            onClick={onAddClick}
-            className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border p-3 text-muted-foreground outline-none transition-colors hover:border-primary hover:bg-primary/5 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => onAddClick()}
+            className="flex h-full min-h-[7rem] w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-3 text-muted-foreground outline-none transition-colors hover:border-primary hover:bg-primary/5 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <Plus className="size-4" />
+            <Plus className="size-7" />
             <span className="text-sm font-medium">{addLabel}</span>
           </button>
         </li>
+        {groups.map((g) => (
+          <GroupCard key={g.key} group={g} onRemove={remove} />
+        ))}
       </ul>
     )
   }
 
-  const AddCard = (
-    <li key="add-card">
-      <button
-        type="button"
-        onClick={onAddClick}
-        className="flex h-full min-h-[7rem] w-full flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-3 text-muted-foreground outline-none transition-colors hover:border-primary hover:bg-primary/5 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <Plus className="size-7" />
-        <span className="text-sm font-medium">{addLabel}</span>
-      </button>
-    </li>
-  )
-
   return (
-    <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      {AddCard}
-      {series.map((s) => (
-        <li
-          key={s.id}
-          role="button"
-          tabIndex={0}
-          className="flex cursor-pointer gap-3 rounded-lg border border-border bg-card p-3 shadow-sm outline-none ring-offset-background transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={() => navigate(`/manage/series/${s.id}`)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault()
-              navigate(`/manage/series/${s.id}`)
-            }
-          }}
+    <ul className="flex flex-col gap-2.5">
+      {/* First, as in the grid: the add action should not move further away
+          the more titles there are. */}
+      <li>
+        <button
+          type="button"
+          onClick={() => onAddClick()}
+          className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border p-3 text-muted-foreground outline-none transition-colors hover:border-primary hover:bg-primary/5 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <Poster url={s.image_url} className="h-28 w-20" />
-          <div className="min-w-0 flex flex-1 flex-col gap-2">
-            <div>
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <span className="font-medium leading-snug">{s.title}</span>
-                {s.nextChase && s.nextChase.state !== 'ready' ? (
-                  <ChaseChip chase={s.nextChase} />
-                ) : null}
-              </div>
-              <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                Open for episodes and details
-              </span>
-              {s.synopsis ? (
-                <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">
-                  {s.synopsis}
-                </p>
-              ) : null}
-            </div>
-            <div className="mt-auto flex items-center justify-between gap-2">
-              <span className="text-[10px] text-muted-foreground">
-                {s.mal_id != null ? `MAL #${s.mal_id}` : s.source_id != null ? `TMDB #${s.source_id}` : ''}
-              </span>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="relative z-10 h-8 shrink-0 gap-1 px-2"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  void remove(s.id)
-                }}
-                aria-label={`Remove ${s.title}`}
-              >
-                <Trash2 className="size-3.5" />
-                Remove
-              </Button>
-            </div>
-          </div>
-        </li>
+          <Plus className="size-4" />
+          <span className="text-sm font-medium">{addLabel}</span>
+        </button>
+      </li>
+      {groups.map((g) => (
+        <GroupRow key={g.key} group={g} onRemove={remove} />
       ))}
     </ul>
   )
