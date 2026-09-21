@@ -24,6 +24,7 @@ export default function Library() {
   const [params, setParams] = useSearchParams()
   const raw = params.get('section') ?? ''
   const section: Section = isSection(raw) ? raw : 'anime'
+  const groupParam = params.get('group') ?? ''
 
   const [series, setSeries] = useState<SeriesEntry[]>([])
   const [sections, setSections] = useState<SectionInfo[]>([])
@@ -80,6 +81,22 @@ export default function Library() {
   const current = useMemo(() => sections.find((s) => s.section === section), [sections, section])
   const addLabel = section === 'movies' ? 'Add movie' : section === 'tv' ? 'Add show' : 'Add series'
 
+  // Grouping is only meaningful where rows carry a season mapping: anime is
+  // split per cour, while a TMDB row already *is* the show. Rather than
+  // special-casing the section, ask the data — a catalog with no tvdb_id has
+  // nothing to group, so it neither groups nor grows a toggle.
+  const canGroup = useMemo(() => series.some((s) => s.tvdb_id != null), [series])
+  const grouped = groupParam === 'show' ? true : groupParam === 'flat' ? false : canGroup
+
+  // Keep ?section= as it is when flipping the view, and leave the default out
+  // of the URL so a plain /manage link still means "whatever suits the data".
+  const setGrouped = (next: boolean) => {
+    const p: Record<string, string> = {}
+    if (section !== 'anime') p.section = section
+    if (next !== canGroup) p.group = next ? 'show' : 'flat'
+    setParams(p)
+  }
+
   return (
     <div className="min-h-screen">
       <header className="flex flex-col gap-3 border-b px-4 py-3 md:flex-row md:items-center md:px-6">
@@ -121,6 +138,28 @@ export default function Library() {
           />
         </div>
 
+        {/* Only where there is something to group — see canGroup. */}
+        {canGroup ? (
+          <div className="flex shrink-0 rounded-md border border-border p-0.5" role="group" aria-label="Catalog view">
+            {([['show', 'By show'], ['flat', 'Flat']] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={grouped === (value === 'show')}
+                onClick={() => setGrouped(value === 'show')}
+                className={cn(
+                  'rounded px-2.5 py-1 text-xs font-medium transition-colors',
+                  grouped === (value === 'show')
+                    ? 'bg-muted text-foreground'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         <Button type="button" size="sm" className="shrink-0 gap-1 self-start md:self-auto" onClick={() => openModal('')}>
           <Plus className="size-4" />
           <span className="hidden sm:inline">{addLabel}</span>
@@ -142,6 +181,7 @@ export default function Library() {
           section={section}
           series={series}
           loading={loading}
+          grouped={grouped}
           onChanged={refresh}
           onAddClick={() => openModal('')}
         />
