@@ -13,6 +13,7 @@ import { SearchBar } from '@/components/SearchBar'
 import { WatchedToggle } from '@/components/WatchedToggle'
 import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
+import { useScreenWakeLock } from '@/lib/useScreenWakeLock'
 import { getWatch, getThemes, type Segment, type WatchData, type ThemeSong } from '@/lib/api'
 import { setPageTitle } from '@/lib/pageMeta'
 import {
@@ -196,6 +197,10 @@ export default function Watch() {
   const volumeTimer = useRef<number | null>(null)
 
   const playerRef = useRef<MediaPlayerInstance | null>(null)
+  // Drives the screen wake lock. Set from onPlaying rather than onPlay: play
+  // *intent* on a transcode that never delivers a frame should not hold the
+  // screen on (the watchdog treats that case as a stall for the same reason).
+  const [playing, setPlaying] = useState(false)
   const subRef = useRef<any>(null)
   const firstLoad = useRef(true)
   // Position + play-state to restore after a transcode reload (audio/quality switch).
@@ -217,8 +222,12 @@ export default function Watch() {
   }, [])
 
   // Fetch metadata when the episode changes.
+  // Keeps the phone awake while frames are flowing; no-ops everywhere the API
+  // is missing or refused. See src/lib/useScreenWakeLock.ts.
+  useScreenWakeLock(playing)
+
   useEffect(() => {
-    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0); setShowNext(false)
+    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0); setShowNext(false); setPlaying(false)
     firstLoad.current = true
     pendingSeek.current = null
     resumePos.current = null
@@ -475,6 +484,11 @@ export default function Watch() {
   // Auto-advance when the episode ends.
   const onEnded = () => {
     setWatchdog(false)
+    // Release the wake lock here too, not just on the episode change that
+    // usually follows: the last episode of a series ends without navigating,
+    // and holding the screen on over a finished video is the exact thing this
+    // is supposed to prevent.
+    setPlaying(false)
     if (!data) return
     void markComplete(data.nextId)
   }
@@ -796,6 +810,7 @@ export default function Watch() {
                   // that never plays shows up as a page-load with no start.
                   setWatchdog(false)
                   setPlaybackFailed('')
+                  setPlaying(true)
                   presenceRef.current(false)
                   if (!playbackTracked.current && data) {
                     playbackTracked.current = true
@@ -806,8 +821,8 @@ export default function Watch() {
                   }
                 }}
                 onWaiting={() => setWatchdog(true)}
-                onPause={() => { setWatchdog(false); presenceRef.current(true) }}
-                onError={() => setPlaybackFailed((s) => (s ? s : 'error'))}
+                onPause={() => { setWatchdog(false); setPlaying(false); presenceRef.current(true) }}
+                onError={() => { setPlaying(false); setPlaybackFailed((s) => (s ? s : 'error')) }}
               >
                 <MediaProvider />
                 <DefaultVideoLayout icons={defaultLayoutIcons} />
