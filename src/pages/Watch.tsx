@@ -13,6 +13,7 @@ import { SearchBar } from '@/components/SearchBar'
 import { WatchedToggle } from '@/components/WatchedToggle'
 import { UserCrumb, Sidebar, MobileNav, useSidebarCollapsed } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
+import { useScreenWakeLock } from '@/lib/useScreenWakeLock'
 import { getWatch, getThemes, type Segment, type WatchData, type ThemeSong } from '@/lib/api'
 import { setPageTitle } from '@/lib/pageMeta'
 import {
@@ -182,6 +183,10 @@ export default function Watch() {
   // server ignores the extra query param; it only changes the source URL).
   const [reloadNonce, setReloadNonce] = useState(0)
   const stallTimer = useRef<number | null>(null)
+  // The failure kind we've already reported to analytics for the current failed
+  // episode ('' once healthy again). Guards the emit effect below against firing
+  // more than once per real transition — see there.
+  const reportedFailure = useRef<'' | 'stall' | 'error'>('')
 
   // selections
   const [audioIndex, setAudioIndex] = useState<string | null>(null)
@@ -196,6 +201,10 @@ export default function Watch() {
   const volumeTimer = useRef<number | null>(null)
 
   const playerRef = useRef<MediaPlayerInstance | null>(null)
+  // Drives the screen wake lock. Set from onPlaying rather than onPlay: play
+  // *intent* on a transcode that never delivers a frame should not hold the
+  // screen on (the watchdog treats that case as a stall for the same reason).
+  const [playing, setPlaying] = useState(false)
   const subRef = useRef<any>(null)
   const firstLoad = useRef(true)
   // Position + play-state to restore after a transcode reload (audio/quality switch).
@@ -217,8 +226,12 @@ export default function Watch() {
   }, [])
 
   // Fetch metadata when the episode changes.
+  // Keeps the phone awake while frames are flowing; no-ops everywhere the API
+  // is missing or refused. See src/lib/useScreenWakeLock.ts.
+  useScreenWakeLock(playing)
+
   useEffect(() => {
-    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0); setShowNext(false)
+    setData(null); setError(''); setSelReady(false); setActiveSeg(null); setDuration(0); setShowNext(false); setPlaying(false)
     firstLoad.current = true
     pendingSeek.current = null
     resumePos.current = null
@@ -302,17 +315,24 @@ export default function Watch() {
     return `/api/play/${encodeURIComponent(data.id)}/master.m3u8${qs ? `?${qs}` : ''}`
   }, [data, selReady, audioIndex, quality, subIndex, reloadNonce])
 
-  // Arm/disarm the stall watchdog. active=true (re)starts the countdown; the
-  // player disarms it once real playback starts and re-arms it whenever it drops
-  // back into buffering, so a stall at any point surfaces the retry.
+  // Arm/disarm the stall watchdog. Disarm (active=false) always clears the timer;
+  // the player disarms it once real playback starts. Arm (active=true) is
+  // *arm-once*: an already-running countdown is left untouched, so a stall that
+  // keeps emitting `waiting` events can't keep postponing detection. hls.js nudges
+  // a stuck stream (seek/retry), which re-fires `waiting` every few seconds — the
+  // old "clear + restart on every arm" reset the 20s clock each time, so a truly
+  // stuck stream spun forever and the retry overlay never appeared. The window now
+  // measures "time since buffering began", not "since the last buffering blip".
   const setWatchdog = useCallback((active: boolean) => {
-    if (stallTimer.current != null) { clearTimeout(stallTimer.current); stallTimer.current = null }
-    if (active) {
-      stallTimer.current = window.setTimeout(() => {
-        stallTimer.current = null
-        setPlaybackFailed((s) => (s ? s : 'stall'))
-      }, STALL_TIMEOUT_MS)
+    if (!active) {
+      if (stallTimer.current != null) { clearTimeout(stallTimer.current); stallTimer.current = null }
+      return
     }
+    if (stallTimer.current != null) return // already counting down — don't extend it
+    stallTimer.current = window.setTimeout(() => {
+      stallTimer.current = null
+      setPlaybackFailed((s) => (s ? s : 'stall'))
+    }, STALL_TIMEOUT_MS)
   }, [])
 
   // A truthy source means the player is (re)loading a transcode — start the
@@ -325,10 +345,18 @@ export default function Watch() {
   }, [src, setWatchdog])
 
   // Surface the failure in analytics so slow/stuck starts show up as a gap
-  // between page loads and real playback. Fires once per transition into a
-  // failed state (src changes reset it to '').
+  // between page loads and real playback. Must fire exactly once per transition
+  // into a failed state. This effect also re-runs when `data`/`user` change by
+  // reference (e.g. AuthContext's refreshIsAdmin swaps in a new `user` object
+  // ~½s after load, once /api/me answers) — without the ref guard that
+  // re-emitted the same stall, so one stall was counted two-plus times and the
+  // dashboards over-reported. Track the reported kind in a ref and only emit on a
+  // genuine '' → stall/error edge; reset it whenever playback recovers so a
+  // fresh stall (e.g. after a retry) is reported again.
   useEffect(() => {
-    if (!playbackFailed || !data) return
+    if (!playbackFailed) { reportedFailure.current = ''; return }
+    if (!data || reportedFailure.current === playbackFailed) return
+    reportedFailure.current = playbackFailed
     track(playbackFailed === 'error' ? 'playback_error' : 'playback_stalled', {
       item_id: data.id,
       auth_state: user ? 'authenticated' : 'anonymous',
@@ -475,6 +503,11 @@ export default function Watch() {
   // Auto-advance when the episode ends.
   const onEnded = () => {
     setWatchdog(false)
+    // Release the wake lock here too, not just on the episode change that
+    // usually follows: the last episode of a series ends without navigating,
+    // and holding the screen on over a finished video is the exact thing this
+    // is supposed to prevent.
+    setPlaying(false)
     if (!data) return
     void markComplete(data.nextId)
   }
@@ -796,6 +829,7 @@ export default function Watch() {
                   // that never plays shows up as a page-load with no start.
                   setWatchdog(false)
                   setPlaybackFailed('')
+                  setPlaying(true)
                   presenceRef.current(false)
                   if (!playbackTracked.current && data) {
                     playbackTracked.current = true
@@ -806,8 +840,8 @@ export default function Watch() {
                   }
                 }}
                 onWaiting={() => setWatchdog(true)}
-                onPause={() => { setWatchdog(false); presenceRef.current(true) }}
-                onError={() => setPlaybackFailed((s) => (s ? s : 'error'))}
+                onPause={() => { setWatchdog(false); setPlaying(false); presenceRef.current(true) }}
+                onError={() => { setPlaying(false); setPlaybackFailed((s) => (s ? s : 'error')) }}
               >
                 <MediaProvider />
                 <DefaultVideoLayout icons={defaultLayoutIcons} />

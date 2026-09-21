@@ -11,9 +11,10 @@ import {
   Loader2,
   Search,
   Trash2,
+  TriangleAlert,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import type { SeriesEntry } from '@/components/SeriesList'
+import { courShapeLabel, type SeriesEntry } from '@/lib/seriesGroups'
 import { ArtPicker } from '@/components/ArtPicker'
 import { fetchAuth, parseAuthJson } from '@/lib/api'
 import { formatBytes } from '@/lib/format'
@@ -428,6 +429,22 @@ interface SeasonTitleRow {
   displayTitle: string | null
 }
 
+/** A catalog row that resolves to the same Jellyfin series as this one. */
+interface SeasonTitleCour {
+  id: number
+  malId: number | null
+  title: string
+  season: number | null
+  episodeOffset?: number
+  episodes?: number | null
+}
+
+interface SeasonTitleData {
+  seriesName?: string | null
+  cours?: SeasonTitleCour[]
+  seasons?: SeasonTitleRow[]
+}
+
 /**
  * Per-season custom title for the portal's season line. Blank clears the
  * override, and the portal falls back to its own generic "Season N".
@@ -436,14 +453,16 @@ interface SeasonTitleRow {
 function SeasonTitlesPanel({ id }: { id: number }) {
   const [rows, setRows] = useState<SeasonTitleRow[]>([])
   const [seriesName, setSeriesName] = useState<string | null>(null)
+  const [cours, setCours] = useState<SeasonTitleCour[]>([])
   const [loaded, setLoaded] = useState(false)
   const [drafts, setDrafts] = useState<Record<number, string>>({})
   const [busy, setBusy] = useState<number | null>(null)
   const [msg, setMsg] = useState('')
 
-  const apply = useCallback((d: { seriesName?: string | null; seasons?: SeasonTitleRow[] }) => {
+  const apply = useCallback((d: SeasonTitleData) => {
     const seasons = d.seasons ?? []
     setSeriesName(d.seriesName ?? null)
+    setCours(d.cours ?? [])
     setRows(seasons)
     setDrafts(Object.fromEntries(seasons.map((s) => [s.season, s.displayTitle ?? ''])))
   }, [])
@@ -455,7 +474,7 @@ function SeasonTitlesPanel({ id }: { id: number }) {
       try {
         const r = await fetchAuth(`/api/series/${id}/season-titles`)
         if (!r.ok) return
-        const d = (await r.json()) as { seriesName?: string | null; seasons?: SeasonTitleRow[] }
+        const d = (await r.json()) as SeasonTitleData
         if (!cancelled) apply(d)
       } catch {
         /* panel just stays empty */
@@ -477,7 +496,7 @@ function SeasonTitlesPanel({ id }: { id: number }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ displayTitle: drafts[season] ?? '' }),
       })
-      const d = await parseAuthJson<{ seriesName?: string | null; seasons?: SeasonTitleRow[]; error?: string }>(r)
+      const d = await parseAuthJson<SeasonTitleData & { error?: string }>(r)
       if (!r.ok) throw new Error(d.error ?? 'Update failed')
       apply(d)
       setMsg(drafts[season]?.trim() ? `Saved season ${season}` : `Cleared season ${season}`)
@@ -490,6 +509,8 @@ function SeasonTitlesPanel({ id }: { id: number }) {
 
   if (!loaded || rows.length === 0) return null
 
+  const siblingCours = cours.filter((c) => c.id !== id)
+
   return (
     <div className="mt-4 rounded-md border border-border bg-muted/20 px-3 py-2.5">
       <h3 className="text-sm font-medium text-muted-foreground">Season titles</h3>
@@ -497,6 +518,35 @@ function SeasonTitlesPanel({ id }: { id: number }) {
         The season line on the portal title page{seriesName ? ` for ${seriesName}` : ''}. Leave blank
         for the default ("Season 2").
       </p>
+      {/* These overrides are keyed on the Jellyfin series, not on this row, so
+          every cour of the show opens the same values from its own page. Left
+          unsaid, two cours silently overwrite each other's edits. */}
+      {siblingCours.length > 0 ? (
+        <p className="mt-1.5 rounded border border-amber-500/25 bg-amber-500/5 px-2 py-1.5 text-[11px] leading-relaxed text-amber-200/90">
+          Shared with {siblingCours.length} other {siblingCours.length === 1 ? 'cour' : 'cours'} of
+          this show
+          {' — '}
+          {siblingCours.map((c, i) => (
+            <span key={c.id}>
+              {i > 0 ? ', ' : ''}
+              <Link
+                to={`/manage/series/${c.id}`}
+                title={c.title}
+                className="underline underline-offset-2"
+              >
+                {c.season != null
+                  ? courShapeLabel({
+                      season: c.season,
+                      episodeOffset: c.episodeOffset ?? 0,
+                      episodes: c.episodes ?? null,
+                    })
+                  : 'unmapped'}
+              </Link>
+            </span>
+          ))}
+          . Saving here changes what they all show.
+        </p>
+      ) : null}
       <div className="mt-2 flex flex-col gap-2">
         {rows.map((row) => (
           <div key={row.season} className="flex items-center gap-2">
@@ -884,7 +934,10 @@ export default function SeriesDetail() {
     <div className="min-h-screen bg-background">
       <header className="flex items-center gap-2 border-b px-4 py-3 md:px-6">
         <Button variant="ghost" size="sm" className="shrink-0 gap-1 px-2" asChild>
-          <Link to="/manage">
+          {/* Back to the catalog this title actually lives in. Bare /manage
+              lands on anime, which for a film or a show means the list you
+              came from is not the list you get back. */}
+          <Link to={`/manage?section=${series?.section ?? 'anime'}`}>
             <ChevronLeft className="size-4" />
             Back
           </Link>
@@ -1098,6 +1151,31 @@ export default function SeriesDetail() {
                 </span>
               ) : null}
             </div>
+            {/* A row with no tvdb_id is not merely ungrouped. The import sink
+                falls back to "Season 1, no offset" (flowNodes.ts), which is
+                right for a first season and silently wrong for any later
+                cour — files land under Season 1 with the cour's own episode
+                numbers. Rendered as a row of em-dashes it read like "nothing
+                to see here". */}
+            {series && series.tvdb_id == null ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-amber-500/25 bg-amber-500/5 px-2 py-1.5">
+                <TriangleAlert className="size-3.5 shrink-0 text-amber-500" />
+                <span className="text-[11px] leading-relaxed text-amber-200/90">
+                  No season mapping, so imports fall back to Season 1 with no episode offset —
+                  correct for a first season, wrong for any later cour. Usually means the id is
+                  not in the mapping datasets yet, which is common for a currently-airing title.
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="ml-auto h-7"
+                  disabled={mapBusy}
+                  onClick={() => void saveMapping(true)}
+                >
+                  Try auto-mapping
+                </Button>
+              </div>
+            ) : null}
             {mapEdit ? (
               <div className="mt-2 flex flex-wrap items-end gap-2">
                 {([
