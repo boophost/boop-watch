@@ -1,6 +1,7 @@
 # Design: grouping seasons of the same show in `/manage`
 
-**Status:** research + design options. Nothing decided, nothing built.
+**Status:** Stage 1 shipped in v2.103.0 (PR #391), together with the P5 and P7 fixes below.
+Stage 2 is designed but deliberately not built — see §4.
 **UI mockups:** <https://claude.ai/artifact/QEzfSvhs1CojGGfD3hSW7p> — five artboards: the list today,
 Stage 1, Stage 2, the new show page, and the cour page's before/after.
 **Scope:** the admin catalog (`/manage` → Catalog list, series detail). The public portal already
