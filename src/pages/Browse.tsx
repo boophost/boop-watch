@@ -4,7 +4,7 @@ import { Icon } from '@/components/Icon'
 import { PortalLayout } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
 import { recentlyWatched, type RecentWatch } from '@/lib/progress'
-import { sectionFromPath, SECTION_LABELS } from '@/lib/sections'
+import { sectionFromPath, SECTION_LABELS, type Section } from '@/lib/sections'
 import {
   loadCatalog, getRecent, getFeatured, getItemSummaries, imgUrl, backdropUrl, seasonImgUrl,
   type CatalogItem, type RecentItem, type FeaturedItem, type ItemSummary,
@@ -94,7 +94,7 @@ function FeaturedBanner({ items }: { items: FeaturedItem[] }) {
 
 // One card per season (or movie). Seasons open the season page — the newest
 // episode is named in the meta line rather than being the click target.
-function RecentCard({ it }: { it: RecentItem }) {
+function RecentCard({ it, section }: { it: RecentItem; section: Section }) {
   const isSeason = it.type === 'season' && it.seriesId
   const href = isSeason
     ? `/series/${it.seriesId}${it.season != null ? `?season=${it.season}` : ''}`
@@ -122,7 +122,7 @@ function RecentCard({ it }: { it: RecentItem }) {
       />
       {isSeason
         ? <span className="ep-tag font-mono">{it.season != null ? `S${it.season}` : 'New'}</span>
-        : <span className="type-tag"><Icon name="film" size={11} />Movie</span>}
+        : section === 'anime' && <span className="type-tag"><Icon name="film" size={11} />Movie</span>}
       {!isSeason && <span className="play-hint"><Icon name="play" size={16} /></span>}
       <div className="poster-overlay">
         <div className="poster-title">{it.name}</div>
@@ -136,7 +136,7 @@ function RecentCard({ it }: { it: RecentItem }) {
 }
 
 // A "continue watching" card: resumes at /watch/:id with a progress underline.
-function WatchedCard({ it, sum }: { it: RecentWatch; sum: ItemSummary }) {
+function WatchedCard({ it, sum, section }: { it: RecentWatch; sum: ItemSummary; section: Section }) {
   const pct = it.watched ? 100 : it.duration > 0 ? Math.min(100, (it.position / it.duration) * 100) : 0
   const label = sum.type === 'episode'
     ? [sum.season != null ? `S${sum.season}` : '', sum.epLabel].filter(Boolean).join('·')
@@ -147,7 +147,7 @@ function WatchedCard({ it, sum }: { it: RecentWatch; sum: ItemSummary }) {
       <img src={imgUrl(sum.seriesId || sum.id)} loading="lazy" alt="" onError={(e) => e.currentTarget.remove()} />
       {label
         ? <span className="ep-tag font-mono">{label}</span>
-        : <span className="type-tag"><Icon name="film" size={11} />Movie</span>}
+        : section === 'anime' && <span className="type-tag"><Icon name="film" size={11} />Movie</span>}
       <span className="play-hint"><Icon name="play" size={16} /></span>
       <div className="poster-overlay">
         <div className="poster-title">{sum.name}</div>
@@ -161,13 +161,13 @@ function WatchedCard({ it, sum }: { it: RecentWatch; sum: ItemSummary }) {
   )
 }
 
-function PosterCard({ it }: { it: CatalogItem }) {
+function PosterCard({ it, section }: { it: CatalogItem; section: Section }) {
   const isSeries = it.type === 'Series'
   return (
     <Link className="poster-card" to={isSeries ? `/series/${it.id}` : `/movie/${it.id}`}>
       <div className="poster-fallback">{initials(it.name)}</div>
       <img src={imgUrl(it.id)} loading="lazy" alt="" onError={(e) => e.currentTarget.remove()} />
-      <span className="type-tag"><Icon name={isSeries ? 'tv' : 'film'} size={11} />{isSeries ? 'Series' : 'Movie'}</span>
+      {section === 'anime' && <span className="type-tag"><Icon name={isSeries ? 'tv' : 'film'} size={11} />{isSeries ? 'Series' : 'Movie'}</span>}
       <div className="poster-overlay">
         <div className="poster-title">{it.name}</div>
         <div className="poster-meta">
@@ -297,7 +297,7 @@ export default function Browse() {
               <h1 className="k-h1">Recently watched</h1>
             </div>
             <div className="grid grid-recent">
-              {watched.map(([it, sum]) => <WatchedCard key={it.id} it={it} sum={sum} />)}
+              {watched.map(([it, sum]) => <WatchedCard key={it.id} it={it} sum={sum} section={section} />)}
             </div>
           </section>
         )}
@@ -310,7 +310,7 @@ export default function Browse() {
               <RecentHeading className="k-h1">Recently updated</RecentHeading>
             </div>
             <div className="grid grid-recent">
-              {recent.map((it) => <RecentCard key={it.id} it={it} />)}
+              {recent.map((it) => <RecentCard key={it.id} it={it} section={section} />)}
             </div>
           </section>
         )}
@@ -355,7 +355,7 @@ export default function Browse() {
             </div>
 
             <div className="grid">
-              {visible.map((it) => <PosterCard key={it.id} it={it} />)}
+              {visible.map((it) => <PosterCard key={it.id} it={it} section={section} />)}
             </div>
             {visible.length === 0 && <p className="empty">No titles match your filter.</p>}
           </section>
