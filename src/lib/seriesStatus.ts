@@ -8,6 +8,8 @@
 // downloading. Each stage below is separately observable, so that gap is now a
 // thing the page can name.
 
+import { courShapeLabel } from '@/lib/seriesGroups'
+
 export type EpisodeStage =
   | 'unaired'
   | 'missing'
@@ -218,9 +220,8 @@ export function summarizeIssues(episodes: EpisodeStatus[]): { code: EpisodeIssue
  * full title as a tooltip.
  */
 export function siblingLabel(s: SeriesSibling): string {
-  const season = s.season != null ? `S${s.season}` : '—'
-  if (s.episodes == null) return season
-  const from = s.episodeOffset + 1
-  const to = s.episodeOffset + s.episodes
-  return from === 1 ? `${season} · 1-${to}` : `${season} · ${from}-${to}`
+  // Shared with the catalog's season chips (src/lib/seriesGroups.ts) on
+  // purpose: the same cour must read the same on both pages, or the switcher
+  // and the list look like they are describing different things.
+  return courShapeLabel(s)
 }
