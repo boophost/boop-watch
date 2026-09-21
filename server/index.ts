@@ -12,7 +12,7 @@ import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView, portalSeriesForCatalog, catalogCoursForSeason } from './publicRoutes.js'
 import {
   getPortalSeasonCounts, getPortalSeasonTitles, getPortalSeasonYears, setPortalSeasonTitle,
-  isPortalSection, type PortalSection,
+  getPortalCollectionItems, isPortalSection, type PortalSection,
 } from './portalDb.js'
 import { sectionConfigs, sectionProvider } from './sections.js'
 import {
@@ -33,7 +33,7 @@ import {
   warmScope, ensureScope, getPlayableIds,
   jfVirtualFolders, sectionCollections, enabledSections, type JfVirtualFolder,
 } from './jellyfin.js'
-import { getSeriesLibraryMedia, getSeriesDownloadStatus } from './downloads.js'
+import { getSeriesLibraryMedia, getSeriesDownloadStatus, resolvePortalSeriesId } from './downloads.js'
 import { buildSeriesChase, buildSeriesListChases } from './chaseContext.js'
 import {
   sourcingLedger,
@@ -480,11 +480,47 @@ app.get('/api/search', requireAuth, searchHandler())
 // to anime regardless of any ?section= a caller might bolt on.
 app.get('/api/search/anime', requireAuth, searchHandler('anime'))
 
+/**
+ * Seasons of a TV row, read from the local portal cache.
+ *
+ * Anime is split across catalog rows, one per cour, so the list can show a
+ * show's seasons by grouping its own rows. A TMDB row *is* the whole show, so
+ * its seasons are only visible in the library — resolved here through the same
+ * portal anchoring the rest of /manage uses, scoped to the row's own section so
+ * a title cannot match a show from another one. No network: `portal_items` is
+ * already synced, so a slow or unreachable Jellyfin costs the chips, not the
+ * page.
+ */
+function librarySeasonsFor(rows: seriesDb.SeriesRow[], section: PortalSection) {
+  const out = new Map<number, Array<{ season: number; episodes: number }>>()
+  const items = getPortalCollectionItems(section)
+  if (items.length === 0) return out
+  for (const row of rows) {
+    const jfId = resolvePortalSeriesId(row, items)
+    if (!jfId) continue
+    // Season 0 is Jellyfin's specials folder — not part of the run.
+    const seasons = getPortalSeasonCounts(jfId).filter((c) => c.season > 0)
+    if (seasons.length) out.set(row.id, seasons)
+  }
+  return out
+}
+
 app.get('/api/series', requireAuth, async (_req, res) => {
   seriesDb.getDb()
   // ?section= scopes the list to one section; absent means the whole catalog.
   const sectionQ = String(_req.query.section ?? '')
-  const series = seriesDb.listSeries(isPortalSection(sectionQ) ? sectionQ : undefined)
+  const section = isPortalSection(sectionQ) ? sectionQ : undefined
+  const series = seriesDb.listSeries(section)
+  // TV only. Anime gets its seasons from its sibling rows, and a film has no
+  // seasons to show.
+  let librarySeasons = new Map<number, Array<{ season: number; episodes: number }>>()
+  if (section === 'tv') {
+    try {
+      librarySeasons = librarySeasonsFor(series, section)
+    } catch (e) {
+      console.error('series list season lookup failed —', e)
+    }
+  }
   try {
     // Chase chips are an anime-sourcing concept; TV/movie rows simply have none.
     const chases = await buildSeriesListChases(series.filter(seriesDb.isAnimeSeries))
@@ -492,11 +528,14 @@ app.get('/api/series', requireAuth, async (_req, res) => {
       series: series.map((s) => ({
         ...s,
         nextChase: chases.get(s.id) ?? null,
+        librarySeasons: librarySeasons.get(s.id) ?? null,
       })),
     })
   } catch (e) {
     console.error('series list chase enrich failed —', e)
-    res.json({ series })
+    res.json({
+      series: series.map((s) => ({ ...s, librarySeasons: librarySeasons.get(s.id) ?? null })),
+    })
   }
 })
 
