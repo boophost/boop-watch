@@ -623,6 +623,13 @@ export default function SeriesDetail() {
 
   const [status, setStatus] = useState<SeriesStatus | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Removing a cour lives here because the catalog only ever shows whole
+  // shows: a five-cour show's list entry has no single row to remove, so this
+  // page is the one place a lone cour can be taken out. Two-step and inline
+  // rather than a browser confirm(), which blocks the tab.
+  const [confirmRemove, setConfirmRemove] = useState(false)
+  const [removing, setRemoving] = useState(false)
+  const [removeError, setRemoveError] = useState('')
   const [searchParams, setSearchParams] = useSearchParams()
   // URL-backed so a filtered view is linkable and survives a reload — same
   // reasoning as the Library page's section tabs.
@@ -945,6 +952,55 @@ export default function SeriesDetail() {
         <h1 className="min-w-0 flex-1 truncate text-lg font-semibold md:text-xl">
           {displayTitle}
         </h1>
+        {series ? (
+          confirmRemove ? (
+            <div className="flex shrink-0 items-center gap-2">
+              {/* Say what it does and doesn't touch: the DELETE only drops the
+                  catalog row, and "remove" next to a list of library files is
+                  easy to read as "delete the files". */}
+              <span className="hidden text-xs text-muted-foreground sm:inline">
+                Remove from the catalog? Library files and downloads are not touched.
+              </span>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={removing}
+                onClick={async () => {
+                  setRemoving(true)
+                  setRemoveError('')
+                  try {
+                    const r = await fetchAuth(`/api/series/${id}`, { method: 'DELETE' })
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+                    navigate(`/manage?section=${series.section ?? 'anime'}`)
+                  } catch (e) {
+                    setRemoveError(e instanceof Error ? e.message : 'Remove failed')
+                    setRemoving(false)
+                    setConfirmRemove(false)
+                  }
+                }}
+              >
+                {removing ? 'Removing…' : 'Remove'}
+              </Button>
+              <Button type="button" size="sm" variant="ghost" disabled={removing} onClick={() => setConfirmRemove(false)}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="shrink-0 gap-1"
+              onClick={() => setConfirmRemove(true)}
+              title="Remove this title from the catalog"
+            >
+              <Trash2 className="size-3.5" />
+              <span className="hidden sm:inline">Remove</span>
+            </Button>
+          )
+        ) : null}
+        {removeError ? <span className="shrink-0 text-xs text-destructive">Remove failed ({removeError})</span> : null}
       </header>
 
       <main className="mx-auto max-w-7xl space-y-10 p-4 md:p-6">
