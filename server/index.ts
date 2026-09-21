@@ -9,7 +9,7 @@ import * as seriesDb from './db.js'
 import { getEpisodesForDisplay, isProperTitle } from './episodes.js'
 import { buildSeriesStatus } from './seriesStatus.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { publicRouter, commentView, portalSeriesForCatalog } from './publicRoutes.js'
+import { publicRouter, commentView, portalSeriesForCatalog, catalogCoursForSeason } from './publicRoutes.js'
 import {
   getPortalSeasonCounts, getPortalSeasonTitles, getPortalSeasonYears, setPortalSeasonTitle,
   isPortalSection, type PortalSection,
@@ -1287,12 +1287,35 @@ const artKind = (req: express.Request): seriesDb.ArtKind =>
 /** The season rows for a catalog series' JF show, override included. */
 function seasonTitleView(malId: number) {
   const pItem = portalSeriesForCatalog(malId)
-  if (!pItem) return { seriesId: null, seriesName: null, seasons: [] }
+  if (!pItem) return { seriesId: null, seriesName: null, cours: [], seasons: [] }
   const years = getPortalSeasonYears(pItem.id)
   const titles = getPortalSeasonTitles(pItem.id)
+  // Every catalog row that resolves to this same JF series. These overrides are
+  // keyed on (JF series, season), so all of them edit *these* rows — the page
+  // that opened them is just the one you happened to be on. Saying so is the
+  // difference between a shared setting and one that silently overwrites a
+  // sibling cour's work.
+  const cours = catalogCoursForSeason(pItem, null)
+    .slice()
+    .sort(
+      (a, b) =>
+        (a.tvdb_season ?? 0) - (b.tvdb_season ?? 0) ||
+        (a.episode_offset ?? 0) - (b.episode_offset ?? 0),
+    )
+    .map((c) => ({
+      id: c.id,
+      malId: c.mal_id,
+      title: c.title_english || c.title,
+      season: c.tvdb_season,
+      // Enough for the client to label a cour by its shape ("S1 · 12-23"),
+      // which is the only way to tell two cours of one season apart.
+      episodeOffset: c.episode_offset ?? 0,
+      episodes: c.episodes,
+    }))
   return {
     seriesId: pItem.id,
     seriesName: pItem.name,
+    cours,
     seasons: getPortalSeasonCounts(pItem.id).map((c) => ({
       season: c.season,
       episodes: c.episodes,
