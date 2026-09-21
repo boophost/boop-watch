@@ -934,7 +934,10 @@ export default function SeriesDetail() {
     <div className="min-h-screen bg-background">
       <header className="flex items-center gap-2 border-b px-4 py-3 md:px-6">
         <Button variant="ghost" size="sm" className="shrink-0 gap-1 px-2" asChild>
-          <Link to="/manage">
+          {/* Back to the catalog this title actually lives in. Bare /manage
+              lands on anime, which for a film or a show means the list you
+              came from is not the list you get back. */}
+          <Link to={`/manage?section=${series?.section ?? 'anime'}`}>
             <ChevronLeft className="size-4" />
             Back
           </Link>
