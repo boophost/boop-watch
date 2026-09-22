@@ -941,6 +941,18 @@ export function insertSeries(
   return getDb().prepare('SELECT * FROM series WHERE id = ?').get(id) as SeriesRow
 }
 
+/**
+ * Every cached MAL episode air date, for the catalog's "recent activity" sort.
+ * Includes *future* episodes (the cache holds upcoming ones), so callers must
+ * cap at now; and mixes `…000Z` with `…+00:00`, so parse rather than compare
+ * as strings.
+ */
+export function listEpisodeAirDates(): Array<{ mal_id: number; aired: string }> {
+  return getDb()
+    .prepare('SELECT mal_id, aired FROM series_episodes WHERE aired IS NOT NULL')
+    .all() as Array<{ mal_id: number; aired: string }>
+}
+
 export function deleteSeries(id: number): boolean {
   const r = getDb().prepare('DELETE FROM series WHERE id = ?').run(id)
   return r.changes > 0

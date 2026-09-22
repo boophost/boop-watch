@@ -12,7 +12,7 @@ import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView, portalSeriesForCatalog, catalogCoursForSeason } from './publicRoutes.js'
 import {
   getPortalSeasonCounts, getPortalSeasonTitles, getPortalSeasonYears, setPortalSeasonTitle,
-  getPortalCollectionItems, isPortalSection, type PortalSection,
+  getPortalCollectionItems, getPortalEpisodeDates, isPortalSection, type PortalSection,
 } from './portalDb.js'
 import { sectionConfigs, sectionProvider } from './sections.js'
 import {
@@ -505,6 +505,46 @@ function librarySeasonsFor(rows: seriesDb.SeriesRow[], section: PortalSection) {
   return out
 }
 
+/**
+ * When each row's newest episode came out — the "recent activity" sort key.
+ *
+ * Two sources, because each covers what the other can't:
+ *  - MAL air dates (`series_episodes`) know about an anime cour whether or not
+ *    its episodes have reached the library, but exist for anime only.
+ *  - Jellyfin's own episode dates (the portal cache) cover TV, where they are
+ *    the only source, and anime that is on the site.
+ * The newer of the two wins.
+ *
+ * Both hold episodes that have **not aired yet** — the MAL cache runs months
+ * ahead, and Jellyfin carries upcoming-episode metadata — so anything after
+ * now is ignored; otherwise a show would sort to the top on an episode nobody
+ * can watch. Dates are parsed, not compared as strings: MAL mixes `…000Z` and
+ * `…+00:00`, and Jellyfin writes seven fractional digits.
+ */
+function latestEpisodeFor(rows: seriesDb.SeriesRow[], section: PortalSection) {
+  const now = Date.now()
+  const bump = <K,>(m: Map<K, number>, key: K, iso: string) => {
+    const t = Date.parse(iso)
+    if (!Number.isFinite(t) || t > now) return
+    if (t > (m.get(key) ?? -Infinity)) m.set(key, t)
+  }
+  const byMal = new Map<number, number>()
+  if (section === 'anime') for (const e of seriesDb.listEpisodeAirDates()) bump(byMal, e.mal_id, e.aired)
+  const byJf = new Map<string, number>()
+  for (const e of getPortalEpisodeDates(section)) bump(byJf, e.series_id, e.premiere_date)
+
+  const items = getPortalCollectionItems(section)
+  const out = new Map<number, string>()
+  for (const row of rows) {
+    const fromMal = row.mal_id != null ? byMal.get(row.mal_id) : undefined
+    const jfId = items.length ? resolvePortalSeriesId(row, items) : null
+    const fromJf = jfId ? byJf.get(jfId) : undefined
+    const best = Math.max(fromMal ?? -Infinity, fromJf ?? -Infinity)
+    if (Number.isFinite(best)) out.set(row.id, new Date(best).toISOString())
+  }
+  return out
+}
+
 app.get('/api/series', requireAuth, async (_req, res) => {
   seriesDb.getDb()
   // ?section= scopes the list to one section; absent means the whole catalog.
@@ -521,6 +561,15 @@ app.get('/api/series', requireAuth, async (_req, res) => {
       console.error('series list season lookup failed —', e)
     }
   }
+  // Films have no episodes; the client falls back to their release date.
+  let latestEpisode = new Map<number, string>()
+  if (section === 'anime' || section === 'tv') {
+    try {
+      latestEpisode = latestEpisodeFor(series, section)
+    } catch (e) {
+      console.error('series list latest-episode lookup failed —', e)
+    }
+  }
   try {
     // Chase chips are an anime-sourcing concept; TV/movie rows simply have none.
     const chases = await buildSeriesListChases(series.filter(seriesDb.isAnimeSeries))
@@ -529,12 +578,17 @@ app.get('/api/series', requireAuth, async (_req, res) => {
         ...s,
         nextChase: chases.get(s.id) ?? null,
         librarySeasons: librarySeasons.get(s.id) ?? null,
+        latestEpisodeAt: latestEpisode.get(s.id) ?? null,
       })),
     })
   } catch (e) {
     console.error('series list chase enrich failed —', e)
     res.json({
-      series: series.map((s) => ({ ...s, librarySeasons: librarySeasons.get(s.id) ?? null })),
+      series: series.map((s) => ({
+        ...s,
+        librarySeasons: librarySeasons.get(s.id) ?? null,
+        latestEpisodeAt: latestEpisode.get(s.id) ?? null,
+      })),
     })
   }
 })

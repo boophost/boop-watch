@@ -37,6 +37,10 @@ export interface SeriesEntry {
   /** TV only: the seasons this show has in the library, from the portal cache.
    *  Anime reads its seasons off sibling rows instead, and a film has none. */
   librarySeasons?: Array<{ season: number; episodes: number }> | null
+  /** When this row's newest *aired* episode came out (ISO), from MAL air dates
+   *  and/or Jellyfin — see latestEpisodeFor on the server. Null for films and
+   *  for titles neither source knows. Never in the future. */
+  latestEpisodeAt?: string | null
   nextChase?: EpisodeChase | null
 }
 
@@ -312,16 +316,18 @@ export function groupSubtitle(group: SeriesGroup): string {
 // Sorting and filtering the grouped list
 // ---------------------------------------------------------------------------
 
-export type CatalogSort = 'added' | 'title' | 'released'
+export type CatalogSort = 'activity' | 'added' | 'title' | 'released'
 
+// Dropdown order: the default first, then the date sorts, then alphabetical.
 export const SORT_LABELS: Record<CatalogSort, string> = {
   added: 'Recently added',
-  title: 'Title (A–Z)',
+  activity: 'Recent activity',
   released: 'Release date',
+  title: 'Title (A–Z)',
 }
 
 export const isCatalogSort = (s: string): s is CatalogSort =>
-  s === 'added' || s === 'title' || s === 'released'
+  s === 'activity' || s === 'added' || s === 'title' || s === 'released'
 
 /** SQLite's `datetime('now')` is UTC without a zone marker. */
 function addedMs(row: SeriesEntry): number {
@@ -347,6 +353,15 @@ export function releasedMs(row: SeriesEntry): number | null {
   return null
 }
 
+/** Newest episode release for a row; a film falls back to its release date. */
+function activityMs(row: SeriesEntry): number | null {
+  if (row.latestEpisodeAt) {
+    const t = Date.parse(row.latestEpisodeAt)
+    if (Number.isFinite(t)) return t
+  }
+  return row.section === 'movies' ? releasedMs(row) : null
+}
+
 // Library-style title sort: "The Bear" files under B, the way Jellyfin shelves
 // it on the portal, so the two surfaces agree about where a show lives.
 function titleKey(title: string): string {
@@ -363,6 +378,10 @@ function titleKey(title: string): string {
  *    rather than wherever its 2019 first season would put it. Rows with no date
  *    at all go last.
  *
+ *  - **Recent activity** means new episode releases: newest-aired episode
+ *    first, so what just came out leads. A film has no episodes, so it sorts by
+ *    its release date instead; a title with neither goes last.
+ *
  * Ties fall back to the title, so the order is stable across reloads.
  */
 export function sortGroups(groups: SeriesGroup[], sort: CatalogSort): SeriesGroup[] {
@@ -374,8 +393,9 @@ export function sortGroups(groups: SeriesGroup[], sort: CatalogSort): SeriesGrou
     const key = (g: SeriesGroup) => Math.max(...g.rows.map(addedMs))
     return out.sort((a, b) => key(b) - key(a) || byTitle(a, b))
   }
+  const rowKey = sort === 'activity' ? activityMs : releasedMs
   const key = (g: SeriesGroup) => {
-    const dates = g.rows.map(releasedMs).filter((t): t is number => t != null)
+    const dates = g.rows.map(rowKey).filter((t): t is number => t != null)
     return dates.length ? Math.max(...dates) : null
   }
   return out.sort((a, b) => {
