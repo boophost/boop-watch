@@ -159,6 +159,20 @@ export function getPortalSeasons(seriesId: string): number[] {
 }
 
 /** Episode count per JF season for a series (the season picker cards). */
+/**
+ * Premiere date of every episode in a section, keyed by its Jellyfin series.
+ * Jellyfin already carries metadata for episodes that have not aired yet, so
+ * some of these are in the future — callers must cap at now.
+ */
+export function getPortalEpisodeDates(section: PortalSection): Array<{ series_id: string; premiere_date: string }> {
+  return getPortalDb()
+    .prepare(
+      `SELECT series_id, premiere_date FROM portal_items
+       WHERE type = 'Episode' AND section = ? AND series_id IS NOT NULL AND premiere_date IS NOT NULL`,
+    )
+    .all(section) as Array<{ series_id: string; premiere_date: string }>
+}
+
 export function getPortalSeasonCounts(seriesId: string): Array<{ season: number; episodes: number }> {
   return getPortalDb()
     .prepare(
