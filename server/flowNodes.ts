@@ -2823,7 +2823,12 @@ function titleCodec(title: string): string {
 
 // Best-effort single-episode number from a fansub title. Ranges ("(01-28)")
 // are batches, not episodes, so they return null.
-function parseEpisode(title: string): number | null {
+function parseEpisode(raw: string): number | null {
+  // Callers pass file names too, and a trailing extension hides the end of the
+  // string the " - 343" branch below anchors on: "[Judas] Bleach - 343.mkv"
+  // parsed as no episode, so every file in that batch skipped as
+  // unresolved-episode and the torrent would have been marked exhausted.
+  const title = raw.replace(/\.(?:mkv|mp4|m4v|avi|webm|ts|m2ts)$/i, '')
   if (/\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/.test(title)) return null
   let m = title.match(/\bS\d{1,2}\s*E(\d{1,4})\b/i)
   if (m) return Number(m[1])
