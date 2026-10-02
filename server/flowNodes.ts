@@ -2823,7 +2823,12 @@ function titleCodec(title: string): string {
 
 // Best-effort single-episode number from a fansub title. Ranges ("(01-28)")
 // are batches, not episodes, so they return null.
-function parseEpisode(title: string): number | null {
+function parseEpisode(raw: string): number | null {
+  // Callers pass file names too, and a trailing extension hides the end of the
+  // string the " - 343" branch below anchors on: "[Judas] Bleach - 343.mkv"
+  // parsed as no episode, so every file in that batch skipped as
+  // unresolved-episode and the torrent would have been marked exhausted.
+  const title = raw.replace(/\.(?:mkv|mp4|m4v|avi|webm|ts|m2ts)$/i, '')
   if (/\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/.test(title)) return null
   let m = title.match(/\bS\d{1,2}\s*E(\d{1,4})\b/i)
   if (m) return Number(m[1])
@@ -2893,6 +2898,24 @@ function providerQuery(q: string): string {
     .replace(/[-+/]+(?=\s|$)/g, '')
     .replace(/\s+/g, ' ')
     .trim()
+}
+
+// The SxxEyy query must not also carry the title's own season words. Indexes
+// AND every token, and releases name the season only through the marker:
+// "Mushoku Tensei: Jobless Reincarnation Season 3 S03E14" matched nothing while
+// nine "…S03E14" releases were posted, and the broad fallback ("…Season 3")
+// only reaches releases that spell out "Season 3" — none of the fresh ones.
+// So strip "Season 3" / "3rd Season" / "Part 2" / "Cour 2" / a bare "S3" here;
+// the marker restates the season and the season pin still filters the results.
+function stripSeasonWords(q: string): string {
+  const out = q
+    .replace(/\bSeason\s*\d{1,2}\b/gi, ' ')
+    .replace(/\b\d{1,2}(?:st|nd|rd|th)\s*Season\b/gi, ' ')
+    .replace(/\b(?:Part|Cour)\s*\d{1,2}\b/gi, ' ')
+    .replace(/\bS\d{1,2}\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return out || q
 }
 
 async function toshoCandidates(q: string, base: string): Promise<Candidate[]> {
@@ -3284,7 +3307,7 @@ const torrentSearch: NodeImpl = {
 
         let raw: Candidate[] = []
         if (marker) {
-          raw = await fetchFor(`${q} ${marker}`)
+          raw = await fetchFor(`${stripSeasonWords(q)} ${marker}`)
           // Only trust the narrowed page when it actually carries the episode we
           // pinned; otherwise it told us nothing and the broad query still might.
           if (!raw.some((c) => c.episode === pinnedEpNum)) raw = []
