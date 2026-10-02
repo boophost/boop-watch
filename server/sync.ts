@@ -209,7 +209,13 @@ async function syncSection(
           (courSeason == null
             ? ep.ParentIndexNumber == null || ep.ParentIndexNumber === 1
             : ep.ParentIndexNumber === courSeason)
-        const malTitle = useMalTitle ? epTitles.get(ep.IndexNumber!) : undefined
+        // epTitles is keyed by the MAL entry's own episode number; Jellyfin's
+        // IndexNumber is that plus the row's episode_offset (a second cour at
+        // +11, an absolute-numbered show's slice at −342). Without undoing it,
+        // Bleach S16E01 (MAL ep 343) was titled with MAL episode 1.
+        const malTitle = useMalTitle
+          ? epTitles.get(ep.IndexNumber! - (match?.episode_offset ?? 0))
+          : undefined
         const pEp: PortalItem = {
           id: ep.Id,
           type: ep.Type || 'Episode',
