@@ -6123,13 +6123,71 @@ export function looksLikeReleaseName(name: string): boolean {
   return false
 }
 
-// Resolve a show name to a Jellyfin item id by searching + token-matching. The
-// scan is async, so callers poll until it surfaces.
+export interface JfMatchHints {
+  /** `library_path` of each item being added (pod paths, e.g. /library/…). */
+  libraryPaths?: string[]
+  tvdbId?: number | null
+}
+
+export interface JfMatch {
+  id: string
+  name: string
+  path: string | null
+}
+
+/** Lexicographic compare; a full tie keeps the earlier candidate. */
+const outranks = (a: number[], b: number[]): boolean => {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i]
+  return false
+}
+
+const lastSegment = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? ''
+
+/** Pick the Jellyfin item for a show among search hits. Name overlap alone ties
+ * between same-named series (an empty duplicate folder next to our import), and
+ * the first hit then won. So never take an empty series, then prefer the one
+ * whose folder our import wrote into, then a matching TVDB id, then the best
+ * overlap. The pod and Jellyfin mount the library at different roots, so the
+ * folder check compares names, not path prefixes. */
+export function pickJfCandidate(
+  items: JfItem[],
+  wanted: string[],
+  itemType: string,
+  threshold: number,
+  hints: JfMatchHints = {},
+): JfMatch | null {
+  if (wanted.length === 0) return null
+  const importFolders = new Set(
+    (hints.libraryPaths ?? []).flatMap((p) => p.split(/[\\/]/)).filter(Boolean),
+  )
+  let best: { match: JfMatch; rank: number[] } | null = null
+  for (const it of items) {
+    const jfName = it.Name || ''
+    // Never promote a release-folder "series" into the Public collection.
+    if (looksLikeReleaseName(jfName)) continue
+    if (itemType === 'Series' && it.ChildCount === 0) continue
+    const hay = norm(jfName)
+    const score = wanted.filter((t) => hay.includes(t)).length / wanted.length
+    if (score < threshold) continue
+    const folder = it.Path ? lastSegment(it.Path) : ''
+    const rank = [
+      folder && importFolders.has(folder) ? 1 : 0,
+      hints.tvdbId != null && Number(it.ProviderIds?.Tvdb) === hints.tvdbId ? 1 : 0,
+      score,
+    ]
+    if (!best || outranks(rank, best.rank)) best = { match: { id: it.Id, name: jfName, path: it.Path ?? null }, rank }
+  }
+  return best?.match ?? null
+}
+
+// Resolve a show name to a Jellyfin item id by searching + ranking the hits.
+// The scan is async, so callers poll until it surfaces.
 async function findJfItemByName(
   name: string,
   itemType: string,
   threshold: number,
-): Promise<{ id: string; name: string } | null> {
+  hints: JfMatchHints,
+): Promise<JfMatch | null> {
   const wanted = significantTokens(name)
   if (wanted.length === 0) return null
   // Search by the most distinctive word for good recall, then match locally.
@@ -6140,22 +6198,13 @@ async function findJfItemByName(
       Recursive: 'true',
       IncludeItemTypes: itemType,
       SearchTerm: searchTerm,
+      Fields: 'Path,ProviderIds,ChildCount',
       Limit: 25,
     })
   } catch {
     return null
   }
-  let best: { id: string; name: string; score: number } | null = null
-  for (const it of res.Items ?? []) {
-    const jfName = it.Name || ''
-    // Never promote a release-folder "series" into the Public collection.
-    if (looksLikeReleaseName(jfName)) continue
-    const hay = norm(jfName)
-    const present = wanted.filter((t) => hay.includes(t)).length
-    const score = present / wanted.length
-    if (!best || score > best.score) best = { id: it.Id, name: jfName, score }
-  }
-  return best && best.score >= threshold ? { id: best.id, name: best.name } : null
+  return pickJfCandidate(res.Items ?? [], wanted, itemType, threshold, hints)
 }
 
 const jellyfinCollection: NodeImpl = {
@@ -6164,7 +6213,7 @@ const jellyfinCollection: NodeImpl = {
     label: 'Add to public collection',
     category: 'sink',
     description:
-      'Adds each item’s Jellyfin show to the public "Watch" collection — the last step that makes an imported title appear on the site. Resolves the show by name and waits for the library scan to surface it.',
+      'Adds each item’s Jellyfin show to the public "Watch" collection — the last step that makes an imported title appear on the site. Resolves the show by name (preferring the series folder the import wrote into, then a matching TVDB id, and never an empty series) and waits for the library scan to surface it.',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [
       { id: 'added', label: 'added' },
@@ -6229,13 +6278,20 @@ const jellyfinCollection: NodeImpl = {
     if (!jellyfinConfigured()) throw new Error('Jellyfin is not configured')
 
     // Resolve each unique show to a Jellyfin id, polling for the async scan.
-    const resolved = new Map<string, { id: string; name: string }>()
+    const hintsByName = new Map<string, JfMatchHints>()
+    for (const [name, group] of byName) {
+      hintsByName.set(name, {
+        libraryPaths: group.map((it) => String(it.library_path ?? '')).filter(Boolean),
+        tvdbId: group.map((it) => asNumber(it.tvdb_id)).find((v) => v != null) ?? null,
+      })
+    }
+    const resolved = new Map<string, JfMatch>()
     const deadline = Date.now() + Math.max(0, waitSeconds) * 1000
     const names = [...byName.keys()]
     for (;;) {
       for (const name of names) {
         if (resolved.has(name)) continue
-        const hit = await findJfItemByName(name, itemType, threshold)
+        const hit = await findJfItemByName(name, itemType, threshold, hintsByName.get(name) ?? {})
         if (hit) resolved.set(name, hit)
       }
       if (resolved.size === names.length || Date.now() >= deadline) break
@@ -6253,12 +6309,13 @@ const jellyfinCollection: NodeImpl = {
     }
 
     const ids = [...resolved.values()].map((r) => r.id)
+    const picked = [...resolved.values()].map((r) => `${r.name} (${r.path ?? 'no path'})`).join(', ')
     if (ids.length === 0) {
       ctx.notes.push('resolved no shows to add')
       return { added, pending }
     }
     if (ctx.dryRun) {
-      ctx.notes.push(`dry run — would add ${ids.length} show(s) to the collection: ${[...resolved.values()].map((r) => r.name).join(', ')}`)
+      ctx.notes.push(`dry run — would add ${ids.length} show(s) to the collection: ${picked}`)
       return { added, pending }
     }
     // POST /Collections/{id}/Items?ids=… — adding an existing member is a no-op.
@@ -6267,7 +6324,7 @@ const jellyfinCollection: NodeImpl = {
       signal: AbortSignal.timeout(20_000),
     })
     if (!res.ok) throw new Error(`Jellyfin add-to-collection failed (${res.status})`)
-    ctx.notes.push(`added ${ids.length} show(s) to the collection: ${[...resolved.values()].map((r) => r.name).join(', ')}`)
+    ctx.notes.push(`added ${ids.length} show(s) to the collection: ${picked}`)
     return { added, pending }
   },
 }
