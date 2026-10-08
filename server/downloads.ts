@@ -419,10 +419,13 @@ export async function resolveJfSeriesId(series: {
       Recursive: 'true',
       IncludeItemTypes: 'Series',
       SearchTerm: searchTerm,
+      Fields: 'ChildCount',
       Limit: 25,
     })
     let best: { id: string; score: number } | null = null
     for (const it of res.Items ?? []) {
+      // A same-named empty duplicate (an unused library folder) has no episodes to show.
+      if (it.ChildCount === 0) continue
       const s = bestOverlap(it.Name ?? '', variantTokens)
       if (!best || s > best.score) best = { id: it.Id, score: s }
     }

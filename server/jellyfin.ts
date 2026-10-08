@@ -104,6 +104,10 @@ export interface JfItem {
    * for via `Fields=Path` — it is what tells us which folder Jellyfin actually
    * serves a series from, and so whether our imports agree with it. */
   Path?: string
+  /** Only populated with `Fields=ProviderIds`. */
+  ProviderIds?: { Tvdb?: string; [provider: string]: string | undefined }
+  /** Direct children (seasons, for a Series). Only populated with `Fields=ChildCount`. */
+  ChildCount?: number
   MediaStreams?: JfMediaStream[]
   MediaSources?: { MediaStreams?: JfMediaStream[]; Size?: number; Container?: string }[]
 }
@@ -215,17 +219,25 @@ export async function jfSeriesIdByTvdb(tvdbId: number): Promise<string | null> {
   const now = Date.now()
   if (now - tvdbIndex.at >= SCOPE_TTL_MS) {
     try {
-      const data = await jfJson<{ Items?: (JfItem & { ProviderIds?: { Tvdb?: string } })[] }>('/Items', {
+      const data = await jfJson<{ Items?: JfItem[] }>('/Items', {
         Recursive: 'true',
         IncludeItemTypes: 'Series',
-        Fields: 'ProviderIds',
+        Fields: 'ProviderIds,ChildCount',
       })
       const map = new Map<number, string>()
+      const empty = new Set<number>()
       for (const it of data.Items ?? []) {
         const tvdb = Number(it.ProviderIds?.Tvdb)
-        // First match wins: duplicate library entries for one tvdb id (a stray
-        // release dir re-scanned as its own series) must not shadow the real one.
-        if (Number.isFinite(tvdb) && !map.has(tvdb)) map.set(tvdb, it.Id)
+        if (!Number.isFinite(tvdb)) continue
+        // Duplicate library entries for one tvdb id (a stray release dir
+        // re-scanned as its own series) must not shadow the real one: keep the
+        // first, but let a series with seasons replace an empty one.
+        const isEmpty = it.ChildCount === 0
+        if (!map.has(tvdb) || (empty.has(tvdb) && !isEmpty)) {
+          map.set(tvdb, it.Id)
+          if (isEmpty) empty.add(tvdb)
+          else empty.delete(tvdb)
+        }
       }
       tvdbIndex.map = map
       tvdbIndex.at = now
