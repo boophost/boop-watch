@@ -554,18 +554,85 @@
     background: oklch(1 0 0 / 28%); transition: background .2s ease, width .2s ease; }
   & .feat-dot:hover { background: oklch(1 0 0 / 50%); }
   & .feat-dot[data-active="true"] { width: 22px; background: var(--accent); }
+  /* Phones: edge to edge (same full-bleed trick as the title hero) and a lot
+     shorter — at 320px tall the spotlight was most of the first screen. Tighter
+     body padding and smaller buttons keep title + actions inside the band. */
   @media (max-width: 760px) {
-    & .feat { height: 320px; margin-bottom: 32px; border-radius: 12px; }
-    & .feat-title { font-size: 22px; }
+    & .feat { height: 232px; margin: -28px calc(-18px - var(--safe-right)) 24px calc(-18px - var(--safe-left));
+      border-radius: 0; border-width: 0 0 1px; }
+    @supports (width: 1cqw) {
+      & .feat { margin: -28px calc((100% - 100cqw) / 2) 24px; }
+    }
+    & .feat-body { padding: 14px calc(18px + var(--safe-left)) 16px; gap: 8px; }
+    & .feat-title { font-size: 20px; }
     & .feat-desc { display: none; }
-    & .feat-dots { right: 16px; bottom: 16px; }
-    & .feat-rank { top: 16px; left: 18px; }
+    /* Genres are the first thing to go; year/season/episode badges stay. */
+    & .feat-meta .badge:nth-child(n + 4) { display: none; }
+    & .feat-actions .btn { height: 34px; padding: 0 13px; font-size: 13px; }
+    & .feat-dots { right: calc(16px + var(--safe-right)); bottom: 18px; }
+    & .feat-rank { top: 14px; left: calc(18px + var(--safe-left)); }
   }
 
   /* Home page: recently-updated rail above the full library */
   & .home-section { margin-bottom: 44px; }
   & .home-section:last-child { margin-bottom: 0; }
   & .grid-recent { grid-template-columns: repeat(auto-fill, minmax(136px, 1fr)); }
+
+  /* Category rails — one row of posters that scrolls sideways. */
+  & .rail-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+  & .rail-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+  & .rail-nav {
+    display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; cursor: pointer;
+    border-radius: 999px; border: 1px solid var(--border); background: var(--bg-elev-2); color: var(--fg-muted);
+    transition: color .14s ease, border-color .14s ease;
+  }
+  & .rail-more {
+    height: 30px; padding: 0 10px; border: none; background: none; cursor: pointer;
+    font: 500 12.5px var(--font-sans); color: var(--accent-soft-fg);
+  }
+  @media (hover: hover) {
+    & .rail-nav:hover { color: var(--fg); border-color: var(--border-strong); }
+    & .rail-more:hover { color: var(--fg); }
+  }
+  & .rail {
+    display: flex; gap: 14px; overflow-x: auto; overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory; scrollbar-width: none;
+    /* Room for the card hover lift, which overflow would otherwise clip. */
+    padding: 4px 0 6px; margin: -4px 0 -6px;
+  }
+  & .rail::-webkit-scrollbar { display: none; }
+  & .rail > * { flex: none; width: 150px; scroll-snap-align: start; }
+  /* Desktop keeps the short personal rails as a wrapping grid. */
+  @media (min-width: 761px) {
+    & .rail-wrap {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+      overflow: visible; padding: 0; margin: 0;
+    }
+    & .rail-wrap > * { width: auto; }
+    & .home-section:has(> .rail-wrap) .rail-nav { display: none; }
+  }
+  /* Touch devices swipe; the arrows are for mice. */
+  @media (hover: none) { & .rail-nav { display: none; } }
+  & .poster-card .ep-tag[data-reason="next"] { background: var(--bg-elev-2); color: var(--fg); }
+
+  @media (max-width: 760px) {
+    & .rail-nav { display: none; }
+    & .home-section { margin-bottom: 26px; }
+    & .home-section > .section-head { margin-bottom: 10px; }
+    & .rail-head .h-eyebrow { display: none; }
+    & .rail-head .k-h1 { font-size: 18px; margin: 0; }
+    /* Bleed to the screen edges so the next card peeks in as a swipe cue, but
+       snap/pad back to the page gutter. ~3.3 posters per screen width. */
+    & .rail {
+      gap: 10px;
+      margin-left: calc(-18px - var(--safe-left)); margin-right: calc(-18px - var(--safe-right));
+      padding-left: calc(18px + var(--safe-left)); padding-right: calc(18px + var(--safe-right));
+      scroll-padding-inline: calc(18px + var(--safe-left)) calc(18px + var(--safe-right));
+    }
+    & .rail > * { width: calc((100vw - 36px - 30px) / 3.3); max-width: 150px; }
+    & .rail .poster-card .poster-overlay { padding: 24px 7px 7px; }
+    & .rail .poster-card .poster-title { font-size: 11.5px; }
+  }
   & .poster-card .ep-tag {
     position: absolute; top: 7px; left: 7px;
     display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px;
@@ -727,7 +794,13 @@
        The trigger/overlay machinery below belongs to the header copy; the row
        shows the real bar, so it opts back out of it. */
     & .chrome > .search-slot { display: none; }
+    /* The blur gives the row its own stacking context, so the dropdown's z-index
+       only counted *inside* it — the row itself sat at the root's z-index 0 and
+       the spotlight's positioned children (rank, dots) painted over the
+       results. Lift the whole row above the page, still under the sticky
+       header (50). */
     & .chrome-search-row {
+      position: relative; z-index: 45;
       display: block;
       padding: 8px calc(14px + var(--safe-right)) 10px calc(14px + var(--safe-left));
       background: oklch(0.145 0.008 285 / 80%); backdrop-filter: blur(10px);

@@ -217,6 +217,32 @@ export const getItemSummaries = (ids: string[]) =>
     : Promise.resolve({ items: [] as ItemSummary[] })
 export const getFeatured = (section?: Section) =>
   getJSON<{ items: FeaturedItem[] }>('/api/featured' + (section ? `?section=${section}` : ''))
+// A "For you" rail entry. Episodes ("new" / "next") link straight into the
+// player; "rec" entries are whole titles, with the genre that earned them.
+export interface ForYouItem {
+  id: string
+  titleId: string
+  type: 'episode' | 'series' | 'movie'
+  reason: 'new' | 'next' | 'rec'
+  name: string
+  season: number | null
+  epLabel: string
+  because: string | null
+  /** "new" only: episodes released since the viewer last watched the show. */
+  newCount: number
+}
+export interface ForYouHistory {
+  id: string; watched: boolean; position: number; duration: number; at: string | null
+}
+export async function getForYou(section: Section, history: ForYouHistory[]): Promise<{ items: ForYouItem[] }> {
+  const res = await fetch(`/api/foryou?section=${section}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ history }),
+  })
+  if (!res.ok) throw new Error(`Request failed (${res.status})`)
+  return (await res.json()) as { items: ForYouItem[] }
+}
 export const getTitle = (id: string, season?: number | null) =>
   getJSON<TitleDetail>(
     `/api/catalog/${encodeURIComponent(id)}` +
