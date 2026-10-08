@@ -46,6 +46,7 @@ import { CHECKBOX_RE } from '../lib/promotion-checklist.mjs'
 import { filterCredentials, areAllCooling, getEarliestReset, recordCooldown, credentialPool } from './cooldown.mjs'
 import { trySupabaseSession } from './supabase-session.mjs'
 import { ghApi } from './gh.mjs'
+import { playwrightMcp, childEnv } from './playwright-mcp.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLAN_HEADING = '## test plan'
@@ -127,30 +128,6 @@ function runAgentWithFailover(prompt, creds) {
   throw new RateLimitError(limits.join(' | ') || 'no Claude credentials available')
 }
 
-// One Playwright MCP definition, shared by the preflight and the real run so we
-// can never verify one configuration and then run a different one. Chromium
-// needs --test-type (the automation infobar otherwise shifts layout and breaks
-// screenshots) and CI has no sandbox namespace.
-let _pwMcp = null
-function playwrightMcp() {
-  if (_pwMcp) return _pwMcp
-  const dir = mkdtempSync(join(tmpdir(), 'qa-mcp-'))
-  const pwCfg = join(dir, 'playwright.json')
-  writeFileSync(pwCfg, JSON.stringify({
-    browser: {
-      browserName: 'chromium',
-      launchOptions: { args: ['--test-type', '--no-sandbox', '--disable-dev-shm-usage'] },
-    },
-  }))
-  const args = ['-y', '@playwright/mcp@latest', '--headless', '--config', pwCfg]
-  const mcpConfig = join(dir, 'mcp.json')
-  writeFileSync(mcpConfig, JSON.stringify({
-    mcpServers: { playwright: { command: 'npx', args } },
-  }))
-  _pwMcp = { args, mcpConfig }
-  return _pwMcp
-}
-
 // Preflight the browser: boot the Playwright MCP and confirm it exposes the
 // browser_* tools. Cached for the process. Without this the agent can silently
 // end up with no browser and "verify" UI items over HTTP instead — a false pass.
@@ -164,8 +141,8 @@ function browserWorks() {
     JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
   ].join('\n') + '\n'
   try {
-    const { args } = playwrightMcp()
-    const out = execFileSync('npx', args, { input: req, encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024, stdio: ['pipe', 'pipe', 'ignore'] })
+    const { command, args } = playwrightMcp()
+    const out = execFileSync(command, args, { input: req, encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024, stdio: ['pipe', 'pipe', 'ignore'] })
     _browserWorks = out.includes('browser_navigate')
   } catch {
     _browserWorks = false
@@ -268,26 +245,11 @@ function runAgent(prompt, cred) {
   const debugFile = join(mkdtempSync(join(tmpdir(), 'qa-dbg-')), 'claude.log')
   args.push('--debug-file', debugFile)
 
-  // Keep a fresh CI install from stalling on first-run chores (native-build
-  // fetch, auto-update, telemetry) — network to the API/preview is already fine,
-  // so any hang is self-inflicted startup work. `...cred.env` pins exactly one
-  // credential for this run (the others are blanked) so a rotation really does
-  // switch accounts.
-  const env = {
-    ...process.env,
-    CI: 'true',
-    DISABLE_AUTOUPDATER: '1',
-    DISABLE_TELEMETRY: '1',
-    DISABLE_ERROR_REPORTING: '1',
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    ...cred.env,
-  }
-  // When run from inside a Claude Code session these leak into the child and
-  // silently suppress MCP loading — the agent then has no browser but happily
-  // "verifies" UI items over HTTP. Strip them so the child is a clean session.
-  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION']) {
-    delete env[k]
-  }
+  // `cred.env` pins exactly one credential for this run (the others are
+  // blanked) so a rotation really does switch accounts. childEnv adds the
+  // first-run/telemetry suppression and strips the CLAUDE_CODE* vars that would
+  // otherwise silently disable the MCP.
+  const env = childEnv(cred.env)
 
   let raw
   try {

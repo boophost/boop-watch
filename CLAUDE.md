@@ -114,6 +114,16 @@ parallel *before* merge (not just on the one shared `boop-watch-dev` after). Wir
   **sink disabled** (no `QBIT_*`/`LIBRARY_DIR`, no media-NFS mount). That last part is what makes
   previews parallel-safe: they can't collide on the shared library / qBittorrent. Portal, `/manage`,
   and flow **dry-runs** all work; live library imports do not. Capped at `MAX_PREVIEWS` (default 5).
+- `qa-image` builds `ghcr.io/boophost/boop-watch-qa` from `Dockerfile.qa` — the QA agent's **baked
+  runtime** (node 22, the Claude CLI, `kubectl`, `ffmpeg`, and a **pinned** `@playwright/mcp` with
+  the exact chromium revision it expects). It is tagged like the app image, so a PR's QA runs the
+  PR's own `scripts/qa-agent/` — and because only the final `COPY` layer changes, the expensive
+  layers come from cache. The pin is load-bearing: `@playwright/mcp@latest` installs a chromium
+  revision the MCP does not expect, the MCP then fails to load, and the agent "verifies" UI items
+  over HTTP — a false pass on a client-rendered SPA. `scripts/qa-agent/playwright-mcp.mjs` is the
+  single MCP definition (`QA_PLAYWRIGHT_MCP_BIN` selects the baked binary, else `npx` as a laptop
+  fallback); `run.mjs` and `verify-browser.mjs` both import it, so the guard can no longer prove one
+  configuration while QA runs another.
 - `qa-agent` runs `scripts/qa-agent/run.mjs`: reads the PR's `## Test plan`, drives each item against
   the preview (headless `claude` CLI + a minted admin JWT for `/api/*`, plus a real Supabase
   browser session for `/manage` — see `scripts/qa-agent/supabase-session.mjs`), **ticks `[x]`** the verified items on the

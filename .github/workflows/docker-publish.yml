@@ -92,6 +92,56 @@ jobs:
           # npm ci re-ran on every build. GHCR has no such limit. Only push the
           # cache from branch builds; PRs pull it read-only.
 
+  # The QA agent's runtime image. Separate from the app image because nothing
+  # about it ships to users — it is the environment the qa-agent job used to
+  # rebuild on every run with `curl | bash` + two `playwright install`s, which
+  # cost minutes and is where most of this workflow's historical QA outages came
+  # from (wrong chromium revision, browser installed into /root, MCP silently
+  # not loading).
+  #
+  # Built on the same triggers as the app image and tagged the same way, so a
+  # PR's QA runs the PR's OWN qa-agent scripts — the semantics the checkout
+  # gave. Only the final COPY layer changes between PRs, so the expensive layers
+  # come from the registry cache and this adds little to the build.
+  qa-image:
+    if: github.repository == 'boophost/boop-watch' && github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-qa
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=sha,prefix=
+            type=ref,event=pr,enable=${{ github.base_ref == 'dev' }}
+      - name: Build and push
+        id: build
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          file: ./Dockerfile.qa
+          push: ${{ github.event_name != 'pull_request' || github.base_ref == 'dev' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
   # Roll the k3s Deployment after a real push. We `set image` to the build's
   # immutable content digest (…@sha256:…), not the moving :latest/:dev tag — a
   # digest is unique per build and never cached, so `set image` reliably rolls a
