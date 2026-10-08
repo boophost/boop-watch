@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Icon } from '@/components/Icon'
 import { PortalLayout } from '@/components/PortalLayout'
 import { useAuth } from '@/lib/AuthContext'
-import { recentlyWatched, type RecentWatch } from '@/lib/progress'
+import { recentlyWatched, watchHistory, type RecentWatch } from '@/lib/progress'
 import { sectionFromPath, SECTION_LABELS, type Section } from '@/lib/sections'
 import {
-  loadCatalog, getRecent, getFeatured, getItemSummaries, imgUrl, backdropUrl, seasonImgUrl,
-  type CatalogItem, type RecentItem, type FeaturedItem, type ItemSummary,
+  loadCatalog, getRecent, getFeatured, getItemSummaries, getForYou, imgUrl, backdropUrl, seasonImgUrl,
+  type CatalogItem, type RecentItem, type FeaturedItem, type ItemSummary, type ForYouItem,
 } from '@/lib/api'
 
 const initials = (n: string) =>
@@ -29,6 +29,55 @@ function ago(iso: string | null): string {
 }
 
 type SortKey = 'name' | 'year' | 'type'
+
+// Genre rows under the personal rails: the section's biggest genres, each with
+// enough titles to be worth a row of its own.
+const GENRE_RAILS = 6
+const GENRE_RAIL_MIN = 4
+const GENRE_RAIL_MAX = 20
+
+/** One home-page category: a heading over a horizontally scrolling row of
+ * cards. `wrap` keeps the old wrapping grid on desktop (the personal rails are
+ * short enough to read at a glance there); phones always scroll sideways so a
+ * category costs one row of posters, not a screenful. */
+function Rail({ eyebrow, title, heading = 'h2', wrap = false, action, children }: {
+  eyebrow: string
+  title: string
+  heading?: 'h1' | 'h2'
+  wrap?: boolean
+  action?: ReactNode
+  children: ReactNode
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const H = heading
+  const page = (dir: 1 | -1) => {
+    const el = ref.current
+    if (el) el.scrollBy({ left: dir * el.clientWidth * 0.85, behavior: 'smooth' })
+  }
+  return (
+    <section className="home-section">
+      <div className="section-head rail-head">
+        <div>
+          <div className="h-eyebrow">{eyebrow}</div>
+          <H className="k-h1">{title}</H>
+        </div>
+        <div className="rail-actions">
+          {action}
+          <button className="rail-nav" type="button" aria-label="Scroll left" onClick={() => page(-1)}>
+            <Icon name="back" size={16} />
+          </button>
+          <button className="rail-nav" type="button" aria-label="Scroll right" onClick={() => page(1)}>
+            <Icon name="fwd" size={16} />
+          </button>
+        </div>
+      </div>
+      <div className={`rail${wrap ? ' rail-wrap' : ''}`} ref={ref}>{children}</div>
+    </section>
+  )
+}
+
+// "new" shows its count instead ("2 new"); "rec" cards carry a type tag.
+const FOR_YOU_TAG: Record<ForYouItem['reason'], string> = { new: 'New', next: 'Up next', rec: '' }
 
 function FeaturedBanner({ items }: { items: FeaturedItem[] }) {
   const [idx, setIdx] = useState(0)
@@ -180,6 +229,31 @@ function PosterCard({ it, section }: { it: CatalogItem; section: Section }) {
   )
 }
 
+// A "For you" card: new / next episodes resume in the player; recommendations
+// open the title page and say which of the viewer's genres earned them.
+function ForYouCard({ it }: { it: ForYouItem }) {
+  const isEp = it.type === 'episode'
+  const href = isEp ? `/watch/${it.id}` : `/${it.type === 'series' ? 'series' : 'movie'}/${it.id}`
+  const epTag = [it.season != null ? `S${it.season}` : '', it.epLabel].filter(Boolean).join('·')
+  return (
+    <Link className="poster-card" to={href}>
+      <div className="poster-fallback">{initials(it.name)}</div>
+      <img src={imgUrl(it.titleId)} loading="lazy" alt="" onError={(e) => e.currentTarget.remove()} />
+      {isEp
+        ? <span className="ep-tag font-mono" data-reason={it.reason}>{it.reason === 'new' ? `${it.newCount} new` : FOR_YOU_TAG[it.reason]}</span>
+        : <span className="type-tag"><Icon name={it.type === 'series' ? 'tv' : 'film'} size={11} />{it.type === 'series' ? 'Series' : 'Movie'}</span>}
+      {isEp && <span className="play-hint"><Icon name="play" size={16} /></span>}
+      <div className="poster-overlay">
+        <div className="poster-title">{it.name}</div>
+        <div className="poster-meta">
+          <span className={`dot ${it.reason === 'new' ? 'dot-airing' : 'dot-info'}`} />
+          <span className={isEp ? 'font-mono' : ''}>{isEp ? epTag || 'Next' : `Because you like ${it.because}`}</span>
+        </div>
+      </div>
+    </Link>
+  )
+}
+
 /** History rows paired with their scope metadata: newest first, one card per
  * title (the latest episode stands in for the show), capped at a single row.
  * Scoped to one section so each browse page continues its own library. */
@@ -211,6 +285,7 @@ export default function Browse() {
   const [recent, setRecent] = useState<RecentItem[]>([])
   const [watched, setWatched] = useState<[RecentWatch, ItemSummary][]>([])
   const [featured, setFeatured] = useState<FeaturedItem[]>([])
+  const [forYou, setForYou] = useState<ForYouItem[]>([])
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
 
@@ -218,6 +293,7 @@ export default function Browse() {
   const [sort, setSort] = useState<SortKey>('name')
   const [tag, setTag] = useState('')
   const [tagsOpen, setTagsOpen] = useState(false)
+  const libraryRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
     loadCatalog()
@@ -245,6 +321,18 @@ export default function Browse() {
     () => [...new Set(items.flatMap((it) => it.genres || []))].sort(),
     [items],
   )
+  // Biggest genres first; newest titles lead each row.
+  const genreRails = useMemo(() => {
+    const by = new Map<string, CatalogItem[]>()
+    for (const it of items) for (const g of it.genres || []) (by.get(g) ?? by.set(g, []).get(g)!).push(it)
+    return [...by]
+      .filter(([, list]) => list.length >= GENRE_RAIL_MIN)
+      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
+      .slice(0, GENRE_RAILS)
+      .map(([g, list]) => [g, [...list]
+        .sort((a, b) => (b.year || 0) - (a.year || 0) || a.name.localeCompare(b.name))
+        .slice(0, GENRE_RAIL_MAX)] as const)
+  }, [items])
 
   // Signed-in only: watch history lives in Supabase, RLS-scoped to the account.
   useEffect(() => {
@@ -254,6 +342,24 @@ export default function Browse() {
     loadWatchedRail(section).then((w) => { if (live) setWatched(w) }).catch(() => {})
     return () => { live = false }
   }, [user, section])
+
+  // "For you" reasons over the whole history (account, else this browser's), so
+  // it works signed out too — just without "new episode" detection.
+  useEffect(() => {
+    setForYou([])
+    let live = true
+    watchHistory(!!user)
+      .then((h) => (h.length ? getForYou(section, h) : { items: [] }))
+      .then((r) => { if (live) setForYou(r.items) })
+      .catch(() => {})
+    return () => { live = false }
+  }, [user, section])
+
+  const seeAll = (genre: string) => {
+    setTag(`genre:${genre.toLowerCase()}`)
+    setTagsOpen(true)
+    libraryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   const visible = useMemo(() => {
     const v = q.trim().toLowerCase()
@@ -271,7 +377,8 @@ export default function Browse() {
     })
   }, [items, q, sort, tag])
 
-  const RecentHeading = watched.length > 0 ? 'h2' : 'h1'
+  // Exactly one h1: whichever rail is on top.
+  const firstRail = forYou.length ? 'forYou' : watched.length ? 'watched' : recent.length ? 'recent' : 'genre'
 
   const chips: [string, string][] = [
     ['', 'All'], ['type:movie', 'Movies'], ['type:series', 'Series'],
@@ -290,33 +397,38 @@ export default function Browse() {
           </p>
         )}
 
+        {forYou.length > 0 && (
+          <Rail eyebrow="Picked from your history" title="For you" heading="h1">
+            {forYou.map((it) => <ForYouCard key={`${it.reason}:${it.id}`} it={it} />)}
+          </Rail>
+        )}
+
         {watched.length > 0 && (
-          <section className="home-section">
-            <div className="section-head">
-              <div className="h-eyebrow">Pick up where you left off</div>
-              <h1 className="k-h1">Recently watched</h1>
-            </div>
-            <div className="grid grid-recent">
-              {watched.map(([it, sum]) => <WatchedCard key={it.id} it={it} sum={sum} section={section} />)}
-            </div>
-          </section>
+          <Rail eyebrow="Pick up where you left off" title="Recently watched" wrap
+            heading={firstRail === 'watched' ? 'h1' : 'h2'}>
+            {watched.map(([it, sum]) => <WatchedCard key={it.id} it={it} sum={sum} section={section} />)}
+          </Rail>
         )}
 
         {recent.length > 0 && (
-          <section className="home-section">
-            <div className="section-head">
-              <div className="h-eyebrow">New releases</div>
-              {/* The watched rail owns the page's h1 when it's on screen. */}
-              <RecentHeading className="k-h1">Recently updated</RecentHeading>
-            </div>
-            <div className="grid grid-recent">
-              {recent.map((it) => <RecentCard key={it.id} it={it} section={section} />)}
-            </div>
-          </section>
+          <Rail eyebrow="New releases" title="Recently updated" wrap
+            heading={firstRail === 'recent' ? 'h1' : 'h2'}>
+            {recent.map((it) => <RecentCard key={it.id} it={it} section={section} />)}
+          </Rail>
         )}
 
+        {genreRails.map(([g, list], i) => (
+          <Rail
+            key={g} eyebrow="Genre" title={g}
+            heading={firstRail === 'genre' && i === 0 ? 'h1' : 'h2'}
+            action={<button className="rail-more" type="button" onClick={() => seeAll(g)}>See all</button>}
+          >
+            {list.map((it) => <PosterCard key={it.id} it={it} section={section} />)}
+          </Rail>
+        ))}
+
         {items.length > 0 && (
-          <section className="home-section">
+          <section className="home-section" ref={libraryRef}>
             <div className="section-head">
               <div className="h-eyebrow">Everything available</div>
               <h2 className="k-h1">Full library</h2>
