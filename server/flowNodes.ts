@@ -14,7 +14,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { jfJson, jfUrl, jellyfinConfigured, sectionCollections, JfItem } from './jellyfin.js'
+import { jfJson, jfUrl, jfHeaders, jellyfinConfigured, sectionCollections, JfItem } from './jellyfin.js'
 import {
   listSeries,
   findBySource,
@@ -6100,7 +6100,7 @@ const jellyfinScan: NodeImpl = {
     try {
       // POST /Library/Refresh — async full-library scan (item-scoped refresh
       // needs a user context we don't have; a library scan is cheap enough).
-      const res = await fetch(jfUrl('/Library/Refresh'), { method: 'POST', signal: AbortSignal.timeout(15_000) })
+      const res = await fetch(jfUrl('/Library/Refresh'), { method: 'POST', headers: jfHeaders(), signal: AbortSignal.timeout(15_000) })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       ctx.notes.push('triggered Jellyfin library scan')
     } catch (e) {
@@ -6264,6 +6264,7 @@ const jellyfinCollection: NodeImpl = {
     // POST /Collections/{id}/Items?ids=… — adding an existing member is a no-op.
     const res = await fetch(jfUrl(`/Collections/${collectionId}/Items`, { ids: ids.join(',') }), {
       method: 'POST',
+      headers: jfHeaders(),
       signal: AbortSignal.timeout(20_000),
     })
     if (!res.ok) throw new Error(`Jellyfin add-to-collection failed (${res.status})`)
