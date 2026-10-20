@@ -81,13 +81,6 @@ const subGroup = (s: JfMediaStream): string => {
   // Bracketed format/language tags are not release groups.
   return /^(ass|ssa|srt|subrip|vtt|subs?|text|eng(lish)?|full|default)$/i.test(g) ? '' : g
 }
-// What is left of the title once language, format, placement and purpose words
-// are gone; separates e.g. two differently-translated groupless tracks.
-const subRemnant = (s: JfMediaStream): string =>
-  String(s.Title || '')
-    .replace(/\[[^\]]*\]/g, ' ')
-    .replace(/\b(eng(?:lish)?|en|ass|ssa|srt|sub(?:rip)?|subs|subtitles?|text|sidecar|external|embedded|full|dialog(?:ue)?|default|styled|plain|forced|sdh|cc|closed captions?|signs?|songs?|only|and|\d+)\b/gi, ' ')
-    .replace(/[\s\-–—:|/,.()_+&]+/g, ' ').trim().toLowerCase()
 const CAT_ORDER: SubCat[] = ['full', 'cc', 'signs', 'forced']
 const CAT_LABEL: Record<SubCat, string> = {
   full: 'English', cc: 'English (SDH)', signs: 'English: signs & songs only', forced: 'English (forced)',
@@ -115,7 +108,7 @@ export function buildSubTracks(streams: JfMediaStream[]): SubTrack[] {
   // Collapse by purpose key: category + group + leftover title text.
   const buckets = new Map<string, JfMediaStream[]>()
   for (const s of eng.slice().sort(byStyle)) {
-    const key = `${subCat(s)}|${subGroup(s).toLowerCase()}|${subRemnant(s)}`
+    const key = `${subCat(s)}|${subGroup(s).toLowerCase()}`
     const b = buckets.get(key)
     if (b) b.push(s); else buckets.set(key, [s])
   }
@@ -127,16 +120,15 @@ export function buildSubTracks(streams: JfMediaStream[]): SubTrack[] {
   let fullOrd = 0
   return kept.map(({ cat, s, members }) => {
     const group = subGroup(s)
-    const rem = subRemnant(s)
     let base: string
-    if (cat !== 'full') base = `p:${cat}${group ? `:${group.toLowerCase()}` : rem ? `:${rem}` : ''}`
+    if (cat !== 'full') base = `p:${cat}${group ? `:${group.toLowerCase()}` : ''}`
     else base = group ? `g:${group.toLowerCase()}` : `i:${fullOrd++}`
     const n = (selSeen[base] = (selSeen[base] ?? 0) + 1)
     const sel = n > 1 ? `${base}#${n}` : base
     let label = CAT_LABEL[cat]
     let detail = ''
-    if (cat === 'full') { if (group) label = `English: ${group}`; else detail = rem }
-    else detail = group || rem
+    if (cat === 'full') { if (group) label = `English: ${group}` }
+    else detail = group
     const dup = (labelSeen[label + detail] = (labelSeen[label + detail] ?? 0) + 1)
     if (dup > 1) detail = detail ? `${detail} ${dup}` : `Track ${dup}`
     const alts = [...new Set(members.map((m) => legacy[m.Index]).filter((a): a is string => !!a && a !== sel))]

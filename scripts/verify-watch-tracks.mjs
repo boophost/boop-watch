@@ -97,6 +97,26 @@ const sub = (Index, Codec, Title, extra = {}) =>
   eq(c.map((t) => t.index), [1, 3, 2], 'grouped by language')
 }
 
+// --- edge-case audio titles ---
+{
+  const a = buildAudioTracks([
+    aud(1, 'eng', 'English', 'ac3', 2, true),          // title is only the language
+    aud(2, 'eng', 'ENG: Director commentary', 'ac3', 2),
+    aud(3, 'eng', 'English - Alt dub', 'ac3', 6),
+    aud(4, 'jpn', undefined, 'aac', 2),                // no title
+  ])
+  eq(a.map((t) => [t.label, t.detail]), [
+    ['English', 'AC3 · Stereo'], ['English: Director commentary', 'Stereo'], ['English: Alt dub', '5.1'], ['Japanese', 'AAC · Stereo'],
+  ], 'audio edge cases')
+}
+
+// --- an SRT with extra title text still collapses into the ASS (same purpose, no group) ---
+{
+  const s = buildSubTracks([sub(6, 'ass', 'English'), sub(7, 'subrip', 'English (SRT plain text copy)')])
+  eq(s.length, 1, 'srt with extra title collapses')
+  eq(s[0].index, 6, 'ass kept')
+}
+
 // --- optional live (read-only) dump ---
 if (process.env.WATCH_URL && process.env.WATCH_IDS) {
   for (const id of process.env.WATCH_IDS.split(',')) {
