@@ -119,6 +119,30 @@ export async function recentlyWatched(limit = 24): Promise<RecentWatch[]> {
   }
 }
 
+export interface HistoryRow extends RecentWatch { at: string | null }
+
+/** The full watch history the "For you" rail reasons over: account rows (with
+ * their last-touched time) when signed in, else the local store, which carries
+ * no timestamps — the server can then only offer "up next", never "new". */
+export async function watchHistory(loggedIn: boolean, limit = 400): Promise<HistoryRow[]> {
+  if (loggedIn) {
+    try {
+      const { data, error } = await supabase
+        .from('watch_progress')
+        .select('item_id, position, duration, watched, updated_at')
+        .order('updated_at', { ascending: false })
+        .limit(limit)
+      if (error) throw error
+      return (data || []).map((r) => ({
+        id: r.item_id, position: r.position, duration: r.duration, watched: r.watched, at: r.updated_at ?? null,
+      }))
+    } catch { /* fall through to the local view */ }
+  }
+  return Object.entries(readLocal()).map(([id, m]) => ({
+    id, position: m.p, duration: m.d, watched: !!m.w, at: null,
+  }))
+}
+
 export async function saveAccountProgress(userId: string, id: string, p: Progress): Promise<void> {
   await supabase.from('watch_progress').upsert({
     user_id: userId,

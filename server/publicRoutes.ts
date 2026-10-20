@@ -396,6 +396,152 @@ publicRouter.get('/api/featured', async (req, res) => {
   res.json({ items: entries.slice(0, 5).map((e) => e.item) })
 })
 
+// "For you" rail. The watch history lives in Supabase (RLS-scoped, read by the
+// browser) or localStorage for anonymous viewers, so the client posts it here
+// and we resolve it against the scope cache. Three tiers, in priority order:
+//   new  — a show they're following dropped an episode after they last watched
+//   next — the episode after the furthest one they finished
+//   rec  — unwatched titles ranked by overlap with the genres they watch
+// Nothing is stored; ids outside the Public collection simply drop out.
+interface ForYouHistory { id: string; watched: boolean; position: number; duration: number; at: string | null }
+interface ForYouItem {
+  id: string
+  titleId: string
+  type: 'episode' | 'series' | 'movie'
+  reason: 'new' | 'next' | 'rec'
+  name: string
+  season: number | null
+  epLabel: string
+  because: string | null
+  /** "new" only: episodes released since they last watched the show. */
+  newCount: number
+}
+
+publicRouter.post('/api/foryou', async (req, res) => {
+  if (!ensureConfigured(res)) return
+  try {
+    await ensureScope()
+  } catch {
+    res.status(502).json({ error: 'Library unavailable' })
+    return
+  }
+  const section = qSection(req)
+  const raw: unknown = (req.body as { history?: unknown } | undefined)?.history
+  const history: ForYouHistory[] = (Array.isArray(raw) ? raw : []).slice(0, 500).flatMap((h) => {
+    if (!h || typeof h !== 'object') return []
+    const r = h as Record<string, unknown>
+    if (typeof r.id !== 'string' || !r.id) return []
+    return [{
+      id: r.id,
+      watched: r.watched === true,
+      position: Number(r.position) || 0,
+      duration: Number(r.duration) || 0,
+      at: typeof r.at === 'string' ? r.at : null,
+    }]
+  })
+
+  // Regular seasons first, S0 specials after everything — so "next" never
+  // detours into a special between two cours.
+  const epOrd = (ep: JfItem) =>
+    (ep.ParentIndexNumber ? ep.ParentIndexNumber : 999) * 10000 + (ep.IndexNumber ?? 9999)
+  const episodes = getScopeEpisodes(section)
+  const epById = new Map(episodes.map((ep) => [ep.Id, ep]))
+  const bySeries = new Map<string, JfItem[]>()
+  for (const ep of episodes) {
+    if (!ep.SeriesId) continue
+    ;(bySeries.get(ep.SeriesId) ?? bySeries.set(ep.SeriesId, []).get(ep.SeriesId)!).push(ep)
+  }
+  for (const list of bySeries.values()) list.sort((a, b) => epOrd(a) - epOrd(b))
+  const titles = getCollectionItems(section)
+  const titleById = new Map(titles.map((it) => [it.Id, it]))
+
+  // Per series: the furthest episode touched, whether it was finished, and when
+  // they last watched anything from it.
+  const finished = (h: ForYouHistory) => h.watched || (h.duration > 0 && h.position / h.duration >= 0.9)
+  const follow = new Map<string, { ep: JfItem; done: boolean; lastAt: number }>()
+  const seenTitles = new Set<string>()
+  for (const h of history) {
+    const ep = epById.get(h.id)
+    const titleId = ep ? ep.SeriesId : titleById.has(h.id) ? h.id : null
+    if (!titleId) continue
+    seenTitles.add(titleId)
+    if (!ep) continue
+    const at = h.at ? Date.parse(h.at) || 0 : 0
+    const cur = follow.get(titleId)
+    if (!cur) { follow.set(titleId, { ep, done: finished(h), lastAt: at }); continue }
+    cur.lastAt = Math.max(cur.lastAt, at)
+    if (epOrd(ep) > epOrd(cur.ep)) { cur.ep = ep; cur.done = finished(h) }
+    else if (ep.Id === cur.ep.Id && finished(h)) cur.done = true
+  }
+
+  const name = (id: string, fallback: string) => getPortalItem(id)?.name || fallback
+  const epItem = (reason: 'new' | 'next', ep: JfItem, seriesId: string): ForYouItem => ({
+    id: ep.Id,
+    titleId: seriesId,
+    type: 'episode',
+    reason,
+    name: name(seriesId, ep.SeriesName || titleById.get(seriesId)?.Name || ''),
+    season: ep.ParentIndexNumber ?? null,
+    epLabel: ep.IndexNumber != null ? `E${ep.IndexNumber}` : '',
+    because: null,
+    newCount: 0,
+  })
+
+  const fresh: { t: number; item: ForYouItem }[] = []
+  const upNext: { t: number; item: ForYouItem }[] = []
+  for (const [seriesId, f] of follow) {
+    // Still mid-episode: the "recently watched" rail already resumes it.
+    if (!f.done) continue
+    const ahead = (bySeries.get(seriesId) || []).filter((ep) => epOrd(ep) > epOrd(f.ep))
+    const next = ahead[0]
+    if (!next) continue
+    // "New" = something in the unwatched stretch dropped after they last
+    // watched; the card still opens the next episode in order, not the newest.
+    // Anonymous history has no timestamps (lastAt 0), so it can only say "next".
+    const dropped = f.lastAt > 0 ? ahead.filter((ep) => releasedTs(ep) > f.lastAt) : []
+    if (dropped.length) {
+      const item = epItem('new', next, seriesId)
+      item.newCount = dropped.length
+      fresh.push({ t: Math.max(...dropped.map(releasedTs)), item })
+    } else upNext.push({ t: f.lastAt, item: epItem('next', next, seriesId) })
+  }
+  fresh.sort((a, b) => b.t - a.t)
+  upNext.sort((a, b) => b.t - a.t)
+
+  // Taste profile: how many of the titles they've watched carry each genre.
+  const weight = new Map<string, number>()
+  for (const id of seenTitles) {
+    for (const g of titleById.get(id)?.Genres || []) weight.set(g, (weight.get(g) || 0) + 1)
+  }
+  const recs = weight.size === 0 ? [] : titles.flatMap((it) => {
+    if (seenTitles.has(it.Id)) return []
+    const genres = it.Genres || []
+    const hits = genres.filter((g) => weight.has(g)).sort((a, b) => weight.get(b)! - weight.get(a)!)
+    if (!hits.length) return []
+    // Normalised so a title tagged with every genre doesn't win by default.
+    const score = hits.reduce((s, g) => s + weight.get(g)!, 0) / Math.sqrt(genres.length)
+    const item: ForYouItem = {
+      id: it.Id,
+      titleId: it.Id,
+      type: it.Type === 'Series' ? 'series' : 'movie',
+      reason: 'rec',
+      name: name(it.Id, it.Name || ''),
+      season: null,
+      epLabel: '',
+      because: hits[0],
+      newCount: 0,
+    }
+    return [{ score, t: releasedTs(it), item }]
+  }).sort((a, b) => b.score - a.score || b.t - a.t)
+
+  const items = [...fresh, ...upNext].map((e) => e.item)
+  for (const r of recs) {
+    if (items.length >= 24) break
+    items.push(r.item)
+  }
+  res.json({ items: items.slice(0, 24) })
+})
+
 // Title detail — series (with episode list) or movie.
 publicRouter.get('/api/catalog/:id', async (req, res) => {
   if (!ensureConfigured(res)) return

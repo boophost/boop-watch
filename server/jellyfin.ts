@@ -115,12 +115,20 @@ export function jfUrl(path: string, query: Query = {}): URL {
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null) u.searchParams.set(k, String(v))
   }
-  u.searchParams.set('api_key', jfKey())
   return u
 }
 
+// Jellyfin 12 dropped the legacy credential forms (`api_key` query param and
+// `X-Emby-Token` header) — both now 401 and the whole portal reads "Library
+// unavailable". The key travels only in the Authorization header, so it is
+// also never part of a URL we build. Every fetch to jfUrl() must pass these.
+export const jfHeaders = (extra: Record<string, string> = {}): Record<string, string> => ({
+  ...extra,
+  Authorization: `MediaBrowser Token="${jfKey()}"`,
+})
+
 export async function jfJson<T = unknown>(path: string, query: Query = {}): Promise<T> {
-  const res = await fetch(jfUrl(path, query), { headers: { Accept: 'application/json' } })
+  const res = await fetch(jfUrl(path, query), { headers: jfHeaders({ Accept: 'application/json' }) })
   if (!res.ok) throw new Error(`Jellyfin ${path} -> ${res.status}`)
   return (await res.json()) as T
 }
@@ -344,8 +352,8 @@ export const getItemSection = (id: string): PortalSection | undefined => section
 // ---------------------------------------------------------------------------
 // Byte-streaming proxy to Jellyfin (images, playlists, segments).
 // Jellyfin embeds the api_key inside playlist URIs; strip every api_key/ApiKey
-// param so the viewer never sees the token. The catch-all re-adds it server-side
-// when the (relative) URI comes back through us.
+// param so the viewer never sees the token. The catch-all re-authenticates
+// (Authorization header) when the (relative) URI comes back through us.
 // ---------------------------------------------------------------------------
 function stripCreds(m3u8: string): string {
   return m3u8
@@ -360,7 +368,7 @@ export async function proxy(
   url: URL,
   { isPlaylist = false }: { isPlaylist?: boolean } = {},
 ): Promise<void> {
-  const headers: Record<string, string> = {}
+  const headers = jfHeaders()
   if (typeof req.headers.range === 'string') headers.range = req.headers.range
 
   let upstream: globalThis.Response

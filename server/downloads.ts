@@ -61,7 +61,10 @@ function isBatch(name: string): boolean {
   return /\bbatch\b|\bcomplete(?:d)?\b|\bseason\b|\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/i.test(name)
 }
 
-function parseEpisode(name: string): number | null {
+function parseEpisode(raw: string): number | null {
+  // A single-file torrent is named after its file; drop the extension so
+  // "Show - 343.mkv" reaches the end-of-string branch below.
+  const name = raw.replace(/\.(?:mkv|mp4|m4v|avi|webm|ts|m2ts)$/i, '')
   if (/\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/.test(name)) return null
   let m = name.match(/\bS\d{1,2}\s*E(\d{1,4})\b/i)
   if (m) return Number(m[1])

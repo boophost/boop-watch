@@ -356,6 +356,7 @@ guard):
 | `GET /api/catalog` / `GET /api/catalog/:id` | Browse list / title detail (series or movie) |
 | `GET /api/watch/:id` | Player metadata (audio/sub/quality tracks + sibling episodes) |
 | `GET /api/schedule` | Weekly anime airings (animeschedule.net), library-filtered |
+| `POST /api/foryou?section=` | "For you" rail: new/next episodes + genre recs from a posted watch history (nothing stored) |
 | `GET /img/:id` | Poster proxy (Jellyfin Primary image) |
 | `GET /api/play/:id/master.m3u8`, `/api/play/:id/*splat` | HLS proxy (strips `api_key`) |
 | `GET /api/sub/:id/:index` | Subtitle (ASS) delivery for client-side JASSUB |
