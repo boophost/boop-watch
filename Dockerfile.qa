@@ -1,0 +1,84 @@
+# The QA agent's runtime, baked.
+#
+# This image exists because the qa-agent job used to build its own environment
+# on every run: `curl | bash` the Claude CLI, `playwright install-deps`,
+# `playwright install chromium`, then `npx -y @playwright/mcp@latest` on top.
+# Minutes per run, and every one of those steps is a documented outage in
+# .github/workflows/docker-publish.yml's comments — the wrong chromium revision,
+# the browser landing in /root under sudo, an AVX-less CPU, the MCP silently not
+# loading. None of it is work that belongs in a pipeline step.
+#
+# Layer order matters: everything slow is above the COPY, so a change to the QA
+# scripts rebuilds only the last few kilobytes. That is what makes rebuilding
+# this per-PR cheap, which in turn is what lets the image carry the PR's OWN
+# version of the scripts — the semantics the checkout-based job had.
+
+# Debian, not the app image's alpine: the Claude CLI ships a Bun-compiled binary
+# that needs glibc, and Playwright publishes no musl chromium build.
+FROM node:22-bookworm-slim
+
+# Pinned, not @latest. The MCP bundles its own Playwright and expects the exact
+# chromium revision that Playwright installs; letting either float is how the
+# MCP ends up reporting "Chrome binary missing" and the agent silently loses its
+# browser — at which point it "verifies" UI items over HTTP, which for a
+# client-rendered SPA is a false pass. Bump both together, deliberately.
+ARG PLAYWRIGHT_MCP_VERSION=0.0.82
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1 \
+    DISABLE_ERROR_REPORTING=1 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    # Playwright's browsers go somewhere every user can read. The workflow had
+    # to be careful that a sudo install did not hide the browser in /root; a
+    # fixed, world-readable path removes the question.
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl git jq \
+      # ffprobe: flow test-plan items probe media facts.
+      ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# kubectl, for test-plan items that prove pod-level claims (env, mounts,
+# rollouts). The job is given a ServiceAccount by link; without one this is
+# present but unauthorised, which is the honest state — the agent is told
+# whether kubectl works rather than guessing.
+RUN curl -fsSLo /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && kubectl version --client=true --output=yaml >/dev/null
+
+# The Claude CLI. Native install (the platform binary up front) rather than the
+# npm wrapper's lazy first-run download, so a run never pays for it — and never
+# hangs on it.
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && ln -s /root/.local/bin/claude /usr/local/bin/claude \
+    && claude --version
+
+# The Playwright MCP plus the chromium it expects, installed with the MCP's OWN
+# bundled Playwright so the two cannot disagree.
+RUN npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
+    && npx --yes --package="@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" -- playwright install-deps chromium \
+    && npx --yes --package="@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" -- playwright install chromium \
+    && chmod -R a+rX /opt/playwright
+
+# Tells the QA scripts to use the binary above instead of fetching one at run
+# time. Without this they fall back to `npx -y @playwright/mcp@latest`, which
+# both costs a download per run and reintroduces the version drift the pin
+# above exists to prevent.
+ENV QA_PLAYWRIGHT_MCP_BIN=/usr/local/bin/playwright-mcp \
+    QA_PLAYWRIGHT=1
+
+WORKDIR /qa
+
+# Last, and deliberately: only these change between PRs, so every layer above
+# comes from cache.
+COPY scripts/qa-agent/ ./scripts/qa-agent/
+COPY scripts/lib/ ./scripts/lib/
+
+# No CMD that runs QA by itself. The job supplies the PR number, so an image
+# started with no arguments should say what it wants rather than do something
+# with a missing one.
+ENTRYPOINT ["node"]
+CMD ["scripts/qa-agent/run.mjs"]

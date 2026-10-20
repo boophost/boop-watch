@@ -17,13 +17,8 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { filterCredentials, getEarliestReset, credentialPool } from './cooldown.mjs'
-
-const HERE = dirname(fileURLToPath(import.meta.url))
+import { playwrightMcp, childEnv } from './playwright-mcp.mjs'
 
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '')
 if (!BASE_URL) {
@@ -31,15 +26,11 @@ if (!BASE_URL) {
   process.exit(2)
 }
 
-const dir = mkdtempSync(join(tmpdir(), 'qa-verify-'))
-const pwCfg = join(dir, 'playwright.json')
-writeFileSync(pwCfg, JSON.stringify({
-  browser: { browserName: 'chromium', launchOptions: { args: ['--test-type', '--no-sandbox', '--disable-dev-shm-usage'] } },
-}))
-const mcpConfig = join(dir, 'mcp.json')
-writeFileSync(mcpConfig, JSON.stringify({
-  mcpServers: { playwright: { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--headless', '--config', pwCfg] } },
-}))
+// The SAME definition run.mjs will use. This file previously wrote its own
+// copy, so the guard proved one configuration and QA then ran another — which
+// is exactly the failure it exists to catch.
+const { mcpConfig, baked } = playwrightMcp()
+console.log(`Playwright MCP: ${baked ? 'baked into the image (pinned)' : 'npx @playwright/mcp@latest (unpinned)'}`)
 
 const prompt = `You are QA. Verify this ONE item against ${BASE_URL}:
 
@@ -59,9 +50,8 @@ Output a single fenced json block, nothing after:
 {"verdicts":[{"index":0,"status":"pass","evidence":"..."}]}
 \`\`\``
 
-// Same strip as run.mjs — these suppress MCP loading in a child session.
-const env = { ...process.env }
-for (const k of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION']) delete env[k]
+// Same child environment run.mjs builds, from the same helper.
+const env = childEnv()
 
 // Same pool + cooldown filter as run.mjs — a capped account must not look like
 // a broken browser. Only OAuth tokens here (API-key billing doesn't hit the
