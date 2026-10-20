@@ -1,0 +1,56 @@
+#!/usr/bin/env node
+// Smoke tests for transform.absolute-spill / spillAbsoluteEpisode (no vitest in this repo).
+const { spillAbsoluteEpisode } = await import('../server/absoluteSpill.ts')
+const { NODE_REGISTRY } = await import('../server/flowNodes.ts')
+
+function assert(cond, msg) {
+  if (!cond) throw new Error(msg)
+}
+const cour = (mal_id, tvdb_id, tvdb_season, episodes, episode_offset = 0) => ({ mal_id, tvdb_id, tvdb_season, episode_offset, episodes })
+const kai = cour(6033, 88031, 1, 98)
+const finalCh = cour(22777, 88031, 2, 61)
+const catalog = [kai, finalCh, cour(1, 5, 1, 12), cour(2, null, null, null), cour(3, 9, 1, null), cour(4, 9, 2, 12)]
+
+// In range: never touched.
+assert(spillAbsoluteEpisode(98, kai, catalog).kind === 'in-range', '098 stays S01E98')
+assert(spillAbsoluteEpisode(1, kai, catalog).kind === 'in-range', '001 stays')
+
+// Spill.
+let r = spillAbsoluteEpisode(99, kai, catalog)
+assert(r.kind === 'spilled' && r.cour.mal_id === 22777 && r.cour.tvdb_season === 2 && r.episode === 1, '099 -> 22777 E1')
+r = spillAbsoluteEpisode(159, kai, catalog)
+assert(r.kind === 'spilled' && r.cour.mal_id === 22777 && r.episode === 61, '159 -> 22777 E61')
+
+// Past the last sibling: unchanged with a reason.
+r = spillAbsoluteEpisode(160, kai, catalog)
+assert(r.kind === 'unchanged' && /past the last sibling/.test(r.reason), '160 left unchanged with a note')
+
+// No siblings.
+r = spillAbsoluteEpisode(20, catalog[2], catalog)
+assert(r.kind === 'unchanged' && /no sibling/.test(r.reason), 'show with no siblings unchanged')
+r = spillAbsoluteEpisode(20, catalog[3], catalog)
+assert(r.kind === 'unchanged', 'unmapped cour unchanged')
+
+// Unknown count.
+r = spillAbsoluteEpisode(20, catalog[4], catalog)
+assert(r.kind === 'unchanged' && /unknown/.test(r.reason), 'unknown count unchanged')
+
+// Chain through three cours: 12 + 12 + 12.
+const c1 = cour(10, 7, 1, 12), c2 = cour(11, 7, 2, 12), c3 = cour(12, 7, 3, 12)
+const chain = [c3, c1, c2]
+r = spillAbsoluteEpisode(30, c1, chain)
+assert(r.kind === 'spilled' && r.cour.mal_id === 12 && r.episode === 6, 'chains across cours')
+r = spillAbsoluteEpisode(25, c1, chain)
+assert(r.kind === 'spilled' && r.cour.mal_id === 12 && r.episode === 1, 'chain boundary')
+r = spillAbsoluteEpisode(37, c1, chain)
+assert(r.kind === 'unchanged', 'past a three-cour chain unchanged')
+
+// The node, against the real (empty-or-not) catalog: an item with no catalog row passes through.
+const node = NODE_REGISTRY.get('transform.absolute-spill')
+assert(node, 'node registered')
+const notes = []
+const item = { mal_id: 999999999, torrent_episode: 150 }
+const out = await node.run({ in: [item] }, {}, { notes, dryRun: true })
+assert(out.out.length === 1 && out.out[0].torrent_episode === 150, 'unknown mal passes through')
+
+console.log('verify-absolute-spill: ok')
