@@ -1043,7 +1043,7 @@ const qbittorrentSource: NodeImpl = {
       { key: 'category', label: 'Category', kind: 'text', default: 'anime', help: 'Empty = all categories. Unset defaults to "anime" â€” set the category explicitly on a non-anime flow.' },
       { key: 'completedOnly', label: 'Completed only', kind: 'boolean', default: true, help: 'Only emit torrents that finished downloading (ready to import).' },
       { key: 'skipImported', label: 'Skip already imported', kind: 'boolean', default: true, help: 'Drop torrents whose hash is already in the library ledger before the expensive probe/mux nodes, so a fresh download is not starved behind re-processing the backlog. Turn off to force a re-import.' },
-      { key: 'onlyHashes', label: 'Only these hashes', kind: 'text', default: '', help: 'Comma-separated torrent hashes. When set, only these are emitted and the already-imported / already-processed skip is bypassed — the supported way to re-run one torrent (e.g. after a mapping fix) without touching the ledger. Clear it afterwards.' },
+      { key: 'onlyHashes', label: 'Only these hashes', kind: 'text', default: '', help: 'Comma-separated torrent hashes. When set, only these are emitted and the already-imported / already-processed skip is bypassed - the supported way to re-run one torrent (e.g. after a mapping fix) without touching the ledger. Clear it afterwards.' },
       { key: 'newestFirst', label: 'Newest first', kind: 'boolean', default: true, help: 'Emit the most recently completed torrents first, so a just-finished download is processed ahead of older backlog work. Also exposes torrent_completed_on / torrent_added_on for filter.sort.' },
       { key: 'pathFrom', label: 'Download path (qBit)', kind: 'text', default: '', help: 'Path prefix as qBittorrent sees it, e.g. /downloads.' },
       { key: 'pathTo', label: 'Download path (pod)', kind: 'text', default: '', help: 'Where that same prefix is mounted here, e.g. /downloads. Both empty = no rewrite.' },
@@ -4394,7 +4394,7 @@ const absoluteSpill: NodeImpl = {
     label: 'Spill absolute episodes',
     category: 'enrich',
     description:
-      'For packs numbered absolutely across a franchise (Dragon Ball Kai 001-159): a file whose episode number is past its cour’s length moves to the next sibling cour (same tvdb_id, next tvdb_season) with the previous cours’ lengths subtracted, chaining through several cours. Needs mal_id + tvdb_season from enrich.metadata, so place it after that. Files within range, unknown cour lengths and shows with no sibling are left alone (noted in the run log).',
+      'For packs numbered absolutely across a franchise (Dragon Ball Kai 001-159): a file whose episode number is past its cour's length moves to the next sibling cour (same tvdb_id, next tvdb_season) with the previous cours' lengths subtracted, chaining through several cours. Needs mal_id + tvdb_season from enrich.metadata, so place it after that. Files within range, unknown cour lengths and shows with no sibling are left alone (noted in the run log).',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [{ id: 'out', label: 'out' }],
     config: [],
@@ -4410,6 +4410,8 @@ const absoluteSpill: NodeImpl = {
     }))
     const out: FlowItem[] = []
     let spilled = 0
+    // One summary per (source cour, target cour) so a dry run shows the boundary used.
+    const spans = new Map<string, { from: number; to: number; fromLo: number; fromHi: number; toLo: number; toHi: number; len: number | null }>()
     const unchanged = new Set<string>()
     for (const item of allInputs(inputs)) {
       const mal = asNumber(item.mal_id)
@@ -4430,6 +4432,16 @@ const absoluteSpill: NodeImpl = {
       } else {
         const target = rows.find((s) => s.mal_id === r.cour.mal_id)
         spilled++
+        const key = `${mal}>${r.cour.mal_id}`
+        const sp = spans.get(key)
+        if (sp) {
+          sp.fromLo = Math.min(sp.fromLo, ep)
+          sp.fromHi = Math.max(sp.fromHi, ep)
+          sp.toLo = Math.min(sp.toLo, r.episode)
+          sp.toHi = Math.max(sp.toHi, r.episode)
+        } else {
+          spans.set(key, { from: mal as number, to: r.cour.mal_id as number, fromLo: ep, fromHi: ep, toLo: r.episode, toHi: r.episode, len: cour.episodes })
+        }
         out.push({
           ...item,
           spill_from_mal_id: mal,
@@ -4447,6 +4459,9 @@ const absoluteSpill: NodeImpl = {
       }
     }
     for (const n of unchanged) ctx.notes.push(`absolute-spill: ${n}`)
+    for (const s of spans.values()) {
+      ctx.notes.push(`absolute-spill: spilled mal ${s.from} E${s.fromLo}-${s.fromHi} -> mal ${s.to} E${s.toLo}-${s.toHi} (cour length ${s.len})`)
+    }
     ctx.notes.push(`absolute-spill: moved ${spilled} file(s) into a sibling cour`)
     return { out }
   },
