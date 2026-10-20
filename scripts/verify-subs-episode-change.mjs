@@ -88,11 +88,14 @@ if (via === 'next' || via === 'both') {
 }
 if (via === 'list' || via === 'both') {
   const before = page.url()
-  const rows = page.locator('.eprow')
-  const n = await rows.count()
-  await rows.nth(Math.min(2, n - 1)).click()
+  // Long seasons render .epcell grid buttons (t23); short ones .eprow rows.
+  // Skip the current episode and the chase stub, and click a different one.
+  const rows = page.locator('.epgrid .epcell:not(.current), .eps-list .eprow:not(.chasing):not(.current)')
+  if (!(await rows.count())) { console.log('FAIL episode list: no other episode to click'); failed++ } else {
+    await rows.first().click()
   await page.waitForURL((u) => u.toString() !== before, { timeout: 15000 })
   await check('after episode list click')
+  }
 }
 await browser.close()
 process.exit(failed ? 1 : 0)
