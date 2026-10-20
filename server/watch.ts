@@ -2,15 +2,8 @@
 // ported from the legacy /watch route's data layer. Subtitles are delivered as
 // separate ASS via /api/sub and rendered client-side (JASSUB) — not burned in.
 import type { JfItem, JfMediaStream } from './jellyfin.js'
-
-const LANG_NAMES: Record<string, string> = {
-  eng: 'English', jpn: 'Japanese', jap: 'Japanese', spa: 'Spanish', fre: 'French', fra: 'French',
-  ger: 'German', deu: 'German', por: 'Portuguese', ita: 'Italian', kor: 'Korean', chi: 'Chinese',
-  zho: 'Chinese', rus: 'Russian', ara: 'Arabic', vie: 'Vietnamese', tha: 'Thai', ind: 'Indonesian',
-  und: 'Unknown',
-}
-const langName = (c?: string): string => (c ? (LANG_NAMES[String(c).toLowerCase()] || String(c).toUpperCase()) : 'Unknown')
-const chLabel = (n?: number): string => (n === 1 ? 'Mono' : n === 2 ? 'Stereo' : n === 6 ? '5.1' : n === 8 ? '7.1' : n ? `${n}ch` : '')
+import { buildAudioTracks, buildSubTracks, type AudioTrack, type SubTrack } from './watchTracks.js'
+export type { AudioTrack, SubTrack }
 
 // Server-side quality presets (resolution + bitrate cap). Auto = source-driven.
 export const QUALITY_PRESETS = [
@@ -21,11 +14,6 @@ export const QUALITY_PRESETS = [
   { key: '240', label: '240p', h: 240, vb: 600000 },
 ]
 
-export interface AudioTrack { index: number; lang: string; label: string; detail: string; def: boolean }
-// `sel` is a stable, cross-episode selector for remembering the sub choice: the
-// media-stream `index` shuffles between episodes, so we key on the release group
-// (consistent within a season) and fall back to the track's ordinal position.
-export interface SubTrack { index: number; group: string; sel: string }
 // `n` is the bare episode number within its season (the grid button label).
 export interface WatchEpisode { id: string; num: string; n: number | null; name: string; current: boolean }
 // One entry per season of the series that has playable episodes; `firstId` is
@@ -83,48 +71,9 @@ export function buildWatchData(id: string, item: JfItem, siblings: JfItem[], seg
   const streams: JfMediaStream[] = item.MediaStreams
     || (item.MediaSources && item.MediaSources[0] && item.MediaSources[0].MediaStreams) || []
 
-  const audioTracks: AudioTrack[] = streams.filter((s) => s.Type === 'Audio').map((s) => ({
-    index: s.Index,
-    lang: String(s.Language || '').toLowerCase(),
-    label: langName(s.Language),
-    detail: [String(s.Codec || '').toUpperCase(), chLabel(s.Channels)].filter(Boolean).join(' · '),
-    def: !!s.IsDefault,
-  }))
+  const audioTracks = buildAudioTracks(streams)
   const defAudio = (audioTracks.find((t) => t.def) || audioTracks[0] || {}).index
-
-  // English text subtitles, condensed to "Full" dialogue tracks (one per release
-  // group), dropping the redundant signs-only / CC / SDH / forced variants.
-  const isTextSub = (s: JfMediaStream) => s.IsTextSubtitleStream
-    || /^(ass|ssa|subrip|srt|webvtt|vtt|mov_text|text)$/i.test(s.Codec || '')
-  const isEngSub = (s: JfMediaStream) => /^en/i.test(s.Language || '') || /\beng(lish)?\b/i.test(s.DisplayTitle || s.Title || '')
-  const subCat = (s: JfMediaStream): string => {
-    const t = `${s.Title || ''} ${s.DisplayTitle || ''}`.toLowerCase()
-    if (s.IsForced || /forced/.test(t)) return 'forced'
-    if (/sdh|deaf|hard of hearing|closed caption|\bcc\b/.test(t)) return 'cc'
-    if (/(sign|song)/.test(t) && !/\bfull\b/.test(t)) return 'signs'
-    return 'full'
-  }
-  const subGroup = (s: JfMediaStream): string => {
-    const m = `${s.Title || ''} ${s.DisplayTitle || ''}`.match(/\[([^\]]+)\]/)
-    return m ? m[1].trim() : ''
-  }
-  const engSubs = streams.filter((s) => s.Type === 'Subtitle' && isTextSub(s) && isEngSub(s))
-  let subPool = engSubs.filter((s) => subCat(s) === 'full')
-  if (!subPool.length) subPool = engSubs                       // fallback: whatever English we have
-  const selSeen: Record<string, number> = {}
-  const subs: SubTrack[] = subPool
-    .sort((a, b) => {
-      const ass = (/^(ass|ssa)$/i.test(b.Codec || '') ? 1 : 0) - (/^(ass|ssa)$/i.test(a.Codec || '') ? 1 : 0)
-      return ass || a.Index - b.Index
-    })
-    .map((s, i) => {
-      const group = subGroup(s)
-      // Prefer the release group (stable across a season's episodes); groupless
-      // tracks fall back to their ordinal in this deterministic ordering.
-      const base = group ? `g:${group.toLowerCase()}` : `i:${i}`
-      const n = (selSeen[base] = (selSeen[base] ?? 0) + 1)
-      return { index: s.Index, group, sel: n > 1 ? `${base}#${n}` : base }
-    })
+  const subs = buildSubTracks(streams)
 
   const episodes: WatchEpisode[] = siblings.map((ep) => ({
     id: ep.Id, num: epLabel(ep), n: ep.IndexNumber ?? null, name: ep.Name || 'Episode', current: ep.Id === id,

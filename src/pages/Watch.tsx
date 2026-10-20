@@ -379,7 +379,8 @@ export default function Watch() {
     const pref = readPref()
     let audio = data.audio.default == null ? null : String(data.audio.default)
     if (pref.audioLang) {
-      const m = data.audio.tracks.find((t) => t.lang === pref.audioLang)
+      const same = data.audio.tracks.filter((t) => t.lang === pref.audioLang)
+      const m = same.find((t) => String(t.index) === audio) || same.find((t) => t.def) || same[0]
       if (m) audio = String(m.index)
     }
     setAudioIndex(audio)
@@ -390,7 +391,7 @@ export default function Watch() {
     let sub = ''
     const savedSel = pref.subs?.[subScope(data)]
     if (savedSel && savedSel !== 'off') {
-      const m = data.subs.find((s) => s.sel === savedSel)
+      const m = data.subs.find((s) => s.sel === savedSel || s.alts?.includes(savedSel))
       if (m) sub = String(m.index)
     }
     setSubIndex(sub)
@@ -895,7 +896,7 @@ export default function Watch() {
   const stubNum = (n: number) => (seasonPrefix ? `${seasonPrefix}·E${n}` : `E${n}`)
 
   const audioLabel = data.audio.tracks.find((t) => String(t.index) === audioIndex)?.label || 'Audio'
-  const subLabel = subIndex === '' ? 'Off' : (data.subs.find((s) => String(s.index) === subIndex)?.group || 'English')
+  const subLabel = subIndex === '' ? 'Off' : (data.subs.find((s) => String(s.index) === subIndex)?.label || 'English')
   const qualityLabel = data.quality.find((q) => q.key === qKey)?.label || 'Auto'
 
   return (
@@ -1006,9 +1007,8 @@ export default function Watch() {
               <Menu kind="subs" icon="captions" title="Subtitles" prefix="Subtitles" label={subLabel}>
                 <PopItem active={subIndex === ''} label="Off"
                   onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(''); rememberSub(data, 'off') }} />
-                {data.subs.map((s, i) => (
-                  <PopItem key={s.index} active={String(s.index) === subIndex} label="English"
-                    detail={s.group || (data.subs.length > 1 ? `Track ${i + 1}` : 'Full')}
+                {data.subs.map((s) => (
+                  <PopItem key={s.index} active={String(s.index) === subIndex} label={s.label} detail={s.detail}
                     onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(String(s.index)); rememberSub(data, s.sel) }} />
                 ))}
               </Menu>
