@@ -4271,13 +4271,38 @@ function walkFiles(root: string, exts: Set<string>, out: string[]): void {
   }
 }
 
+interface QbitFileRow {
+  name: string
+  priority: number
+  progress: number
+}
+
+// Files of one torrent as qBittorrent sees them, keyed by their torrent-relative
+// path (forward slashes). Priority-0 files can still hold boundary-piece stubs
+// on disk, so the disk walk alone cannot tell a real episode from a fragment.
+async function qbitTorrentFiles(
+  config: Record<string, unknown>,
+  hash: string,
+): Promise<Map<string, QbitFileRow>> {
+  const { base, user, pass } = qbitCreds(config)
+  const cookie = await qbitLogin(base, user, pass)
+  const res = await fetch(`${base}/api/v2/torrents/files?hash=${encodeURIComponent(hash)}`, {
+    headers: { Cookie: cookie },
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (!res.ok) throw new Error(`qBittorrent files failed (${res.status})`)
+  const rows = (await res.json()) as QbitFileRow[]
+  if (!Array.isArray(rows)) throw new Error('qBittorrent files returned no list')
+  return new Map(rows.map((r) => [String(r.name).replace(/\\/g, '/'), r]))
+}
+
 const expandFiles: NodeImpl = {
   spec: {
     type: 'transform.expand-files',
     label: 'Expand to files',
     category: 'enrich',
     description:
-      'Turns each item into one item per video file at its path (recurses into folders for season packs). Re-parses the episode number from each file name.',
+      'Turns each item into one item per video file at its path (recurses into folders for season packs). Re-parses the episode number from each file name. For qBittorrent items (with a hash) files qBit has at priority 0 or not fully downloaded are skipped, and the item goes to "no files" if qBit cannot be asked.',
     inputs: [{ id: 'in', label: 'in', dataType: 'torrent' }],
     outputs: [
       { id: 'files', label: 'files', dataType: 'file' },
@@ -4299,6 +4324,39 @@ const expandFiles: NodeImpl = {
       const p = String(item[pathField] ?? '')
       const found: string[] = []
       if (p) walkFiles(p, exts, found)
+      const hash = String(item.torrent_hash ?? item.hash ?? '')
+      if (hash && found.length > 0) {
+        // Fail closed: importing a stub is worse than importing nothing.
+        let qfiles: Map<string, QbitFileRow>
+        try {
+          qfiles = await qbitTorrentFiles(config, hash)
+        } catch (e) {
+          ctx.notes.push(`qBit files lookup failed for ${hash.slice(0, 8)} (${(e as Error).message}); not importing its files`)
+          empty.push(item)
+          continue
+        }
+        const savePath = String(item.save_path ?? '')
+        const keep: string[] = []
+        let skipPrio = 0
+        let skipPartial = 0
+        let skipUnknown = 0
+        for (const f of found) {
+          const rel = (savePath ? path.relative(savePath, f) : path.basename(f)).replace(/\\/g, '/')
+          const row = qfiles.get(rel)
+          if (!row) skipUnknown++
+          else if (row.priority === 0) skipPrio++
+          else if (row.progress < 1) skipPartial++
+          else keep.push(f)
+        }
+        if (skipPrio || skipPartial || skipUnknown) {
+          ctx.notes.push(
+            `skipped ${skipPrio + skipPartial + skipUnknown} file(s) of ${hash.slice(0, 8)}: ${skipPrio} priority 0, ${skipPartial} incomplete` +
+              (skipUnknown ? `, ${skipUnknown} not in qBit's file list` : ''),
+          )
+        }
+        found.length = 0
+        found.push(...keep)
+      }
       if (found.length === 0) {
         empty.push(item)
         continue
