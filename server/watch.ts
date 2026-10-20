@@ -26,7 +26,11 @@ export interface AudioTrack { index: number; lang: string; label: string; detail
 // media-stream `index` shuffles between episodes, so we key on the release group
 // (consistent within a season) and fall back to the track's ordinal position.
 export interface SubTrack { index: number; group: string; sel: string }
-export interface WatchEpisode { id: string; num: string; name: string; current: boolean }
+// `n` is the bare episode number within its season (the grid button label).
+export interface WatchEpisode { id: string; num: string; n: number | null; name: string; current: boolean }
+// One entry per season of the series that has playable episodes; `firstId` is
+// the season's first episode, where the season picker navigates.
+export interface WatchSeason { season: number; count: number; firstId: string }
 // Intro/outro skip ranges (seconds), sourced from Jellyfin Media Segments.
 export interface Segment { type: 'intro' | 'outro'; start: number; end: number }
 export interface WatchData {
@@ -42,6 +46,7 @@ export interface WatchData {
   subs: SubTrack[]
   quality: typeof QUALITY_PRESETS
   episodes: WatchEpisode[]
+  seasons: WatchSeason[]
   nextId: string | null
   segments: Segment[]
 }
@@ -51,7 +56,25 @@ const epLabel = (ep: JfItem): string =>
     ? `S${ep.ParentIndexNumber}·E${ep.IndexNumber}`
     : (ep.IndexNumber != null ? `E${ep.IndexNumber}` : '·')
 
-export function buildWatchData(id: string, item: JfItem, siblings: JfItem[], segments: Segment[] = []): WatchData {
+// Seasons present in a series' playable episodes, ascending. Season 0
+// (specials) sorts first like Jellyfin; episodes with no season are skipped.
+export function buildSeasons(all: JfItem[]): WatchSeason[] {
+  const by = new Map<number, { count: number; first: JfItem }>()
+  for (const ep of all) {
+    const s = ep.ParentIndexNumber
+    if (s == null) continue
+    const cur = by.get(s)
+    if (!cur) by.set(s, { count: 1, first: ep })
+    else {
+      cur.count++
+      if ((ep.IndexNumber ?? Infinity) < (cur.first.IndexNumber ?? Infinity)) cur.first = ep
+    }
+  }
+  return [...by.entries()].sort((a, b) => a[0] - b[0])
+    .map(([season, v]) => ({ season, count: v.count, firstId: v.first.Id }))
+}
+
+export function buildWatchData(id: string, item: JfItem, siblings: JfItem[], segments: Segment[] = [], allEpisodes: JfItem[] = []): WatchData {
   const title = item.Name || 'Now playing'
   const epNum = (item.ParentIndexNumber != null && item.IndexNumber != null)
     ? `S${item.ParentIndexNumber}·E${item.IndexNumber}` : ''
@@ -104,8 +127,9 @@ export function buildWatchData(id: string, item: JfItem, siblings: JfItem[], seg
     })
 
   const episodes: WatchEpisode[] = siblings.map((ep) => ({
-    id: ep.Id, num: epLabel(ep), name: ep.Name || 'Episode', current: ep.Id === id,
+    id: ep.Id, num: epLabel(ep), n: ep.IndexNumber ?? null, name: ep.Name || 'Episode', current: ep.Id === id,
   }))
+  const seasons = buildSeasons(allEpisodes)
   const curIdx = siblings.findIndex((ep) => ep.Id === id)
   const nextId = curIdx >= 0 && siblings[curIdx + 1] ? siblings[curIdx + 1].Id : null
 
@@ -123,6 +147,7 @@ export function buildWatchData(id: string, item: JfItem, siblings: JfItem[], seg
     subs,
     quality: QUALITY_PRESETS,
     episodes,
+    seasons,
     nextId,
     segments,
   }
