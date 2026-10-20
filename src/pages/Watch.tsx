@@ -206,6 +206,9 @@ export default function Watch() {
   // screen on (the watchdog treats that case as a stall for the same reason).
   const [playing, setPlaying] = useState(false)
   const subRef = useRef<any>(null)
+  // What the live JASSUB instance was built for. It is bound to one <video>, and
+  // the provider can hand us a new one (episode change), so reuse only on a match.
+  const subBoundRef = useRef<{ video: HTMLVideoElement; itemId: string; url: string } | null>(null)
   const firstLoad = useRef(true)
   // Position + play-state to restore after a transcode reload (audio/quality switch).
   const pendingSeek = useRef<{ time: number; play: boolean } | null>(null)
@@ -516,16 +519,23 @@ export default function Watch() {
   // Burn-in devices never reach this: their subs are in the video itself.
   useEffect(() => {
     if (BURN_IN_SUBS || !data || !subsReady || !videoEl) return
-    if (subIndex === '') {
-      if (subRef.current) { subRef.current.destroy(); subRef.current = null }
-      return
+    const dropSub = () => {
+      if (subRef.current) { try { subRef.current.destroy() } catch { /* video already gone */ } }
+      subRef.current = null
+      subBoundRef.current = null
     }
+    if (subIndex === '') { dropSub(); return }
     // Absolute URL: JASSUB fetches this from inside the (blob:) worker, where a
     // root-relative path has no resolvable base and throws "Invalid URL".
     const url = `${location.origin}/api/sub/${encodeURIComponent(data.id)}/${encodeURIComponent(subIndex)}`
+    const bound = subBoundRef.current
+    // A different <video> or episode: the old overlay is attached to a stale
+    // element / stale timeline, so rebuild rather than retarget.
+    if (subRef.current && (!bound || bound.video !== videoEl || bound.itemId !== data.id)) dropSub()
     if (subRef.current) {
-      subRef.current.setTrackByUrl(url)
+      if (bound && bound.url !== url) { subRef.current.setTrackByUrl(url); bound.url = url }
     } else if (window.JASSUB) {
+      subBoundRef.current = { video: videoEl, itemId: data.id, url }
       subRef.current = new window.JASSUB({
         video: videoEl,
         subUrl: url,
