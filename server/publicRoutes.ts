@@ -760,17 +760,14 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
   // episodes, skip segments, and the next-episode chase — run concurrently.
   // Serially they added up to multiple seconds before the player could even
   // request the stream; now the route costs max(...) instead of sum(...).
-  const siblingsPromise: Promise<JfItem[]> = (async () => {
-    if (item.Type !== 'Episode' || !item.SeriesId) return []
+  const siblingsPromise: Promise<{ scoped: JfItem[]; all: JfItem[] }> = (async () => {
+    if (item.Type !== 'Episode' || !item.SeriesId) return { scoped: [], all: [] }
     try {
       const e = await jfJson<{ Items?: JfItem[] }>(`/Shows/${item.SeriesId}/Episodes`)
       const season = item.ParentIndexNumber
-      return (e.Items || []).filter(
-        (ep) =>
-          getPlayableIds().has(ep.Id) &&
-          (season == null || ep.ParentIndexNumber === season),
-      )
-    } catch { return [] /* sidebar is optional */ }
+      const all = (e.Items || []).filter((ep) => getPlayableIds().has(ep.Id))
+      return { all, scoped: all.filter((ep) => season == null || ep.ParentIndexNumber === season) }
+    } catch { return { scoped: [], all: [] } /* sidebar is optional */ }
   })()
 
   // Fallback: when Jellyfin has no Media Segments provider, source community
@@ -816,7 +813,7 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
     }
   })()
 
-  const [rawSiblings, segments, nextEpisode] = await Promise.all([siblingsPromise, segmentsPromise, chasePromise])
+  const [{ scoped: rawSiblings, all: allEpisodes }, segments, nextEpisode] = await Promise.all([siblingsPromise, segmentsPromise, chasePromise])
 
   // Prefer our catalog-sourced names (portalDb) over Jellyfin's for everything
   // the player shows — episode/movie title, the series back-link, and the
@@ -834,7 +831,7 @@ publicRouter.get('/api/watch/:id', async (req, res) => {
       return n ? { ...ep, Name: n } : ep
     })
   }
-  res.json({ ...buildWatchData(id, item, siblings, segments), manageId, nextEpisode })
+  res.json({ ...buildWatchData(id, item, siblings, segments, allEpisodes), manageId, nextEpisode })
 })
 
 // Shape a comment row for the client. user_id is included so the client can
