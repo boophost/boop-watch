@@ -144,7 +144,8 @@ export type TitleDetail = SeriesDetail | MovieDetail
 export interface AudioTrack { index: number; lang: string; label: string; detail: string; def: boolean }
 export interface SubTrack { index: number; group: string; sel: string; alts: string[]; label: string; detail: string }
 export interface QualityPreset { key: string; label: string; h: number; vb: number }
-export interface WatchEpisode { id: string; num: string; name: string; current: boolean }
+export interface WatchEpisode { id: string; num: string; n: number | null; name: string; current: boolean }
+export interface WatchSeason { season: number; count: number; firstId: string }
 export interface Segment { type: 'intro' | 'outro'; start: number; end: number }
 export interface WatchData {
   id: string
@@ -158,6 +159,7 @@ export interface WatchData {
   subs: SubTrack[]
   quality: QualityPreset[]
   episodes: WatchEpisode[]
+  seasons: WatchSeason[]
   nextId: string | null
   segments: Segment[]
   // Catalog series id for the admin-only "Library settings" shortcut.
