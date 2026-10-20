@@ -4394,7 +4394,7 @@ const absoluteSpill: NodeImpl = {
     label: 'Spill absolute episodes',
     category: 'enrich',
     description:
-      'For packs numbered absolutely across a franchise (Dragon Ball Kai 001-159): a file whose episode number is past its cour's length moves to the next sibling cour (same tvdb_id, next tvdb_season) with the previous cours' lengths subtracted, chaining through several cours. Needs mal_id + tvdb_season from enrich.metadata, so place it after that. Files within range, unknown cour lengths and shows with no sibling are left alone (noted in the run log).',
+      'For packs numbered absolutely across a franchise (Dragon Ball Kai 001-159): a file whose episode number is past the length of its cour moves to the next sibling cour (same tvdb_id, next tvdb_season) with the lengths of the earlier cours subtracted, chaining through several cours. Needs mal_id + tvdb_season from enrich.metadata, so place it after that. Files within range, unknown cour lengths and shows with no sibling are left alone (noted in the run log).',
     inputs: [{ id: 'in', label: 'in' }],
     outputs: [{ id: 'out', label: 'out' }],
     config: [],
