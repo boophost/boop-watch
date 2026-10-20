@@ -208,6 +208,8 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
     { id: 'pseason', type: 'transform.parse-season', position: { x: 390, y: 300 }, config: { sourceField: 'name', targetField: 'release_season' } },
     { id: 'match', type: 'enrich.indexer-match', position: { x: 520, y: 300 }, config: { setField: 'mal_id', fromField: 'mal_id', queryField: 'name', matchMode: 'tokens', threshold: 0.6, seasonField: 'release_season' } },
     { id: 'meta', type: 'enrich.metadata', position: { x: 780, y: 220 }, config: { malField: 'mal_id', writeDb: true, maxItems: 0 } },
+    // Absolute-numbered packs (Dragon Ball Kai 099-159): spill past-the-end episodes into the sibling cour.
+    { id: 'spill', type: 'transform.absolute-spill', position: { x: 910, y: 220 }, config: {} },
     { id: 'probe', type: 'enrich.media-probe', position: { x: 1040, y: 300 }, config: { fileField: 'file_path' } },
     // Split identified files (scorable/upgradable) from unmatched ones (import as-is).
     { id: 'hasId', type: 'filter.field', position: { x: 1300, y: 300 }, config: { field: 'mal_id', mode: 'not-empty', value: '' } },
@@ -264,7 +266,8 @@ const LIBRARY_IMPORT_GRAPH: FlowGraph = {
     { id: 'e3', source: 'match', sourceHandle: 'matched', target: 'meta', targetHandle: 'in' },
     // Unmatched files still import (just without our metadata / clean year).
     { id: 'e4', source: 'match', sourceHandle: 'unmatched', target: 'probe', targetHandle: 'in' },
-    { id: 'e5', source: 'meta', sourceHandle: 'enriched', target: 'probe', targetHandle: 'in' },
+    { id: 'e5', source: 'meta', sourceHandle: 'enriched', target: 'spill', targetHandle: 'in' },
+    { id: 'e5b', source: 'spill', sourceHandle: 'out', target: 'probe', targetHandle: 'in' },
     { id: 'e6', source: 'meta', sourceHandle: 'skipped', target: 'probe', targetHandle: 'in' },
     { id: 'e7', source: 'probe', sourceHandle: 'probed', target: 'hasId', targetHandle: 'in' },
     // Identified files go through quality scoring; unmatched ones import as-is.
