@@ -14,7 +14,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { jfJson, jfUrl, jellyfinConfigured, sectionCollections, JfItem } from './jellyfin.js'
+import { jfJson, jfUrl, jfHeaders, jellyfinConfigured, sectionCollections, JfItem } from './jellyfin.js'
 import {
   listSeries,
   findBySource,
@@ -3134,6 +3134,22 @@ export function releaseLooksLikeFilm(name: string): boolean {
   return FILM_MARKERS.test(name)
 }
 
+// Releases that are only the show's openings/endings or music. Index tags put
+// them under the show's own id and they read as batches (several files, no
+// episode number), so on prod "Dragon Ball Kai - The Final Chapters (OP & ED -
+// Japanese Credits)" — 182 MB — was queued as the season pack for all 97
+// episodes of Dragon Ball Z Kai. Real packs list their bundled extras too
+// ("(01-12) [BD] [+NCOP & NCED]"), so a "+" in front, an episode range or
+// "complete" in the name keeps the release.
+const EXTRAS_ONLY =
+  /(?<!\+\s*)\b(?:(?:NC)?OPs?\s*(?:&|and|\+)\s*(?:NC)?EDs?|openings?\s*(?:&|and|\+)\s*endings?|(?:opening|ending)\s*\d{1,2}|soundtrack|OST)\b/i
+const NAMES_EPISODES = /\b\d{1,4}\s*[-~]\s*\d{1,4}\b|\bcomplete\b/i
+
+/** True when a release name says it holds only openings/endings or music. */
+export function releaseLooksLikeExtras(name: string): boolean {
+  return EXTRAS_ONLY.test(name) && !NAMES_EPISODES.test(name)
+}
+
 function candidateFields(c: Candidate): FlowItem {
   return {
     torrent_is_film: releaseLooksLikeFilm(c.name),
@@ -3210,6 +3226,8 @@ const torrentSearch: NodeImpl = {
       { key: 'minTitleMatch', label: 'Title match (0-1)', kind: 'number', default: 0.5, help: 'Min fraction of the show’s title words a result must contain. Guards against the index returning a different show.' },
       { key: 'maxEpisodes', label: 'Max episodes', kind: 'number', default: 26, help: 'Episode mode: cap on how many recent episodes to queue per show.' },
       { key: 'maxSizeGB', label: 'Max torrent size (GB)', kind: 'number', default: 0, help: 'Drop releases larger than this (per torrent). Keeps season-pack searches from grabbing 80GB+ Blu-ray remuxes over a ~20GB WEB-DL. 0 = no cap.' },
+      { key: 'maxSizeGBPerEpisode', label: 'Max pack size per episode (GB)', kind: 'number', default: 0, help: 'Season packs only, when the item knows total_episodes: raises the size cap to this × episodes, so a 97-episode show isn’t held to a cap sized for a 12-episode season. Never lowers "Max torrent size". 0 = off.' },
+      { key: 'minBatchMBPerEpisode', label: 'Min pack size per episode (MB)', kind: 'number', default: 50, help: 'Season packs only, when the item knows total_episodes: drops packs smaller than this × episodes — a pack that light is extras or a few files, not the show. 0 = off.' },
       { key: 'maxItems', label: 'Max shows', kind: 'number', default: 10, help: 'Safety cap of searches per run. 0 = unlimited.' },
     ],
   },
@@ -3235,6 +3253,8 @@ const torrentSearch: NodeImpl = {
         .filter(Boolean),
       maxSizeBytes: Math.max(0, num(config, 'maxSizeGB', 0)) * 1e9,
     }
+    const maxSizeGBPerEpisode = Math.max(0, num(config, 'maxSizeGBPerEpisode', 0))
+    const minBatchMBPerEpisode = Math.max(0, num(config, 'minBatchMBPerEpisode', 50))
     const maxEpisodes = Math.max(1, num(config, 'maxEpisodes', 26))
     const minTitleMatch = num(config, 'minTitleMatch', 0.5)
     const maxItems = num(config, 'maxItems', 10)
@@ -3362,17 +3382,37 @@ const torrentSearch: NodeImpl = {
             }
           }
         }
+        // A season pack's plausible size scales with the show's length: a cap
+        // sized for a 12-episode cour shuts out every real pack of a 97-episode
+        // show, and what's left under it is extras.
+        const packEpisodes = mode === 'batch' ? asNumber(item.total_episodes) : null
+        const itemOpts =
+          packEpisodes != null && packEpisodes > 0 && opts.maxSizeBytes > 0 && maxSizeGBPerEpisode > 0
+            ? { ...opts, maxSizeBytes: Math.max(opts.maxSizeBytes, maxSizeGBPerEpisode * packEpisodes * 1e9) }
+            : opts
         const blocked = blacklistedHashes()
-        const cands = relevant
+        let cands = relevant
           .filter((c) => !c.hash || !blocked.has(c.hash.toLowerCase()))
-          .filter((c) => passesFilters(c, opts))
+          .filter((c) => passesFilters(c, itemOpts))
         const blacklistedOut = relevant.length - relevant.filter((c) => !c.hash || !blocked.has(c.hash.toLowerCase())).length
         if (blacklistedOut > 0) ctx.notes.push(`skipped ${blacklistedOut} blacklisted release(s) for "${q}"`)
-        if (opts.maxSizeBytes > 0) {
-          const tooBig = relevant.filter((c) => c.size != null && c.size > opts.maxSizeBytes)
+        if (itemOpts.maxSizeBytes > 0) {
+          const tooBig = relevant.filter((c) => c.size != null && c.size > itemOpts.maxSizeBytes)
           if (tooBig.length > 0) {
             const biggest = Math.max(...tooBig.map((c) => c.size ?? 0)) / 1e9
-            ctx.notes.push(`dropped ${tooBig.length} over-size release(s) for "${q}" (largest ${biggest.toFixed(0)}GB > ${(opts.maxSizeBytes / 1e9).toFixed(0)}GB cap)`)
+            ctx.notes.push(`dropped ${tooBig.length} over-size release(s) for "${q}" (largest ${biggest.toFixed(0)}GB > ${(itemOpts.maxSizeBytes / 1e9).toFixed(0)}GB cap)`)
+          }
+        }
+        if (mode === 'batch') {
+          const floor = packEpisodes != null && packEpisodes > 0 ? minBatchMBPerEpisode * packEpisodes * 1e6 : 0
+          const before = cands.length
+          cands = cands.filter(
+            (c) => !releaseLooksLikeExtras(c.name) && !(floor > 0 && c.size != null && c.size < floor),
+          )
+          if (cands.length < before) {
+            ctx.notes.push(
+              `dropped ${before - cands.length} extras-only or undersized pack(s) for "${q}"${floor > 0 ? ` (< ${(floor / 1e9).toFixed(1)}GB for ${packEpisodes} episodes)` : ''}`,
+            )
           }
         }
 
@@ -3540,11 +3580,15 @@ const animeStatus: NodeImpl = {
         // but the airing/finished decision is recovered.
         const row = findByMalId(mal)
         const malStatus = (row?.status ?? '').toLowerCase()
+        // Finished first: MAL's text is "Finished Airing", which also contains
+        // "airing" — checked the other way round, Dragon Ball Z Kai (2009) read
+        // as airing, so every chase ran per-episode searches and none of its
+        // season packs were ever considered.
         const derived =
-          malStatus.includes('current') || malStatus.includes('airing')
-            ? 'airing'
-            : malStatus.includes('finished') || malStatus.includes('complete')
-              ? 'finished'
+          malStatus.includes('finished') || malStatus.includes('complete')
+            ? 'finished'
+            : malStatus.includes('current') || malStatus.includes('airing')
+              ? 'airing'
               : null
         if (derived) {
           const isMovie = (row?.type ?? '').toLowerCase() === 'movie'
@@ -6100,7 +6144,7 @@ const jellyfinScan: NodeImpl = {
     try {
       // POST /Library/Refresh — async full-library scan (item-scoped refresh
       // needs a user context we don't have; a library scan is cheap enough).
-      const res = await fetch(jfUrl('/Library/Refresh'), { method: 'POST', signal: AbortSignal.timeout(15_000) })
+      const res = await fetch(jfUrl('/Library/Refresh'), { method: 'POST', headers: jfHeaders(), signal: AbortSignal.timeout(15_000) })
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       ctx.notes.push('triggered Jellyfin library scan')
     } catch (e) {
@@ -6264,6 +6308,7 @@ const jellyfinCollection: NodeImpl = {
     // POST /Collections/{id}/Items?ids=… — adding an existing member is a no-op.
     const res = await fetch(jfUrl(`/Collections/${collectionId}/Items`, { ids: ids.join(',') }), {
       method: 'POST',
+      headers: jfHeaders(),
       signal: AbortSignal.timeout(20_000),
     })
     if (!res.ok) throw new Error(`Jellyfin add-to-collection failed (${res.status})`)
