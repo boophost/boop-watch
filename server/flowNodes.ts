@@ -49,9 +49,9 @@ import {
   type WantStatus,
 } from './db.js'
 import { fetchAniListAiring } from './anilist.js'
-import { refreshEpisodeCache, isProperTitle } from './episodes.js'
+import { refreshEpisodeCache, isProperTitle, fetchLibrarySeasonLengths } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { spillAbsoluteEpisode } from './absoluteSpill.js'
+import { spillAbsoluteEpisode, buildSpillCatalog } from './absoluteSpill.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, isPortalSection, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
@@ -4401,19 +4401,22 @@ const absoluteSpill: NodeImpl = {
   },
   async run(inputs, _config, ctx) {
     const rows = listAnimeSeries()
-    const catalog = rows.map((s) => ({
-      mal_id: s.mal_id,
-      tvdb_id: s.tvdb_id,
-      tvdb_season: s.tvdb_season,
-      episode_offset: s.episode_offset,
-      episodes: s.episodes,
-    }))
+    // Boundary per cour = its length in the library (override > TVDB > MAL); the
+    // Jellyfin lookup only happens for shows that actually have overflow.
+    const all = allInputs(inputs)
+    const wanted: { mal_id: number; episode: number }[] = []
+    for (const item of all) {
+      const mal = asNumber(item.mal_id)
+      const ep = asNumber(item.torrent_episode)
+      if (mal != null && ep != null) wanted.push({ mal_id: mal, episode: ep })
+    }
+    const catalog = await buildSpillCatalog(rows, wanted, (r) => fetchLibrarySeasonLengths(r))
     const out: FlowItem[] = []
     let spilled = 0
     // One summary per (source cour, target cour) so a dry run shows the boundary used.
-    const spans = new Map<string, { from: number; to: number; fromLo: number; fromHi: number; toLo: number; toHi: number; len: number | null }>()
+    const spans = new Map<string, { from: number; to: number; fromLo: number; fromHi: number; toLo: number; toHi: number; len: number | null; src: string }>()
     const unchanged = new Set<string>()
-    for (const item of allInputs(inputs)) {
+    for (const item of all) {
       const mal = asNumber(item.mal_id)
       const ep = asNumber(item.torrent_episode)
       const cour = mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
@@ -4440,7 +4443,7 @@ const absoluteSpill: NodeImpl = {
           sp.toLo = Math.min(sp.toLo, r.episode)
           sp.toHi = Math.max(sp.toHi, r.episode)
         } else {
-          spans.set(key, { from: mal as number, to: r.cour.mal_id as number, fromLo: ep, fromHi: ep, toLo: r.episode, toHi: r.episode, len: cour.episodes })
+          spans.set(key, { from: mal as number, to: r.cour.mal_id as number, fromLo: ep, fromHi: ep, toLo: r.episode, toHi: r.episode, len: cour.episodes, src: cour.episodes_source })
         }
         out.push({
           ...item,
@@ -4460,7 +4463,7 @@ const absoluteSpill: NodeImpl = {
     }
     for (const n of unchanged) ctx.notes.push(`absolute-spill: ${n}`)
     for (const s of spans.values()) {
-      ctx.notes.push(`absolute-spill: spilled mal ${s.from} E${s.fromLo}-${s.fromHi} -> mal ${s.to} E${s.toLo}-${s.toHi} (cour length ${s.len})`)
+      ctx.notes.push(`absolute-spill: spilled mal ${s.from} E${s.fromLo}-${s.fromHi} -> mal ${s.to} E${s.toLo}-${s.toHi} (cour length ${s.len} from ${s.src === 'override' ? 'override' : s.src === 'tvdb' ? 'tvdb' : 'mal'})`)
     }
     ctx.notes.push(`absolute-spill: moved ${spilled} file(s) into a sibling cour`)
     return { out }
