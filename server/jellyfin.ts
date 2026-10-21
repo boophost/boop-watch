@@ -78,6 +78,7 @@ export interface JfMediaStream {
   Height?: number
   IsDefault?: boolean
   IsForced?: boolean
+  IsExternal?: boolean
   IsTextSubtitleStream?: boolean
   Title?: string
   DisplayTitle?: string

@@ -118,7 +118,7 @@ export function buildSubTracks(streams: JfMediaStream[]): SubTrack[] {
   const selSeen: Record<string, number> = {}
   const labelSeen: Record<string, number> = {}
   let fullOrd = 0
-  return kept.map(({ cat, s, members }) => {
+  const built = kept.map(({ cat, s, members }) => {
     const group = subGroup(s)
     let base: string
     if (cat !== 'full') base = `p:${cat}${group ? `:${group.toLowerCase()}` : ''}`
@@ -132,6 +132,19 @@ export function buildSubTracks(streams: JfMediaStream[]): SubTrack[] {
     const dup = (labelSeen[label + detail] = (labelSeen[label + detail] ?? 0) + 1)
     if (dup > 1) detail = detail ? `${detail} ${dup}` : `Track ${dup}`
     const alts = [...new Set(members.map((m) => legacy[m.Index]).filter((a): a is string => !!a && a !== sel))]
-    return { index: s.Index, group, sel, alts, label, detail }
+    return { track: { index: s.Index, group, sel, alts, label, detail } as SubTrack, cat, allExternal: members.every((m) => !!m.IsExternal) }
   })
+
+  // A groupless sidecar (e.g. the .eng.ass our import extracts from the embedded
+  // track) folds into the grouped dialogue track when there is exactly one to
+  // fold into; with several candidates we cannot tell which it came from.
+  const grouped = built.filter((b) => b.cat === 'full' && b.track.group)
+  const target = grouped.length === 1 ? grouped[0] : null
+  const out: SubTrack[] = []
+  for (const b of built) {
+    if (target && b !== target && b.cat === 'full' && !b.track.group && b.allExternal) {
+      target.track.alts = [...new Set([...target.track.alts, b.track.sel, ...b.track.alts])]
+    } else out.push(b.track)
+  }
+  return out
 }
