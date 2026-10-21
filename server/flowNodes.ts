@@ -49,8 +49,9 @@ import {
   type WantStatus,
 } from './db.js'
 import { fetchAniListAiring } from './anilist.js'
-import { refreshEpisodeCache, isProperTitle } from './episodes.js'
+import { refreshEpisodeCache, isProperTitle, fetchLibrarySeasonLengths } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
+import { spillAbsoluteEpisode, buildSpillCatalog } from './absoluteSpill.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, isPortalSection, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
@@ -1042,6 +1043,7 @@ const qbittorrentSource: NodeImpl = {
       { key: 'category', label: 'Category', kind: 'text', default: 'anime', help: 'Empty = all categories. Unset defaults to "anime" — set the category explicitly on a non-anime flow.' },
       { key: 'completedOnly', label: 'Completed only', kind: 'boolean', default: true, help: 'Only emit torrents that finished downloading (ready to import).' },
       { key: 'skipImported', label: 'Skip already imported', kind: 'boolean', default: true, help: 'Drop torrents whose hash is already in the library ledger before the expensive probe/mux nodes, so a fresh download is not starved behind re-processing the backlog. Turn off to force a re-import.' },
+      { key: 'onlyHashes', label: 'Only these hashes', kind: 'text', default: '', help: 'Comma-separated torrent hashes. When set, only these are emitted and the already-imported / already-processed skip is bypassed - the supported way to re-run one torrent (e.g. after a mapping fix) without touching the ledger. Clear it afterwards.' },
       { key: 'newestFirst', label: 'Newest first', kind: 'boolean', default: true, help: 'Emit the most recently completed torrents first, so a just-finished download is processed ahead of older backlog work. Also exposes torrent_completed_on / torrent_added_on for filter.sort.' },
       { key: 'pathFrom', label: 'Download path (qBit)', kind: 'text', default: '', help: 'Path prefix as qBittorrent sees it, e.g. /downloads.' },
       { key: 'pathTo', label: 'Download path (pod)', kind: 'text', default: '', help: 'Where that same prefix is mounted here, e.g. /downloads. Both empty = no rewrite.' },
@@ -1094,7 +1096,13 @@ const qbittorrentSource: NodeImpl = {
     // upgrade is a *new* torrent (new hash), so it still runs.
     let skippedImported = 0
     let skippedProcessed = 0
-    if (skipImported) {
+    const only = new Set(
+      str(config, 'onlyHashes', '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
+    )
+    if (only.size > 0) {
+      torrents = torrents.filter((t) => only.has(String(t.hash).toLowerCase()))
+      ctx.notes.push(`onlyHashes: ${torrents.length}/${only.size} listed torrent(s), ledger skip bypassed`)
+    } else if (skipImported) {
       const imported = importedTorrentHashes()
       const processed = processedTorrentHashes()
       const keep: typeof torrents = []
@@ -4271,13 +4279,38 @@ function walkFiles(root: string, exts: Set<string>, out: string[]): void {
   }
 }
 
+interface QbitFileRow {
+  name: string
+  priority: number
+  progress: number
+}
+
+// Files of one torrent as qBittorrent sees them, keyed by their torrent-relative
+// path (forward slashes). Priority-0 files can still hold boundary-piece stubs
+// on disk, so the disk walk alone cannot tell a real episode from a fragment.
+async function qbitTorrentFiles(
+  config: Record<string, unknown>,
+  hash: string,
+): Promise<Map<string, QbitFileRow>> {
+  const { base, user, pass } = qbitCreds(config)
+  const cookie = await qbitLogin(base, user, pass)
+  const res = await fetch(`${base}/api/v2/torrents/files?hash=${encodeURIComponent(hash)}`, {
+    headers: { Cookie: cookie },
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (!res.ok) throw new Error(`qBittorrent files failed (${res.status})`)
+  const rows = (await res.json()) as QbitFileRow[]
+  if (!Array.isArray(rows)) throw new Error('qBittorrent files returned no list')
+  return new Map(rows.map((r) => [String(r.name).replace(/\\/g, '/'), r]))
+}
+
 const expandFiles: NodeImpl = {
   spec: {
     type: 'transform.expand-files',
     label: 'Expand to files',
     category: 'enrich',
     description:
-      'Turns each item into one item per video file at its path (recurses into folders for season packs). Re-parses the episode number from each file name.',
+      'Turns each item into one item per video file at its path (recurses into folders for season packs). Re-parses the episode number from each file name. For qBittorrent items (with a hash) files qBit has at priority 0 or not fully downloaded are skipped, and the item goes to "no files" if qBit cannot be asked.',
     inputs: [{ id: 'in', label: 'in', dataType: 'torrent' }],
     outputs: [
       { id: 'files', label: 'files', dataType: 'file' },
@@ -4299,6 +4332,39 @@ const expandFiles: NodeImpl = {
       const p = String(item[pathField] ?? '')
       const found: string[] = []
       if (p) walkFiles(p, exts, found)
+      const hash = String(item.torrent_hash ?? item.hash ?? '')
+      if (hash && found.length > 0) {
+        // Fail closed: importing a stub is worse than importing nothing.
+        let qfiles: Map<string, QbitFileRow>
+        try {
+          qfiles = await qbitTorrentFiles(config, hash)
+        } catch (e) {
+          ctx.notes.push(`qBit files lookup failed for ${hash.slice(0, 8)} (${(e as Error).message}); not importing its files`)
+          empty.push(item)
+          continue
+        }
+        const savePath = String(item.save_path ?? '')
+        const keep: string[] = []
+        let skipPrio = 0
+        let skipPartial = 0
+        let skipUnknown = 0
+        for (const f of found) {
+          const rel = (savePath ? path.relative(savePath, f) : path.basename(f)).replace(/\\/g, '/')
+          const row = qfiles.get(rel)
+          if (!row) skipUnknown++
+          else if (row.priority === 0) skipPrio++
+          else if (row.progress < 1) skipPartial++
+          else keep.push(f)
+        }
+        if (skipPrio || skipPartial || skipUnknown) {
+          ctx.notes.push(
+            `skipped ${skipPrio + skipPartial + skipUnknown} file(s) of ${hash.slice(0, 8)}: ${skipPrio} priority 0, ${skipPartial} incomplete` +
+              (skipUnknown ? `, ${skipUnknown} not in qBit's file list` : ''),
+          )
+        }
+        found.length = 0
+        found.push(...keep)
+      }
       if (found.length === 0) {
         empty.push(item)
         continue
@@ -4319,6 +4385,88 @@ const expandFiles: NodeImpl = {
     }
     ctx.notes.push(`${files.length} file(s) from ${allInputs(inputs).length} item(s), ${empty.length} with none`)
     return { files, empty }
+  },
+}
+
+const absoluteSpill: NodeImpl = {
+  spec: {
+    type: 'transform.absolute-spill',
+    label: 'Spill absolute episodes',
+    category: 'enrich',
+    description:
+      'For packs numbered absolutely across a franchise (Dragon Ball Kai 001-159): a file whose episode number is past the length of its cour moves to the next sibling cour (same tvdb_id, next tvdb_season) with the lengths of the earlier cours subtracted, chaining through several cours. Needs mal_id + tvdb_season from enrich.metadata, so place it after that. Files within range, unknown cour lengths and shows with no sibling are left alone (noted in the run log).',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [],
+  },
+  async run(inputs, _config, ctx) {
+    const rows = listAnimeSeries()
+    // Boundary per cour = its length in the library (override > TVDB > MAL); the
+    // Jellyfin lookup only happens for shows that actually have overflow.
+    const all = allInputs(inputs)
+    const wanted: { mal_id: number; episode: number }[] = []
+    for (const item of all) {
+      const mal = asNumber(item.mal_id)
+      const ep = asNumber(item.torrent_episode)
+      if (mal != null && ep != null) wanted.push({ mal_id: mal, episode: ep })
+    }
+    const catalog = await buildSpillCatalog(rows, wanted, (r) => fetchLibrarySeasonLengths(r))
+    const out: FlowItem[] = []
+    let spilled = 0
+    // One summary per (source cour, target cour) so a dry run shows the boundary used.
+    const spans = new Map<string, { from: number; to: number; fromLo: number; fromHi: number; toLo: number; toHi: number; len: number | null; src: string }>()
+    const unchanged = new Set<string>()
+    for (const item of all) {
+      const mal = asNumber(item.mal_id)
+      const ep = asNumber(item.torrent_episode)
+      const cour = mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
+      if (!cour || ep == null) {
+        out.push(item)
+        continue
+      }
+      const r = spillAbsoluteEpisode(ep, cour, catalog)
+      if (r.kind === 'in-range') {
+        out.push(item)
+      } else if (r.kind === 'unchanged') {
+        // Unknown length with no overflow evidence is routine; only note real misses.
+        if (r.reason !== 'cour episode count unknown') unchanged.add(`mal ${mal} E${ep}: ${r.reason}`)
+        else unchanged.add(`mal ${mal}: episode count unknown, left as is`)
+        out.push(item)
+      } else {
+        const target = rows.find((s) => s.mal_id === r.cour.mal_id)
+        spilled++
+        const key = `${mal}>${r.cour.mal_id}`
+        const sp = spans.get(key)
+        if (sp) {
+          sp.fromLo = Math.min(sp.fromLo, ep)
+          sp.fromHi = Math.max(sp.fromHi, ep)
+          sp.toLo = Math.min(sp.toLo, r.episode)
+          sp.toHi = Math.max(sp.toHi, r.episode)
+        } else {
+          spans.set(key, { from: mal as number, to: r.cour.mal_id as number, fromLo: ep, fromHi: ep, toLo: r.episode, toHi: r.episode, len: cour.episodes, src: cour.episodes_source })
+        }
+        out.push({
+          ...item,
+          spill_from_mal_id: mal,
+          spill_from_episode: ep,
+          mal_id: r.cour.mal_id,
+          tvdb_id: r.cour.tvdb_id,
+          tvdb_season: r.cour.tvdb_season,
+          episode_offset: r.cour.episode_offset ?? 0,
+          torrent_episode: r.episode,
+          ...(target?.title_english ? { title_english: target.title_english } : {}),
+          ...(target?.episodes != null ? { episodes_total: target.episodes } : {}),
+          ...(target?.year != null ? { production_year: target.year, year: target.year } : {}),
+          ...(item.series_id != null && target ? { series_id: target.id } : {}),
+        })
+      }
+    }
+    for (const n of unchanged) ctx.notes.push(`absolute-spill: ${n}`)
+    for (const s of spans.values()) {
+      ctx.notes.push(`absolute-spill: spilled mal ${s.from} E${s.fromLo}-${s.fromHi} -> mal ${s.to} E${s.toLo}-${s.toHi} (cour length ${s.len} from ${s.src === 'override' ? 'override' : s.src === 'tvdb' ? 'tvdb' : 'mal'})`)
+    }
+    ctx.notes.push(`absolute-spill: moved ${spilled} file(s) into a sibling cour`)
+    return { out }
   },
 }
 
@@ -6780,6 +6928,7 @@ const IMPLS: NodeImpl[] = [
   groupPick,
   join,
   expandFiles,
+  absoluteSpill,
   parseSeasonNode,
   expandSeasons,
   mediaProbe,

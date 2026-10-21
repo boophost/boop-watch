@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   MediaPlayer, MediaProvider, canFullscreen, isHLSProvider, isVideoProvider,
@@ -42,6 +42,118 @@ function PlayerShell({ children }: { children: ReactNode }) {
       </div>
       <MobileNav />
     </div>
+  )
+}
+
+// Seasons longer than this get the paged number grid (hianime-style: 5 columns
+// x 20 rows = 100 per page); shorter ones keep the titled list, where the
+// titles are still scannable.
+const GRID_MIN = 24
+const GRID_PAGE = 100
+const pad3 = (n: number) => String(n).padStart(3, '0')
+
+function EpisodePanel({ data, progMap, setProgMap, listRef, stub }: {
+  data: WatchData
+  progMap: Record<string, Progress>
+  setProgMap: Dispatch<SetStateAction<Record<string, Progress>>>
+  listRef: RefObject<HTMLDivElement | null>
+  stub: ReactNode
+}) {
+  const navigate = useNavigate()
+  const eps = data.episodes
+  const grid = eps.length > GRID_MIN
+  const pages = Math.ceil(eps.length / GRID_PAGE)
+  const curPage = Math.max(0, Math.floor(eps.findIndex((e) => e.current) / GRID_PAGE))
+  const [page, setPage] = useState(curPage)
+  // Following the player to another episode (next / sidebar) snaps back to its page.
+  useEffect(() => setPage(curPage), [data.id, curPage])
+  const shown = grid ? eps.slice(page * GRID_PAGE, (page + 1) * GRID_PAGE) : eps
+  const numOf = (i: number) => eps[i].n ?? i + 1
+  const pctOf = (id: string) => {
+    const p = progMap[id]
+    if (p?.watched) return 100
+    return p && p.duration > 0 ? Math.min(100, (p.position / p.duration) * 100) : 0
+  }
+
+  return (
+    <aside className="col-eps panel">
+      <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span><span className="badge">{eps.length}</span></div>
+      {(data.seasons.length > 1 || (grid && pages > 1)) && (
+        <div className="eps-pick">
+          {data.seasons.length > 1 && (
+            <select
+              aria-label="Season"
+              value={data.season ?? ''}
+              onChange={(e) => {
+                const sn = data.seasons.find((x) => String(x.season) === e.target.value)
+                if (sn) navigate(`/watch/${sn.firstId}`)
+              }}
+            >
+              {data.seasons.map((sn) => (
+                <option key={sn.season} value={sn.season}>
+                  {sn.season === 0 ? 'Specials' : `Season ${sn.season}`} ({sn.count})
+                </option>
+              ))}
+            </select>
+          )}
+          {grid && pages > 1 && (
+            <select aria-label="Episode range" value={page} onChange={(e) => setPage(Number(e.target.value))}>
+              {Array.from({ length: pages }, (_, p) => {
+                const lo = p * GRID_PAGE
+                const hi = Math.min(eps.length, lo + GRID_PAGE) - 1
+                return <option key={p} value={p}>EPS: {pad3(numOf(lo))}-{pad3(numOf(hi))}</option>
+              })}
+            </select>
+          )}
+        </div>
+      )}
+      <div className="eps-list" ref={listRef}>
+        {grid ? (
+          <div className="epgrid">
+            {shown.map((ep, i) => {
+              const idx = page * GRID_PAGE + i
+              const watched = !!progMap[ep.id]?.watched
+              const pct = pctOf(ep.id)
+              return (
+                <Link
+                  key={ep.id}
+                  className={`epcell${ep.current ? ' current' : ''}${!ep.current && watched ? ' watched' : ''}`}
+                  to={`/watch/${ep.id}`}
+                  title={`${ep.num} · ${ep.name}${watched ? ' (watched)' : ''}`}
+                  aria-label={`${ep.num} ${ep.name}`}
+                  aria-current={ep.current ? 'true' : undefined}
+                >
+                  {numOf(idx)}
+                  {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
+                </Link>
+              )
+            })}
+          </div>
+        ) : shown.map((ep) => {
+          const watched = !!progMap[ep.id]?.watched
+          const pct = pctOf(ep.id)
+          return (
+            <Link
+              key={ep.id}
+              className={`eprow${ep.current ? ' current' : ''}${!ep.current && watched ? ' watched' : ''}`}
+              to={`/watch/${ep.id}`}
+              aria-current={ep.current ? 'true' : undefined}
+            >
+              <span className="epn">{ep.num}</span>
+              <span className="ept">{ep.name}</span>
+              <WatchedToggle
+                id={ep.id}
+                watched={watched}
+                onChange={(eid, prog) => setProgMap((m) => ({ ...m, [eid]: prog }))}
+              />
+              {ep.current && <span className="epnow"><Icon name="play" size={12} fill="currentColor" /></span>}
+              {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
+            </Link>
+          )
+        })}
+        {stub}
+      </div>
+    </aside>
   )
 }
 
@@ -206,6 +318,9 @@ export default function Watch() {
   // screen on (the watchdog treats that case as a stall for the same reason).
   const [playing, setPlaying] = useState(false)
   const subRef = useRef<any>(null)
+  // What the live JASSUB instance was built for. It is bound to one <video>, and
+  // the provider can hand us a new one (episode change), so reuse only on a match.
+  const subBoundRef = useRef<{ video: HTMLVideoElement; itemId: string; url: string } | null>(null)
   const firstLoad = useRef(true)
   // Position + play-state to restore after a transcode reload (audio/quality switch).
   const pendingSeek = useRef<{ time: number; play: boolean } | null>(null)
@@ -267,7 +382,8 @@ export default function Watch() {
     const pref = readPref()
     let audio = data.audio.default == null ? null : String(data.audio.default)
     if (pref.audioLang) {
-      const m = data.audio.tracks.find((t) => t.lang === pref.audioLang)
+      const same = data.audio.tracks.filter((t) => t.lang === pref.audioLang)
+      const m = same.find((t) => String(t.index) === audio) || same.find((t) => t.def) || same[0]
       if (m) audio = String(m.index)
     }
     setAudioIndex(audio)
@@ -278,7 +394,7 @@ export default function Watch() {
     let sub = ''
     const savedSel = pref.subs?.[subScope(data)]
     if (savedSel && savedSel !== 'off') {
-      const m = data.subs.find((s) => s.sel === savedSel)
+      const m = data.subs.find((s) => s.sel === savedSel || s.alts?.includes(savedSel))
       if (m) sub = String(m.index)
     }
     setSubIndex(sub)
@@ -516,16 +632,23 @@ export default function Watch() {
   // Burn-in devices never reach this: their subs are in the video itself.
   useEffect(() => {
     if (BURN_IN_SUBS || !data || !subsReady || !videoEl) return
-    if (subIndex === '') {
-      if (subRef.current) { subRef.current.destroy(); subRef.current = null }
-      return
+    const dropSub = () => {
+      if (subRef.current) { try { subRef.current.destroy() } catch { /* video already gone */ } }
+      subRef.current = null
+      subBoundRef.current = null
     }
+    if (subIndex === '') { dropSub(); return }
     // Absolute URL: JASSUB fetches this from inside the (blob:) worker, where a
     // root-relative path has no resolvable base and throws "Invalid URL".
     const url = `${location.origin}/api/sub/${encodeURIComponent(data.id)}/${encodeURIComponent(subIndex)}`
+    const bound = subBoundRef.current
+    // A different <video> or episode: the old overlay is attached to a stale
+    // element / stale timeline, so rebuild rather than retarget.
+    if (subRef.current && (!bound || bound.video !== videoEl || bound.itemId !== data.id)) dropSub()
     if (subRef.current) {
-      subRef.current.setTrackByUrl(url)
+      if (bound && bound.url !== url) { subRef.current.setTrackByUrl(url); bound.url = url }
     } else if (window.JASSUB) {
+      subBoundRef.current = { video: videoEl, itemId: data.id, url }
       subRef.current = new window.JASSUB({
         video: videoEl,
         subUrl: url,
@@ -783,7 +906,7 @@ export default function Watch() {
   const stubNum = (n: number) => (seasonPrefix ? `${seasonPrefix}·E${n}` : `E${n}`)
 
   const audioLabel = data.audio.tracks.find((t) => String(t.index) === audioIndex)?.label || 'Audio'
-  const subLabel = subIndex === '' ? 'Off' : (data.subs.find((s) => String(s.index) === subIndex)?.group || 'English')
+  const subLabel = subIndex === '' ? 'Off' : (data.subs.find((s) => String(s.index) === subIndex)?.label || 'English')
   const qualityLabel = data.quality.find((q) => q.key === qKey)?.label || 'Auto'
 
   return (
@@ -894,9 +1017,8 @@ export default function Watch() {
               <Menu kind="subs" icon="captions" title="Subtitles" prefix="Subtitles" label={subLabel}>
                 <PopItem active={subIndex === ''} label="Off"
                   onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(''); rememberSub(data, 'off') }} />
-                {data.subs.map((s, i) => (
-                  <PopItem key={s.index} active={String(s.index) === subIndex} label="English"
-                    detail={s.group || (data.subs.length > 1 ? `Track ${i + 1}` : 'Full')}
+                {data.subs.map((s) => (
+                  <PopItem key={s.index} active={String(s.index) === subIndex} label={s.label} detail={s.detail}
                     onClick={(e) => { closeMenu(e); if (BURN_IN_SUBS) captureSeek(); setSubIndex(String(s.index)); rememberSub(data, s.sel) }} />
                 ))}
               </Menu>
@@ -926,44 +1048,21 @@ export default function Watch() {
 
         <div className="col-side">
         {data.episodes.length > 0 && (
-          <aside className="col-eps panel">
-            <div className="eps-head"><Icon name="tv" size={15} /><span>Episodes</span><span className="badge">{data.episodes.length}</span></div>
-            <div className="eps-list" ref={epsListRef}>
-              {data.episodes.map((ep) => {
-                const prog = progMap[ep.id]
-                const watched = !!prog?.watched
-                const pct = watched ? 100
-                  : prog && prog.duration > 0 ? Math.min(100, (prog.position / prog.duration) * 100) : 0
-                return (
-                  <Link
-                    key={ep.id}
-                    className={`eprow${ep.current ? ' current' : ''}${!ep.current && watched ? ' watched' : ''}`}
-                    to={`/watch/${ep.id}`}
-                    aria-current={ep.current ? 'true' : undefined}
-                  >
-                    <span className="epn">{ep.num}</span>
-                    <span className="ept">{ep.name}</span>
-                    <WatchedToggle
-                      id={ep.id}
-                      watched={watched}
-                      onChange={(eid, prog) => setProgMap((m) => ({ ...m, [eid]: prog }))}
-                    />
-                    {ep.current && <span className="epnow"><Icon name="play" size={12} fill="currentColor" /></span>}
-                    {pct > 0 && <span className="epprog" style={{ width: `${pct.toFixed(1)}%` }} />}
-                  </Link>
-                )
-              })}
-              {data.nextEpisode ? (
-                <div className="eprow chasing">
-                  <span className="epn">{stubNum(data.nextEpisode.episode)}</span>
-                  <span className="ept">{data.nextEpisode.title || `Episode ${data.nextEpisode.episode}`}</span>
-                  <span className="epnow">
-                    <EpisodeStatus chase={data.nextEpisode} />
-                  </span>
-                </div>
-              ) : null}
-            </div>
-          </aside>
+          <EpisodePanel
+            data={data}
+            progMap={progMap}
+            setProgMap={setProgMap}
+            listRef={epsListRef}
+            stub={data.nextEpisode ? (
+              <div className="eprow chasing">
+                <span className="epn">{stubNum(data.nextEpisode.episode)}</span>
+                <span className="ept">{data.nextEpisode.title || `Episode ${data.nextEpisode.episode}`}</span>
+                <span className="epnow">
+                  <EpisodeStatus chase={data.nextEpisode} />
+                </span>
+              </div>
+            ) : null}
+          />
         )}
         {data.episodes.length === 0 && data.nextEpisode ? (
           <aside className="col-eps panel">

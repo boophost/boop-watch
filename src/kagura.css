@@ -1109,6 +1109,25 @@
   & .eprow.current .epn { color: var(--accent-soft-fg); }
   & .eprow.current .ept { color: var(--accent-soft-fg); font-weight: 600; }
   & .eprow .epnow { color: var(--accent-soft-fg); display: flex; flex: none; }
+  /* Season / range pickers above the list. */
+  & .eps-pick { display: flex; gap: 8px; padding: 10px 12px 4px; }
+  & .eps-pick select { flex: 1; min-width: 0; height: 34px; padding: 0 28px 0 10px; background: var(--bg-elev-2);
+    border: 1px solid var(--border); border-radius: 9px; color: var(--fg); font: 13px var(--font-mono); cursor: pointer;
+    appearance: none; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 9px center; }
+  & .eps-pick select:hover { border-color: var(--border-strong); }
+  /* Paged number grid: 5 columns, 20 rows per 100-episode page. */
+  & .epgrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 6px 6px 8px; }
+  & .epcell { position: relative; overflow: hidden; display: grid; place-items: center; min-height: 40px;
+    border-radius: 8px; background: var(--bg-elev-2); border: 1px solid var(--border); color: var(--fg);
+    font: 500 13px var(--font-mono); }
+  & .epcell.watched { color: var(--fg-subtle); }
+  & .epcell.current { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-soft-fg); font-weight: 700; }
+  & .epcell .epprog { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); }
+  @media (hover: hover) { & .epcell:hover { border-color: var(--border-strong); color: var(--fg); } }
+  & .epgrid + .eprow.chasing { margin-top: 2px; }
+
   /* .watched / .epprog shared with .kagura .eplist above; player also dims .epn/.ept. */
   & .eprow.watched .epn, & .eprow.watched .ept { color: var(--fg-subtle); }
 
