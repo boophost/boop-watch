@@ -87,3 +87,42 @@ export function resolveCourLength(
   if (known(tvdbLength) && tvdbLength >= (row.episodes ?? 0)) return { episodes: tvdbLength, source: 'tvdb' }
   return { episodes: row.episodes, source: 'mal' }
 }
+
+export type SpillCatalogRow = SpillCour & { season_length?: number | null }
+
+/**
+ * The catalog with each cour's boundary resolved (override > TVDB > MAL).
+ * TVDB lengths come from `fetchLengths`, which is slow (a Jellyfin call per
+ * show), so it is only asked about shows that need it: an input item whose cour
+ * has a later sibling season and whose episode is past the override/MAL length.
+ * An all-in-range batch makes zero lookups. TVDB is only used for a cour that is
+ * the whole season (offset 0, sole row for its tvdb_id + season).
+ */
+export async function buildSpillCatalog<T extends SpillCatalogRow>(
+  rows: T[],
+  items: { mal_id: number; episode: number }[],
+  fetchLengths: (row: T) => Promise<Map<number, number>>,
+): Promise<(SpillCour & { episodes_source: 'override' | 'tvdb' | 'mal' })[]> {
+  const needs = new Set<number>() // tvdb_id of shows worth a lookup
+  for (const it of items) {
+    const row = rows.find((r) => r.mal_id === it.mal_id)
+    if (!row || known(row.season_length) || row.tvdb_id == null || row.tvdb_season == null) continue
+    if (it.episode <= (row.episodes ?? 0)) continue
+    if (laterSeasons(row, rows).length === 0) continue
+    needs.add(row.tvdb_id)
+  }
+  const lengths = new Map<number, Map<number, number>>()
+  for (const tvdbId of needs) {
+    const any = rows.find((r) => r.tvdb_id === tvdbId)!
+    lengths.set(tvdbId, await fetchLengths(any))
+  }
+  return rows.map((s) => {
+    let tvdbLen: number | undefined
+    if (s.tvdb_id != null && s.tvdb_season != null && (s.episode_offset ?? 0) === 0 && lengths.has(s.tvdb_id)) {
+      const sole = !rows.some((o) => o !== s && o.tvdb_id === s.tvdb_id && o.tvdb_season === s.tvdb_season)
+      if (sole) tvdbLen = lengths.get(s.tvdb_id)!.get(s.tvdb_season)
+    }
+    const { episodes, source } = resolveCourLength(s, tvdbLen)
+    return { mal_id: s.mal_id, tvdb_id: s.tvdb_id, tvdb_season: s.tvdb_season, episode_offset: s.episode_offset, episodes, episodes_source: source }
+  })
+}

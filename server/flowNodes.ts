@@ -51,7 +51,7 @@ import {
 import { fetchAniListAiring } from './anilist.js'
 import { refreshEpisodeCache, isProperTitle, fetchLibrarySeasonLengths } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { spillAbsoluteEpisode, resolveCourLength, type SpillCour } from './absoluteSpill.js'
+import { spillAbsoluteEpisode, buildSpillCatalog } from './absoluteSpill.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, isPortalSection, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
@@ -4401,39 +4401,22 @@ const absoluteSpill: NodeImpl = {
   },
   async run(inputs, _config, ctx) {
     const rows = listAnimeSeries()
-    // Boundary per cour = its length in the library: explicit override, else the
-    // TVDB season's count (via Jellyfin), else MAL's. TVDB is only trusted for a
-    // cour that is the whole season (offset 0, sole row) and when it is not
-    // shorter than MAL's count: a partly imported season would otherwise read
-    // short and spill real episodes.
-    const lengthsByShow = new Map<string, Promise<Map<number, number>>>()
-    const catalog: (SpillCour & { episodes_source: string })[] = []
-    for (const s of rows) {
-      let tvdbLen: number | undefined
-      if (!(s.season_length != null && s.season_length > 0) && s.tvdb_id != null && s.tvdb_season != null && (s.episode_offset ?? 0) === 0) {
-        const sole = !rows.some((o) => o !== s && o.tvdb_id === s.tvdb_id && o.tvdb_season === s.tvdb_season)
-        if (sole) {
-          const key = String(s.tvdb_id)
-          if (!lengthsByShow.has(key)) lengthsByShow.set(key, fetchLibrarySeasonLengths(s))
-          tvdbLen = (await lengthsByShow.get(key)!).get(s.tvdb_season)
-        }
-      }
-      const { episodes, source } = resolveCourLength(s, tvdbLen)
-      catalog.push({
-        mal_id: s.mal_id,
-        tvdb_id: s.tvdb_id,
-        tvdb_season: s.tvdb_season,
-        episode_offset: s.episode_offset,
-        episodes,
-        episodes_source: source,
-      })
+    // Boundary per cour = its length in the library (override > TVDB > MAL); the
+    // Jellyfin lookup only happens for shows that actually have overflow.
+    const all = allInputs(inputs)
+    const wanted: { mal_id: number; episode: number }[] = []
+    for (const item of all) {
+      const mal = asNumber(item.mal_id)
+      const ep = asNumber(item.torrent_episode)
+      if (mal != null && ep != null) wanted.push({ mal_id: mal, episode: ep })
     }
+    const catalog = await buildSpillCatalog(rows, wanted, (r) => fetchLibrarySeasonLengths(r))
     const out: FlowItem[] = []
     let spilled = 0
     // One summary per (source cour, target cour) so a dry run shows the boundary used.
     const spans = new Map<string, { from: number; to: number; fromLo: number; fromHi: number; toLo: number; toHi: number; len: number | null; src: string }>()
     const unchanged = new Set<string>()
-    for (const item of allInputs(inputs)) {
+    for (const item of all) {
       const mal = asNumber(item.mal_id)
       const ep = asNumber(item.torrent_episode)
       const cour = mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
