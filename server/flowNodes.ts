@@ -49,9 +49,9 @@ import {
   type WantStatus,
 } from './db.js'
 import { fetchAniListAiring } from './anilist.js'
-import { refreshEpisodeCache, isProperTitle } from './episodes.js'
+import { refreshEpisodeCache, isProperTitle, fetchLibrarySeasonLengths } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
-import { spillAbsoluteEpisode } from './absoluteSpill.js'
+import { spillAbsoluteEpisode, resolveCourLength, type SpillCour } from './absoluteSpill.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, isPortalSection, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
@@ -4401,17 +4401,37 @@ const absoluteSpill: NodeImpl = {
   },
   async run(inputs, _config, ctx) {
     const rows = listAnimeSeries()
-    const catalog = rows.map((s) => ({
-      mal_id: s.mal_id,
-      tvdb_id: s.tvdb_id,
-      tvdb_season: s.tvdb_season,
-      episode_offset: s.episode_offset,
-      episodes: s.episodes,
-    }))
+    // Boundary per cour = its length in the library: explicit override, else the
+    // TVDB season's count (via Jellyfin), else MAL's. TVDB is only trusted for a
+    // cour that is the whole season (offset 0, sole row) and when it is not
+    // shorter than MAL's count: a partly imported season would otherwise read
+    // short and spill real episodes.
+    const lengthsByShow = new Map<string, Promise<Map<number, number>>>()
+    const catalog: (SpillCour & { episodes_source: string })[] = []
+    for (const s of rows) {
+      let tvdbLen: number | undefined
+      if (!(s.season_length != null && s.season_length > 0) && s.tvdb_id != null && s.tvdb_season != null && (s.episode_offset ?? 0) === 0) {
+        const sole = !rows.some((o) => o !== s && o.tvdb_id === s.tvdb_id && o.tvdb_season === s.tvdb_season)
+        if (sole) {
+          const key = String(s.tvdb_id)
+          if (!lengthsByShow.has(key)) lengthsByShow.set(key, fetchLibrarySeasonLengths(s))
+          tvdbLen = (await lengthsByShow.get(key)!).get(s.tvdb_season)
+        }
+      }
+      const { episodes, source } = resolveCourLength(s, tvdbLen)
+      catalog.push({
+        mal_id: s.mal_id,
+        tvdb_id: s.tvdb_id,
+        tvdb_season: s.tvdb_season,
+        episode_offset: s.episode_offset,
+        episodes,
+        episodes_source: source,
+      })
+    }
     const out: FlowItem[] = []
     let spilled = 0
     // One summary per (source cour, target cour) so a dry run shows the boundary used.
-    const spans = new Map<string, { from: number; to: number; fromLo: number; fromHi: number; toLo: number; toHi: number; len: number | null }>()
+    const spans = new Map<string, { from: number; to: number; fromLo: number; fromHi: number; toLo: number; toHi: number; len: number | null; src: string }>()
     const unchanged = new Set<string>()
     for (const item of allInputs(inputs)) {
       const mal = asNumber(item.mal_id)
@@ -4440,7 +4460,7 @@ const absoluteSpill: NodeImpl = {
           sp.toLo = Math.min(sp.toLo, r.episode)
           sp.toHi = Math.max(sp.toHi, r.episode)
         } else {
-          spans.set(key, { from: mal as number, to: r.cour.mal_id as number, fromLo: ep, fromHi: ep, toLo: r.episode, toHi: r.episode, len: cour.episodes })
+          spans.set(key, { from: mal as number, to: r.cour.mal_id as number, fromLo: ep, fromHi: ep, toLo: r.episode, toHi: r.episode, len: cour.episodes, src: cour.episodes_source })
         }
         out.push({
           ...item,
@@ -4460,7 +4480,7 @@ const absoluteSpill: NodeImpl = {
     }
     for (const n of unchanged) ctx.notes.push(`absolute-spill: ${n}`)
     for (const s of spans.values()) {
-      ctx.notes.push(`absolute-spill: spilled mal ${s.from} E${s.fromLo}-${s.fromHi} -> mal ${s.to} E${s.toLo}-${s.toHi} (cour length ${s.len})`)
+      ctx.notes.push(`absolute-spill: spilled mal ${s.from} E${s.fromLo}-${s.fromHi} -> mal ${s.to} E${s.toLo}-${s.toHi} (cour length ${s.len} from ${s.src === 'override' ? 'override' : s.src === 'tvdb' ? 'tvdb' : 'mal'})`)
     }
     ctx.notes.push(`absolute-spill: moved ${spilled} file(s) into a sibling cour`)
     return { out }

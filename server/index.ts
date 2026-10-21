@@ -968,13 +968,21 @@ app.patch('/api/series/:id/mapping', requireAuth, requireAdmin, async (req, res)
   // cour problem to solve for a TV show or a film.
   const series = animeSeriesOr(res, Number(req.params.id), 'Season mapping')
   if (!series) return
-  const body = req.body as { tvdb_id?: unknown; tvdb_season?: unknown; episode_offset?: unknown; source?: unknown }
+  const body = req.body as { tvdb_id?: unknown; tvdb_season?: unknown; episode_offset?: unknown; source?: unknown; season_length?: unknown }
   const numOrNull = (v: unknown): number | null => {
     if (v == null || v === '') return null
     const n = Number(v)
     return Number.isFinite(n) ? Math.trunc(n) : null
   }
   try {
+    if ('season_length' in body) {
+      // Explicit cour length (library season length) for absolute-spill; touches nothing else.
+      const n = numOrNull(body.season_length)
+      seriesDb.setSeasonLength(series.mal_id, n != null && n > 0 ? n : null)
+      if (body.tvdb_id === undefined && body.tvdb_season === undefined && body.episode_offset === undefined && body.source === undefined) {
+        return void res.json({ series: seriesDb.getSeriesById(series.id) })
+      }
+    }
     if (body.source === 'auto') {
       // Clear the manual flag, then re-resolve from the dataset.
       seriesDb.setSeasonMapping(series.mal_id, { source: null })

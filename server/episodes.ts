@@ -187,6 +187,42 @@ async function fetchJellyfinEpisodeTitles(
   }
 }
 
+/**
+ * Episode count per TVDB season as the library knows it (Jellyfin is
+ * TVDB-sourced and is what we actually import into). Counted as the contiguous
+ * run 1..N so a stray stub at S01E152 can't inflate a season. Best-effort: an
+ * empty map when Jellyfin is off or the show can't be resolved.
+ */
+export async function fetchLibrarySeasonLengths(series: {
+  mal_id: number
+  title: string
+  title_english?: string | null
+  title_japanese?: string | null
+}): Promise<Map<number, number>> {
+  const out = new Map<number, number>()
+  if (!jellyfinConfigured()) return out
+  try {
+    const jfSeriesId = await resolveJfSeriesId(series)
+    if (!jfSeriesId) return out
+    const r = await jfJson<{ Items?: JfItem[] }>(`/Shows/${jfSeriesId}/Episodes`, {})
+    const bySeason = new Map<number, Set<number>>()
+    for (const ep of r.Items ?? []) {
+      if (ep.ParentIndexNumber == null || ep.IndexNumber == null) continue
+      const set = bySeason.get(ep.ParentIndexNumber) ?? new Set<number>()
+      set.add(ep.IndexNumber)
+      bySeason.set(ep.ParentIndexNumber, set)
+    }
+    for (const [season, set] of bySeason) {
+      let n = 0
+      while (set.has(n + 1)) n++
+      if (n > 0) out.set(season, n)
+    }
+  } catch {
+    /* best-effort */
+  }
+  return out
+}
+
 const firstNonEmpty = (...vals: (string | null | undefined)[]): string | null =>
   vals.find((v) => v && v.trim().length > 0)?.trim() ?? null
 

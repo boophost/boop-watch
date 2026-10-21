@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Smoke tests for transform.absolute-spill / spillAbsoluteEpisode (no vitest in this repo).
-const { spillAbsoluteEpisode } = await import('../server/absoluteSpill.ts')
+const { spillAbsoluteEpisode, resolveCourLength } = await import('../server/absoluteSpill.ts')
 const { NODE_REGISTRY } = await import('../server/flowNodes.ts')
 
 function assert(cond, msg) {
@@ -44,6 +44,26 @@ r = spillAbsoluteEpisode(25, c1, chain)
 assert(r.kind === 'spilled' && r.cour.mal_id === 12 && r.episode === 1, 'chain boundary')
 r = spillAbsoluteEpisode(37, c1, chain)
 assert(r.kind === 'unchanged', 'past a three-cour chain unchanged')
+
+// Boundary source: override > TVDB > MAL. Kai: MAL says 97, TVDB S1 and the pack have 98.
+let L = resolveCourLength({ episodes: 97 }, 98)
+assert(L.episodes === 98 && L.source === 'tvdb', 'TVDB beats MAL')
+L = resolveCourLength({ episodes: 97, season_length: 99 }, 98)
+assert(L.episodes === 99 && L.source === 'override', 'override beats TVDB')
+L = resolveCourLength({ episodes: 97 }, undefined)
+assert(L.episodes === 97 && L.source === 'mal', 'MAL-only fallback')
+L = resolveCourLength({ episodes: 97 }, 50)
+assert(L.source === 'mal', 'a TVDB count shorter than MAL is an incomplete library, ignored')
+const kaiMal = { mal_id: 6033, tvdb_id: 88031, tvdb_season: 1, episode_offset: 0, episodes: 97 }
+const kaiFixed = { ...kaiMal, episodes: resolveCourLength(kaiMal, 98).episodes }
+const kaiCat = [kaiFixed, finalCh]
+assert(spillAbsoluteEpisode(98, kaiFixed, kaiCat).kind === 'in-range', 'Kai 098 stays S01E98')
+r = spillAbsoluteEpisode(99, kaiFixed, kaiCat)
+assert(r.kind === 'spilled' && r.cour.mal_id === 22777 && r.episode === 1, 'Kai 099 -> S02E01')
+r = spillAbsoluteEpisode(159, kaiFixed, kaiCat)
+assert(r.kind === 'spilled' && r.cour.mal_id === 22777 && r.episode === 61, 'Kai 159 -> S02E61')
+// With MAL's 97 the old behaviour would have been wrong:
+assert(spillAbsoluteEpisode(98, kaiMal, [kaiMal, finalCh]).kind === 'spilled', 'sanity: MAL 97 mis-spills 098')
 
 // The node, against the real (empty-or-not) catalog: an item with no catalog row passes through.
 const node = NODE_REGISTRY.get('transform.absolute-spill')

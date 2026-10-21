@@ -62,6 +62,10 @@ export interface SeriesRow {
   tvdb_season: number | null
   episode_offset: number | null
   mapping_source: string | null // 'auto' | 'manual' | null
+  // Explicit length of this cour in the library (its TVDB season), overriding
+  // MAL's count and the Jellyfin/TVDB-derived one when absolute-numbered packs
+  // are spilled across cours (Kai: MAL says 97, the season has 98). Null = derive.
+  season_length: number | null
   // MAL weekly broadcast (JSON: { day, time, timezone, string }) for estimating
   // next-episode air times when Jikan hasn't listed the episode yet.
   broadcast: string | null
@@ -87,6 +91,7 @@ const SERIES_EXTRA_COLUMNS: [string, string][] = [
   ['tvdb_season', 'INTEGER'],
   ['episode_offset', 'INTEGER'],
   ['mapping_source', 'TEXT'],
+  ['season_length', 'INTEGER'],
   ['broadcast', 'TEXT'],
   // Cached airing-status lookups (enrich.anime-status writes these so flows
   // read our DB instead of re-polling TsukiHime per run; 'finished' is
@@ -607,6 +612,12 @@ export function setSeasonMapping(
       episode_offset: m.episode_offset ?? null,
       mapping_source: m.source ?? null,
     })
+  return findByMalId(mal_id)
+}
+
+/** Set (or clear with null) the explicit library season length of a cour. */
+export function setSeasonLength(mal_id: number, length: number | null): SeriesRow | undefined {
+  getDb().prepare('UPDATE series SET season_length = ? WHERE mal_id = ?').run(length, mal_id)
   return findByMalId(mal_id)
 }
 

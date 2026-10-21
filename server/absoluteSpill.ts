@@ -6,6 +6,11 @@
 // its tail in the first cour's season as S01E99-159. The catalog already knows
 // the cours are siblings (same tvdb_id, ascending tvdb_season), so we can move
 // the overflow to where it belongs.
+//
+// The boundary is the cour's length *in the library* (its TVDB season), not
+// MAL's count: MAL lists Kai as 97 episodes, TVDB S1 and the pack have 98. The
+// caller resolves `episodes` as override > TVDB season length > MAL and says
+// which in `episodes_source`; this module only does the arithmetic.
 
 export interface SpillCour {
   mal_id: number | null
@@ -14,6 +19,8 @@ export interface SpillCour {
   episode_offset: number | null
   /** Episode count of this cour; null/0 when the catalog doesn't know it. */
   episodes: number | null
+  /** Where `episodes` came from: 'override' | 'tvdb' | 'mal'. Informational. */
+  episodes_source?: string
 }
 
 export type SpillResult =
@@ -64,4 +71,19 @@ export function spillAbsoluteEpisode(episode: number, cour: SpillCour, catalog: 
     hops++
   }
   return { kind: 'spilled', cour: at, episode: ep, from: episode }
+}
+
+/**
+ * A cour's length in the library, and where it came from. Explicit override
+ * first; then the TVDB season length when the caller has one for a cour that is
+ * the whole season (it is ignored when shorter than MAL's count, which means the
+ * library copy is incomplete rather than the season short); MAL last.
+ */
+export function resolveCourLength(
+  row: { season_length?: number | null; episodes: number | null },
+  tvdbLength: number | null | undefined,
+): { episodes: number | null; source: 'override' | 'tvdb' | 'mal' } {
+  if (known(row.season_length)) return { episodes: row.season_length, source: 'override' }
+  if (known(tvdbLength) && tvdbLength >= (row.episodes ?? 0)) return { episodes: tvdbLength, source: 'tvdb' }
+  return { episodes: row.episodes, source: 'mal' }
 }
