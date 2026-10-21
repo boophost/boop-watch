@@ -17,6 +17,16 @@
  *   2. that <video> is attached to the DOM
  *   3. a subtitle canvas is attached to the DOM with a non-zero size
  * Exits 1 on any failure.
+ *
+ * Subtitles default to Off, so the script first picks the first subtitle
+ * option (the choice is remembered per series) and waits for a JASSUB
+ * instance. No subtitle option => FAIL "episode has no subtitle tracks".
+ *
+ * Expected results (for the PR test plan):
+ *   old prod code (pre-t25): PASS initial episode; FAIL after Next; FAIL after
+ *     episode list click (the single instance stays bound to a detached
+ *     <video>, no canvas).
+ *   dev >= 2.113.2: PASS on all three.
  */
 import { pathToFileURL } from 'node:url'
 
@@ -79,6 +89,24 @@ async function check(label) {
 }
 
 await page.goto(`${BASE}/watch/${encodeURIComponent(WATCH_ID)}`)
+await page.waitForSelector('video', { timeout: 30000 })
+{
+  const summary = page.locator('details.pmenu[data-kind=subs] > summary')
+  await summary.waitFor({ timeout: 30000 }).catch(() => {})
+  let opts = null
+  if (await summary.count()) {
+    await summary.click()
+    opts = page.locator('details.pmenu[data-kind=subs] .popitem')
+  }
+  if (!opts || (await opts.count()) < 2) {
+    console.log('FAIL episode has no subtitle tracks')
+    await browser.close()
+    process.exit(1)
+  }
+  await opts.nth(1).click()
+  const built = await page.waitForFunction(() => window.__jassub.length > 0, null, { timeout: 30000 }).then(() => true, () => false)
+  if (!built) { console.log('FAIL subtitle selected but no JASSUB instance was created'); failed++ }
+}
 await check('initial episode')
 if (via === 'next' || via === 'both') {
   const before = page.url()
