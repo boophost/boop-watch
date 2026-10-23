@@ -1,0 +1,41 @@
+# Lint + typecheck on every PR and on pushes to dev/main. Until this existed nothing in CI ran
+# ESLint or `tsc` beyond what the image build happens to compile, so `npm run lint` itself was
+# broken on dev (eslint.config.js referenced reactHooks.configs.flat, which
+# eslint-plugin-react-hooks 5.x doesn't have) and 21 lint errors had piled up unseen.
+name: Checks
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-typecheck:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      # Warnings (react-hooks deps, fast-refresh exports) are reported but don't fail the job.
+      - name: ESLint
+        run: npm run lint
+
+      - name: Typecheck app
+        run: npx tsc -b
+
+      - name: Typecheck server
+        run: npx tsc -p server/tsconfig.json --noEmit

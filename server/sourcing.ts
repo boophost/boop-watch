@@ -17,7 +17,6 @@ import {
   setTorrentStatus,
   recordTorrentOutcome,
   upsertWant,
-  markWantSourced,
   updateWantStatus,
   getDb,
   type TorrentRow,

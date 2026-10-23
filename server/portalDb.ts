@@ -1,7 +1,6 @@
 import Database from 'better-sqlite3'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 
 const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
 const dbPath = path.join(dataDir, 'portal.sqlite')
@@ -79,21 +78,21 @@ export function getPortalDb(): Database.Database {
   `)
   try {
     instance.exec('ALTER TABLE portal_items ADD COLUMN has_backdrop INTEGER DEFAULT 1');
-  } catch (e) {
+  } catch {
     // ignore if already exists
   }
   try {
     // Link a portal series/movie back to its catalog series, so the portal can
     // resolve the admin-selected banner (series_banners) at request time.
     instance.exec('ALTER TABLE portal_items ADD COLUMN mal_id INTEGER');
-  } catch (e) {
+  } catch {
     // ignore if already exists
   }
   try {
     // Portal section (anime/tv/movies). Pre-section rows are all from the
     // original single collection, which the anime section inherits.
     instance.exec("ALTER TABLE portal_items ADD COLUMN section TEXT NOT NULL DEFAULT 'anime'");
-  } catch (e) {
+  } catch {
     // ignore if already exists
   }
   db = instance
