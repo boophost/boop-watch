@@ -5795,6 +5795,7 @@ function sanitizeSegments(rel: string): string {
     .split('/')
     .map((seg) =>
       seg
+        // eslint-disable-next-line no-control-regex -- stripping filesystem-illegal control chars is the point
         .replace(/[<>:"\\|?*\x00-\x1f]/g, '')
         .replace(/\(\s*\)/g, '') // drop empty "()" left by a missing {production_year}
         .replace(/\s+/g, ' ')

@@ -1,11 +1,8 @@
 import Database from 'better-sqlite3'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 import { type PortalSection } from './portalDb.js'
 import { sectionProvider, type MetadataProvider } from './sections.js'
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
 const dbPath = process.env.DATABASE_PATH ?? path.join(dataDir, 'series.sqlite')
@@ -622,7 +619,7 @@ export function setSeasonLength(mal_id: number, length: number | null): SeriesRo
 }
 
 export function getSavedAnimes(username: string): { item_id: string; added_at: string }[] {
-  return getDb().prepare('SELECT item_id, added_at FROM saved_animes WHERE username = ? ORDER BY added_at DESC').all(username) as any[]
+  return getDb().prepare('SELECT item_id, added_at FROM saved_animes WHERE username = ? ORDER BY added_at DESC').all(username) as { item_id: string; added_at: string }[]
 }
 
 export function saveAnime(username: string, item_id: string) {
