@@ -194,7 +194,11 @@ searches per run for SD singles. Its torrent searches use `strictTitle`, without
 overlap picks spin-offs ("Criminal Minds Suspect Behavior" for Criminal Minds). It searches `apibay` and queues
 into the `movies` / `tv` qBit categories that the Movie/TV import flows consume, tagged
 `tmdb:{source_id}`. Nothing remembers a miss, so an unfindable episode is re-searched each run —
-keep the schedule coarse (6h). Like every flow, it must be built separately on each environment.
+keep the schedule coarse (6h). Like every flow, it must be built separately on each environment,
+and it runs **live on both** so each library stays complete. Because prod and staging share one
+qBittorrent, set the node's `categories` to that environment's own (`tv,movies` / `tv-dev,movies-dev`)
+— otherwise each counts the other's downloads as held and those seasons never reach its library.
+`minFreeGB` stops queueing below a free-space floor on the shared download disk (it filled once).
 
 ### Flows/schedules live in the DB, not git — promoting code never promotes them
 
