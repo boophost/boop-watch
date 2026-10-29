@@ -5783,9 +5783,41 @@ const qbittorrentSink: NodeImpl = {
     const guard = await checkQbitGuard(base, async () => cookie)
     if (!guard.ok) return refuse(guard.reasons)
 
+    // qBittorrent holds one torrent per info-hash across all categories. A hash
+    // that is already there (typically the other environment's copy of the same
+    // release) can't be added: alone it 409s the whole add, and in a batch it is
+    // skipped silently, after which the tag/rename loop below would rewrite the
+    // other environment's torrent. Route those to `refused` and back their wants
+    // off, so Chase doesn't re-pick the same release every run.
+    const present = new Map<string, string>()
+    const hashes = withMagnet.map((it) => String(it.torrent_hash ?? '').toLowerCase()).filter(Boolean)
+    if (hashes.length) {
+      const r = await fetch(`${base}/api/v2/torrents/info?hashes=${hashes.join('|')}`, {
+        headers: { Cookie: cookie },
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (!r.ok) throw new Error(`qBittorrent info failed (${r.status})`)
+      for (const t of (await r.json()) as { hash: string; category: string }[]) present.set(t.hash.toLowerCase(), t.category)
+    }
+    const elsewhere: FlowItem[] = []
+    const toAdd: FlowItem[] = []
+    for (const it of withMagnet) {
+      const h = String(it.torrent_hash ?? '').toLowerCase()
+      if (!present.has(h)) {
+        toAdd.push(it)
+        continue
+      }
+      const reason = `already in qBittorrent (category "${present.get(h) || 'none'}")`
+      elsewhere.push({ ...it, refused_reason: reason })
+      const wantId = asNumber(it.want_id)
+      if (wantId != null) recordWantAttempt(wantId, 360, `${reason}, backing off`)
+    }
+    if (elsewhere.length) ctx.notes.push(`skipped ${elsewhere.length} magnet(s) already in qBittorrent`)
+    if (toAdd.length === 0) return { sent: [], refused: elsewhere }
+
     const paused = bool(config, 'paused', false)
     const form = new URLSearchParams({
-      urls: withMagnet.map((it) => String(it[urlField])).join('\n'),
+      urls: toAdd.map((it) => String(it[urlField])).join('\n'),
       category: str(config, 'category', 'anime'),
       paused: String(paused),
       stopped: String(paused), // qBit >= 5 renamed the flag
@@ -5814,7 +5846,7 @@ const qbittorrentSink: NodeImpl = {
     let tagged = 0
     let ledgered = 0
     let untracked = 0
-    for (const it of withMagnet) {
+    for (const it of toAdd) {
       const hash = String(it.torrent_hash ?? '').toLowerCase()
       const name = String(it.torrent_name ?? '')
       if (!hash) {
@@ -5872,13 +5904,13 @@ const qbittorrentSink: NodeImpl = {
       }
     }
     ctx.notes.push(
-      `sent ${withMagnet.length} magnet(s) to qBittorrent${paused ? ' (paused)' : ''}` +
+      `sent ${toAdd.length} magnet(s) to qBittorrent${paused ? ' (paused)' : ''}` +
         (renamed ? `, named ${renamed}` : '') +
         (tagged ? `, tagged ${tagged}` : '') +
         (ledgered ? `, ledgered ${ledgered}` : '') +
         (untracked ? `, ${untracked} WITHOUT a hash (untracked!)` : ''),
     )
-    return { sent: withMagnet, refused: [] }
+    return { sent: toAdd, refused: elsewhere }
   },
 }
 
