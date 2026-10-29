@@ -215,7 +215,7 @@ async function fireDueSchedule(): Promise<void> {
     // live run can take minutes, and awaiting it here would freeze `ticking`
     // for that whole time, starving the event watchers below).
     rollSchedule(sched, new Date())
-    void fireTrigger(sched.trigger_name, []).catch((e) =>
+    void fireTrigger(sched.trigger_name, [], 0, sched.dry_run).catch((e) =>
       console.error(`scheduler: fireTrigger("${sched.trigger_name}") threw`, e),
     )
     return
