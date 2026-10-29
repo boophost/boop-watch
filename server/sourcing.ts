@@ -22,9 +22,16 @@ import {
   type TorrentRow,
   type WantRow,
 } from './db.js'
-import { qbitConfigured, qbitList, parseTorrentTags, type QbitTorrent } from './qbit.js'
+import {
+  qbitConfigured,
+  qbitList,
+  qbitDelete,
+  qbitFreeSpace,
+  parseTorrentTags,
+  type QbitTorrent,
+} from './qbit.js'
 import { refreshEpisodeCache } from './episodes.js'
-import { cfgSafe } from './config.js'
+import { cfgSafe, cfgNum, cfgBool } from './config.js'
 import { sectionLibraryRoot } from './sections.js'
 
 // qBittorrent is shared between prod and staging; each environment owns one
@@ -278,7 +285,7 @@ export async function sourcingBackfill(dryRun: boolean): Promise<BackfillResult>
   // "Already holds" has to mean a file that is actually on disk, not merely a
   // library_files row. Those rows drift (a hand-moved file, a path written
   // before normalisation, a restored DB), and minting a `fulfilled` want from a
-  // stale one is actively harmful: the hourly reconcile then finds a fulfilled
+  // stale one is actively harmful: the periodic reconcile then finds a fulfilled
   // want whose file is missing, correctly reopens it, and the chase downloads a
   // show we already have. That happened on production — 12 episodes of a
   // finished show reopened and queued off stale rows. Verify the path first.
@@ -438,14 +445,148 @@ export async function sourcingSweep(dryRun: boolean): Promise<SweepResult> {
   return { dryRun, seriesConsidered, wantsOpened, refreshFailures }
 }
 
+/** One live torrent the reconcile judged by its qBittorrent state. */
+export interface ReconcileTorrent {
+  hash: string
+  name: string
+  state: string
+  progress: number
+  /** Hours since qBittorrent last saw data move (since it was added, if never). */
+  idleHours: number
+  /** Sourced wants this torrent was queued for. */
+  want_ids: number[]
+}
+
 export interface ReconcileResult {
   dryRun: boolean
   /** live-status ledger rows with no qBit torrent → cleaned (imported) / failed (never completed). */
   orphanRowsClosed: number
-  /** sourced wants pointing at dead torrents → reopened with an attempt recorded. */
+  /** sourced wants whose torrent is gone (or dead in the ledger) → reopened. */
   wantsReopened: number
   /** fulfilled wants whose file vanished → reopened; dead library_files rows dropped. */
   phantomFulfilledReopened: number
+  /** SOURCING_STALL_HOURS in force for this pass. */
+  stallHours: number
+  /** Stalled past stallHours → wants reopened, ledger cleaned (re-queue blocked), torrent removed
+   * (with its partial files when SOURCING_STALL_DELETE_FILES). */
+  stalled: ReconcileTorrent[]
+  /** Stalled, but qBittorrent saw data move within stallHours — left alone. */
+  stalledWaiting: number
+  /** missingFiles → wants reopened, ledger cleaned (re-queue blocked), torrent entry removed (no files to delete). */
+  missingFiles: ReconcileTorrent[]
+  /** qBittorrent `error` (a full disk, usually) — never touched: qBittorrent can
+   * resume these once the cause clears, and deleting them throws the partial
+   * download away. Every torrent in our category, want-linked or not. */
+  errored: ReconcileTorrent[]
+  /** qBittorrent's free_space_on_disk, fetched only when something is errored. */
+  freeBytes: number | null
+}
+
+/**
+ * qBittorrent states meaning "wants data, none is arriving". `stalledDL` is
+ * routinely transient (no peers for a moment), so a stall is only acted on once
+ * qBittorrent's own clock says nothing moved for SOURCING_STALL_HOURS. A magnet
+ * that never resolves its metadata sits in metaDL forever — the same failure.
+ */
+const STALL_STATES = new Set(['stalledDL', 'metaDL', 'forcedMetaDL'])
+
+function idleHours(t: QbitTorrent, nowSec: number): number {
+  const since = Math.max(t.last_activity ?? 0, t.added_on ?? 0)
+  // No timestamp at all means we can't tell how long it has been idle — read
+  // it as "just now" so it is never given up on blind.
+  return since > 0 ? Math.max(0, (nowSec - since) / 3600) : 0
+}
+
+function stallHoursSetting(): number {
+  const n = cfgNum('SOURCING_STALL_HOURS', 24)
+  return n > 0 ? n : 24
+}
+
+/**
+ * The live-state half of reconcile: torrents that ARE still in qBittorrent but
+ * will never fulfil their want. This replaced the "Unstick sourcing" flow, which
+ * deleted torrents and their files the first time it saw stalledDL or error.
+ *
+ * Every write is claimed through a `status = 'sourced' AND torrent_hash = ?`
+ * guard, and a torrent is only removed when this pass actually reopened one of
+ * its wants. So a pass that loses a race (the old flow, or a second reconcile,
+ * reopened the want first) changes nothing — no double reopen, no double delete.
+ */
+async function reconcileLiveStates(
+  live: QbitTorrent[],
+  dryRun: boolean,
+): Promise<Pick<ReconcileResult, 'stallHours' | 'stalled' | 'stalledWaiting' | 'missingFiles' | 'errored' | 'freeBytes'>> {
+  const stallHours = stallHoursSetting()
+  const nowSec = Date.now() / 1000
+  const wantsByHash = new Map<string, number[]>()
+  for (const w of listWants('sourced')) {
+    if (!w.torrent_hash) continue
+    const h = w.torrent_hash.toLowerCase()
+    wantsByHash.set(h, [...(wantsByHash.get(h) ?? []), w.id])
+  }
+
+  const stalled: ReconcileTorrent[] = []
+  const missingFiles: ReconcileTorrent[] = []
+  const errored: ReconcileTorrent[] = []
+  let stalledWaiting = 0
+  for (const t of live) {
+    const hash = t.hash.toLowerCase()
+    const view: ReconcileTorrent = {
+      hash,
+      name: t.name,
+      state: t.state,
+      progress: t.progress,
+      idleHours: Math.round(idleHours(t, nowSec) * 10) / 10,
+      want_ids: wantsByHash.get(hash) ?? [],
+    }
+    if (t.state === 'error') {
+      errored.push(view)
+      continue
+    }
+    // Stalls and missing files are only ours to act on when a want is waiting
+    // on the torrent; anything else in the category is someone's by-hand add.
+    if (view.want_ids.length === 0) continue
+    if (t.state === 'missingFiles') missingFiles.push(view)
+    else if (STALL_STATES.has(t.state)) {
+      if (idleHours(t, nowSec) >= stallHours) stalled.push(view)
+      else stalledWaiting++
+    }
+  }
+
+  let freeBytes: number | null = null
+  if (errored.length > 0) freeBytes = await qbitFreeSpace().catch(() => null)
+
+  if (!dryRun) {
+    const deleteFiles = cfgBool('SOURCING_STALL_DELETE_FILES', true)
+    const claim = getDb().prepare(
+      `UPDATE wants SET status = 'open', note = ?, updated_at = datetime('now')
+       WHERE id = ? AND status = 'sourced' AND torrent_hash = ?`,
+    )
+    // Reopen the wants and retire the ledger row; returns whether we won the
+    // claim. `cleaned`, not `failed`: blockedTorrentHashes exempts only
+    // `failed`, so a failed row would let the chase re-queue the same dead
+    // release. A `cleaned` hash is refused, and the sink's re-pick branch backs
+    // the want off instead. (Not `exhausted` — its admin "retry import" would
+    // flip a never-finished download to `completed`.)
+    const settle = (v: ReconcileTorrent, why: string): boolean => {
+      const note = `reconcile: torrent ${v.hash} ${why}`
+      let claimed = 0
+      for (const id of v.want_ids) claimed += claim.run(note, id, v.hash).changes
+      if (claimed === 0) return false
+      setTorrentStatus(v.hash, 'cleaned', `reconcile: gave up — ${why}`)
+      return true
+    }
+    const stalledOut = stalled
+      .filter((v) => settle(v, `${v.state}, no activity for ${Math.round(v.idleHours)}h`))
+      .map((v) => v.hash)
+    const missingOut = missingFiles.filter((v) => settle(v, 'missingFiles')).map((v) => v.hash)
+    // Ledger + wants are already settled, so a failed delete only leaves a dead
+    // entry in qBittorrent (and the next pass's gone-path finds nothing to do).
+    await qbitDelete(stalledOut, deleteFiles)
+    await qbitDelete(missingOut, false)
+  }
+
+  return { stallHours, stalled, stalledWaiting, missingFiles, errored, freeBytes }
 }
 
 /**
@@ -474,7 +615,10 @@ export async function qbitReconcileUnsafe(): Promise<boolean> {
 
 /** Apply the safe fixes for what `sourcingLedger` reports. */
 export async function sourcingReconcile(dryRun: boolean): Promise<ReconcileResult> {
-  const report = await sourcingLedger()
+  // One qBittorrent read serves both halves: the ledger (gone torrents) and the
+  // live-state pass (stalled / missingFiles / error).
+  const live = qbitConfigured() ? await qbitListOurs() : []
+  const report = await sourcingLedger({ live })
   let orphanRowsClosed = 0
   let wantsReopened = 0
   let phantomFulfilledReopened = 0
@@ -525,7 +669,9 @@ export async function sourcingReconcile(dryRun: boolean): Promise<ReconcileResul
     }
   }
 
-  return { dryRun, orphanRowsClosed, wantsReopened, phantomFulfilledReopened }
+  const liveStates = await reconcileLiveStates(live, dryRun)
+
+  return { dryRun, orphanRowsClosed, wantsReopened, phantomFulfilledReopened, ...liveStates }
 }
 
 /**
