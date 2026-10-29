@@ -4087,7 +4087,9 @@ const sourcingGaps: NodeImpl = {
       for (const g of plan.missing) {
         missing.push(
           g.kind === 'batch'
-            ? { ...base, want_mode: 'batch', tvdb_season: g.season, torrent_episode: null, season_label: `S${pad(g.season)}` }
+            ? // total_episodes sizes the pack: Torrent search scales its size cap and
+              // its undersized-pack floor by it, so a lone episode can't pass as S01.
+              { ...base, want_mode: 'batch', tvdb_season: g.season, torrent_episode: null, total_episodes: g.episodes, season_label: `S${pad(g.season)}` }
             : { ...base, want_mode: 'episode', tvdb_season: g.season, torrent_episode: g.episode, episode: g.episode, season_label: '' },
         )
       }
