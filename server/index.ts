@@ -8,6 +8,7 @@ import { fetchAnimeFull } from './jikan.js'
 import * as seriesDb from './db.js'
 import { getEpisodesForDisplay, isProperTitle } from './episodes.js'
 import { buildSeriesStatus } from './seriesStatus.js'
+import { buildStorageReport, deleteStorage } from './storage.js'
 import { enrichSeasonMapping } from './seasonMap.js'
 import { publicRouter, commentView, portalSeriesForCatalog, catalogCoursForSeason } from './publicRoutes.js'
 import {
@@ -208,6 +209,39 @@ function animeSeriesOr(
 app.use('/api/flows', requireAuth, requireAdmin)
 app.use('/api/schedules', requireAuth, requireAdmin)
 app.use(flowRouter)
+
+// --- Storage (/manage/storage) -------------------------------------------
+// Admin-only: the delete route removes library folders and torrent data.
+
+app.get('/api/storage', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    res.json(await buildStorageReport())
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to read storage' })
+  }
+})
+
+app.post('/api/storage/delete', requireAuth, requireAdmin, async (req, res) => {
+  const body = req.body as { folders?: unknown; torrents?: unknown }
+  const folders = Array.isArray(body.folders)
+    ? body.folders.map((f) => ({ section: String(f?.section ?? ''), name: String(f?.name ?? '') }))
+    : []
+  const torrents = Array.isArray(body.torrents) ? body.torrents.map(String) : []
+  if (folders.length === 0 && torrents.length === 0) {
+    res.status(400).json({ error: 'Nothing selected' })
+    return
+  }
+  try {
+    const result = await deleteStorage({ folders, torrents })
+    console.log(
+      `storage: ${res.locals.username} deleted folders=${JSON.stringify(result.deletedFolders)} torrents=${torrents.length} errors=${result.errors.length}`,
+    )
+    res.json(result)
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : 'Delete failed' })
+  }
+})
 
 // --- App configuration (/manage/settings) --------------------------------
 // Admin-only: these are the app's credentials and paths. Secret *values* never

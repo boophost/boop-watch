@@ -1178,6 +1178,12 @@ export function forgetLibraryFile(p: string): void {
   getDb().prepare('DELETE FROM library_files WHERE path = ?').run(p)
 }
 
+/** Drop every ledger row under a top-level library folder that was deleted. */
+export function forgetLibraryDir(dir: string): void {
+  const prefix = dir.replace(/[\\%_]/g, (c) => `\\${c}`)
+  getDb().prepare(`DELETE FROM library_files WHERE path LIKE ? ESCAPE '\\'`).run(`${prefix}/%`)
+}
+
 export function getLibraryFile(p: string): LibraryFileRow | undefined {
   return getDb().prepare('SELECT * FROM library_files WHERE path = ?').get(p) as LibraryFileRow | undefined
 }
