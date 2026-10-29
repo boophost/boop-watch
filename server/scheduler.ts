@@ -12,11 +12,13 @@ import {
   getLastRecordedRunId,
   fireTrigger,
   fireEvent,
+  queueScheduledRun,
 } from './flowRoutes.js'
 import { buildSpecResolver } from './flowComponents.js'
 import {
   dueSchedules,
   getFlow,
+  getSchedule,
   markScheduleFired,
   flowsWithTriggerType,
   triggerStateHas,
@@ -210,21 +212,26 @@ async function fireDueSchedule(): Promise<void> {
   if (due.length === 0) return
   const sched = due[0]
   if (sched.trigger_name) {
-    // Name-based: roll the cadence now, then publish — fireTrigger takes the
-    // flow lock per subscribing run itself (so the tick must NOT hold it: a
-    // live run can take minutes, and awaiting it here would freeze `ticking`
-    // for that whole time, starving the event watchers below).
+    // Name-based: roll the cadence now, then publish — fireTrigger queues one
+    // run per subscriber behind any run in progress (so the tick must NOT hold
+    // the lock: a live run can take minutes). A restart drops a queued fire;
+    // the schedule's next cadence covers it, as it would a missed tick.
     rollSchedule(sched, new Date())
     void fireTrigger(sched.trigger_name, [], 0, sched.dry_run).catch((e) =>
       console.error(`scheduler: fireTrigger("${sched.trigger_name}") threw`, e),
     )
     return
   }
-  // Legacy flow-id schedule — one flow at a time; back off if a run is in
-  // progress. Lock is acquired synchronously here (so a concurrent watcher
-  // correctly sees it busy), but the run itself must not block the tick.
-  if (!acquireFlowLock()) return
-  void fireScheduled(sched).finally(() => releaseFlowLock())
+  // Legacy flow-id schedule — queued behind any run in progress (the run itself
+  // must not block the tick). next_run only rolls when it actually runs, so it
+  // stays due (and survives a restart) while it waits: the queue folds the ticks
+  // that re-see it into one entry, and the run re-reads the schedule so an entry
+  // queued while an earlier fire of it was mid-run is a no-op.
+  queueScheduledRun(sched, getFlow(sched.flow_id)?.name ?? `flow #${sched.flow_id}`, async () => {
+    const fresh = getSchedule(sched.id)
+    if (!fresh?.enabled || !fresh.next_run || fresh.next_run > new Date().toISOString()) return
+    await fireScheduled(fresh)
+  })
 }
 
 // --- Event-trigger watchers ------------------------------------------------
