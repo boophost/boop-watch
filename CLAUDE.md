@@ -198,8 +198,10 @@ The wants pipeline is MAL-keyed, so it only sources **anime**. TV and movies are
 **"TV & movie sourcing"** flow around `enrich.sourcing-gaps` (`server/sourcingGaps.ts`), which plans
 from live state on every run: TMDB's aired episodes, minus what the portal serves, minus any
 qBittorrent torrent already matched to the title (whatever its state). A fully-aired season with
-nothing held becomes one season-pack search; a pack that misses falls back to single episodes
-through a second gaps node (`seasonField: tvdb_season`, packs off). It searches `apibay` and queues
+nothing held becomes one season-pack search (sized by the season's episode count); a missed pack
+is logged, **not** expanded into per-episode searches — for an old show that is hundreds of
+searches per run for SD singles. Its torrent searches use `strictTitle`, without which word
+overlap picks spin-offs ("Criminal Minds Suspect Behavior" for Criminal Minds). It searches `apibay` and queues
 into the `movies` / `tv` qBit categories that the Movie/TV import flows consume, tagged
 `tmdb:{source_id}`. Nothing remembers a miss, so an unfindable episode is re-searched each run —
 keep the schedule coarse (6h). Like every flow, it must be built separately on each environment.

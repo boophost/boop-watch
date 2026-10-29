@@ -2842,7 +2842,7 @@ function parseEpisode(raw: string): number | null {
   // unresolved-episode and the torrent would have been marked exhausted.
   const title = raw.replace(/\.(?:mkv|mp4|m4v|avi|webm|ts|m2ts)$/i, '')
   if (/\(\s*\d{1,4}\s*[-~]\s*\d{1,4}\s*\)/.test(title)) return null
-  let m = title.match(/\bS\d{1,2}\s*E(\d{1,4})\b/i)
+  let m = title.match(/\bS\d{1,2}[\s._-]*E(\d{1,4})\b/i)
   if (m) return Number(m[1])
   m = title.match(/\bEP?(\d{1,4})\b/i)
   if (m) return Number(m[1])
@@ -3079,6 +3079,20 @@ function relevanceScore(c: Candidate, titleNorm: string, queryTokens: string[]):
   return queryTokens.filter((t) => cand.includes(t)).length / queryTokens.length
 }
 
+// Scene-named releases (the apibay index) lead with the title and then a
+// marker: "Criminal.Minds.S01…", "Iron Man (2008) 1080p". Token overlap can't
+// reject a spin-off — "Criminal.Minds.Suspect.Behavior.S01" contains every word
+// of "Criminal Minds" — but the word right after the title can: a marker means
+// this show, another word means a different one. A country tag between them
+// ("The.Office.US.S03") still counts as this show.
+const RELEASE_MARKER =
+  /^(?:(?:us|uk|au|ca|nz) )?(?:s\d{1,2}|e\d{1,4}|seasons?|series|\d{1,2}x\d{2,3}|(?:19|20)\d{2}|\d{3,4}p|complete|mini|web|webrip|hdtv|bluray|brrip|bdrip|dvdrip|remux)\b/
+
+export function releaseNamesTitle(name: string, titles: string[]): boolean {
+  const rel = norm(name.replace(/^\s*\[[^\]]*\]\s*/, ''))
+  return titles.some((t) => rel === t || (rel.startsWith(t + ' ') && RELEASE_MARKER.test(rel.slice(t.length + 1))))
+}
+
 interface SearchOpts {
   resolution: string
   requireResolution: boolean
@@ -3236,6 +3250,7 @@ const torrentSearch: NodeImpl = {
       { key: 'excludeCodecs', label: 'Exclude codecs', kind: 'text', default: '', help: 'Comma list of video codecs to drop, e.g. "av1". Our Jellyfin GPU (Tesla T4) can’t hardware-decode AV1, so those stall on playback. h264/HEVC are preferred automatically.' },
       { key: 'minSeeders', label: 'Min seeders', kind: 'number', default: 1, help: 'Drops dead torrents (AnimeTosho and apibay — TsukiHime reports no seeders).' },
       { key: 'minTitleMatch', label: 'Title match (0-1)', kind: 'number', default: 0.5, help: 'Min fraction of the show’s title words a result must contain. Guards against the index returning a different show.' },
+      { key: 'strictTitle', label: 'Name starts with the title', kind: 'boolean', default: false, help: 'Scene-named indexes (apibay): keep only releases named the title followed by a season/year/quality marker. Rejects spin-offs (“Criminal Minds Suspect Behavior” for Criminal Minds) that word overlap lets through.' },
       { key: 'maxEpisodes', label: 'Max episodes', kind: 'number', default: 26, help: 'Episode mode: cap on how many recent episodes to queue per show.' },
       { key: 'maxSizeGB', label: 'Max torrent size (GB)', kind: 'number', default: 0, help: 'Drop releases larger than this (per torrent). Keeps season-pack searches from grabbing 80GB+ Blu-ray remuxes over a ~20GB WEB-DL. 0 = no cap.' },
       { key: 'maxSizeGBPerEpisode', label: 'Max pack size per episode (GB)', kind: 'number', default: 0, help: 'Season packs only, when the item knows total_episodes: raises the size cap to this × episodes, so a 97-episode show isn’t held to a cap sized for a 12-episode season. Never lowers "Max torrent size". 0 = off.' },
@@ -3269,6 +3284,7 @@ const torrentSearch: NodeImpl = {
     const minBatchMBPerEpisode = Math.max(0, num(config, 'minBatchMBPerEpisode', 50))
     const maxEpisodes = Math.max(1, num(config, 'maxEpisodes', 26))
     const minTitleMatch = num(config, 'minTitleMatch', 0.5)
+    const strictTitle = bool(config, 'strictTitle', false)
     const maxItems = num(config, 'maxItems', 10)
 
     const items = allInputs(inputs)
@@ -3392,6 +3408,14 @@ const torrentSearch: NodeImpl = {
                 `dropped ${before - relevant.length} other-season release(s) for "${q}" (want season ${wantSeason}, no id pin)`,
               )
             }
+          }
+        }
+        if (strictTitle) {
+          const titles = [item.title, item.title_english].map(norm).filter(Boolean)
+          const before = relevant.length
+          relevant = relevant.filter((c) => releaseNamesTitle(c.name, titles))
+          if (relevant.length < before) {
+            ctx.notes.push(`dropped ${before - relevant.length} release(s) not named "${showTitle}" for "${q}"`)
           }
         }
         // A season pack's plausible size scales with the show's length: a cap
@@ -4087,7 +4111,9 @@ const sourcingGaps: NodeImpl = {
       for (const g of plan.missing) {
         missing.push(
           g.kind === 'batch'
-            ? { ...base, want_mode: 'batch', tvdb_season: g.season, torrent_episode: null, season_label: `S${pad(g.season)}` }
+            ? // total_episodes sizes the pack: Torrent search scales its size cap and
+              // its undersized-pack floor by it, so a lone episode can't pass as S01.
+              { ...base, want_mode: 'batch', tvdb_season: g.season, torrent_episode: null, total_episodes: g.episodes, season_label: `S${pad(g.season)}` }
             : { ...base, want_mode: 'episode', tvdb_season: g.season, torrent_episode: g.episode, episode: g.episode, season_label: '' },
         )
       }
