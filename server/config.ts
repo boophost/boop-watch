@@ -110,6 +110,10 @@ export const CONFIG_SPEC: ConfigFieldSpec[] = [
   { key: 'TORRENT_TSUKI_URL', label: 'TsukiHime URL', group: 'Downloads', default: 'https://api.tsukihime.org' },
   { key: 'TORRENT_APBAY_URL', label: 'apibay (TPB) URL', group: 'Downloads', default: 'https://apibay.org',
     help: 'Public Western TV/movie index used by Torrent search’s apibay provider. Anime stays on Tosho/TsukiHime.' },
+  { key: 'SOURCING_STALL_HOURS', label: 'Stalled download timeout (hours)', group: 'Downloads', default: '24',
+    help: 'The sourcing reconcile gives up on a stalled download only after qBittorrent has seen no data move for this long, then re-searches the episode.' },
+  { key: 'SOURCING_STALL_DELETE_FILES', label: 'Delete files of stalled downloads', group: 'Downloads', default: 'true',
+    help: 'When a stalled download is given up on, also delete its partial files.' },
 
   // --- Analytics + integrations --------------------------------------------
   { key: 'POSTHOG_KEY', label: 'PostHog project token', group: 'Integrations',
