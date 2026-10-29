@@ -169,7 +169,7 @@ export default function Storage() {
         </Button>
       </header>
 
-      <main className="grid gap-6 p-4 md:p-6">
+      <main className="grid grid-cols-1 gap-6 p-4 md:p-6">
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         {notice ? <p className="text-sm text-muted-foreground">{notice}</p> : null}
         {report?.qbitError ? <p className="text-sm text-destructive">qBittorrent: {report.qbitError}</p> : null}
@@ -183,7 +183,7 @@ export default function Storage() {
           <p className="text-sm text-muted-foreground">Reading disks…</p>
         ) : report ? (
           <>
-            <section className="grid gap-3">
+            <section className="grid grid-cols-1 gap-3">
               {report.volumes.map((v) => {
                 const used = v.totalBytes - v.freeBytes
                 const pct = v.totalBytes ? (used / v.totalBytes) * 100 : 0
@@ -195,7 +195,7 @@ export default function Storage() {
                       <span className="text-sm text-muted-foreground">
                         of {formatBytes(v.totalBytes)}
                       </span>
-                      <span className="ml-auto truncate text-xs text-muted-foreground">{v.paths.join(' · ')}</span>
+                      <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground">{v.paths.join(' · ')}</span>
                     </div>
                     <div className="mt-2 h-2 overflow-hidden rounded bg-muted">
                       <div
