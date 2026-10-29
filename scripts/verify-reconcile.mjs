@@ -109,12 +109,12 @@ assert.equal(r.stalledWaiting, 1)
 assert.equal(wantStatus(W.young), 'sourced')
 assert.equal(ledger('a'), 'queued')
 
-// old stall (incl. never-active metaDL) → reopened, ledger failed, removed with files
+// old stall (incl. never-active metaDL) → reopened, ledger cleaned, removed with files
 assert.deepEqual(r.stalled.map((s) => s.hash).sort(), [H('b'), H('c')])
 assert.deepEqual(r.stalled.find((s) => s.hash === H('b')).want_ids.sort(), [W.old1, W.old2].sort())
 for (const id of [W.old1, W.old2, W.meta]) assert.equal(wantStatus(id), 'open')
-assert.equal(ledger('b'), 'failed')
-assert.equal(ledger('c'), 'failed')
+assert.equal(ledger('b'), 'cleaned')
+assert.equal(ledger('c'), 'cleaned')
 assert.match(db.getTorrent(H('b')).note, /stalledDL, no activity for 30h/)
 
 // error → untouched, reported (ours only), free space attached
@@ -124,10 +124,10 @@ assert.equal(r.freeBytes, 123)
 assert.equal(wantStatus(W.err), 'sourced')
 assert.equal(ledger('e'), 'queued')
 
-// missingFiles → reopened, ledger failed, entry removed WITHOUT deleting files
+// missingFiles → reopened, ledger cleaned, entry removed WITHOUT deleting files
 assert.deepEqual(r.missingFiles.map((m) => m.hash), [H('m')])
 assert.equal(wantStatus(W.missing), 'open')
-assert.equal(ledger('m'), 'failed')
+assert.equal(ledger('m'), 'cleaned')
 
 // a plain download is not a stall, however long ago it last moved data
 assert.equal(wantStatus(W.dl), 'sourced')
@@ -137,6 +137,11 @@ assert.deepEqual(deletes, [
   { hashes: [H('b'), H('c')], deleteFiles: 'true' },
   { hashes: [H('m')], deleteFiles: 'false' },
 ])
+
+// Given-up hashes are refused by the add path's dedupe guard; a gone one is not.
+const blocked = db.blockedTorrentHashes()
+for (const c of ['b', 'c', 'm']) assert.ok(blocked.has(H(c)), 'given-up ' + c + ' is blocked from re-queueing')
+assert.ok(!blocked.has(H('g')), 'gone torrent stays re-queueable')
 
 // the other environment's torrents and ledger rows are never touched
 for (const c of ['x', 'y', 'z']) assert.equal(ledger(c), 'queued', `foreign ${c} untouched`)

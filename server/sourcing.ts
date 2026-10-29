@@ -468,12 +468,12 @@ export interface ReconcileResult {
   phantomFulfilledReopened: number
   /** SOURCING_STALL_HOURS in force for this pass. */
   stallHours: number
-  /** Stalled past stallHours → wants reopened, ledger failed, torrent removed
+  /** Stalled past stallHours → wants reopened, ledger cleaned (re-queue blocked), torrent removed
    * (with its partial files when SOURCING_STALL_DELETE_FILES). */
   stalled: ReconcileTorrent[]
   /** Stalled, but qBittorrent saw data move within stallHours — left alone. */
   stalledWaiting: number
-  /** missingFiles → wants reopened, ledger failed, torrent entry removed (no files to delete). */
+  /** missingFiles → wants reopened, ledger cleaned (re-queue blocked), torrent entry removed (no files to delete). */
   missingFiles: ReconcileTorrent[]
   /** qBittorrent `error` (a full disk, usually) — never touched: qBittorrent can
    * resume these once the cause clears, and deleting them throws the partial
@@ -563,13 +563,18 @@ async function reconcileLiveStates(
       `UPDATE wants SET status = 'open', note = ?, updated_at = datetime('now')
        WHERE id = ? AND status = 'sourced' AND torrent_hash = ?`,
     )
-    // Reopen the wants, fail the ledger row; returns whether we won the claim.
+    // Reopen the wants and retire the ledger row; returns whether we won the
+    // claim. `cleaned`, not `failed`: blockedTorrentHashes exempts only
+    // `failed`, so a failed row would let the chase re-queue the same dead
+    // release. A `cleaned` hash is refused, and the sink's re-pick branch backs
+    // the want off instead. (Not `exhausted` — its admin "retry import" would
+    // flip a never-finished download to `completed`.)
     const settle = (v: ReconcileTorrent, why: string): boolean => {
       const note = `reconcile: torrent ${v.hash} ${why}`
       let claimed = 0
       for (const id of v.want_ids) claimed += claim.run(note, id, v.hash).changes
       if (claimed === 0) return false
-      setTorrentStatus(v.hash, 'failed', `reconcile: ${why}`)
+      setTorrentStatus(v.hash, 'cleaned', `reconcile: gave up — ${why}`)
       return true
     }
     const stalledOut = stalled
