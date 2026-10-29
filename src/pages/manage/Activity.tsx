@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock,
   Database,
   Download,
   FlaskConical,
@@ -18,7 +19,7 @@ import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import {
   getQueueStats, streamActivity,
-  type ActivityStreamEvent, type FlowRun, type QueueStat, type RequestLogEntry,
+  type ActivityStreamEvent, type FlowRun, type QueuedRun, type QueueStat, type RequestLogEntry,
   type RunActivity, type SyncSummary,
 } from '@/lib/flows'
 
@@ -111,6 +112,30 @@ function InProgressCard({ ip }: { ip: InProgress }) {
       ) : (
         <p className="mt-2 text-xs text-muted-foreground">Starting…</p>
       )}
+    </li>
+  )
+}
+
+// An automated run waiting for the flow lock (one flow runs at a time).
+function QueuedCard({ q }: { q: QueuedRun }) {
+  return (
+    <li className="rounded-lg border border-dashed border-border bg-card px-4 py-2.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Clock className="size-4 shrink-0 text-muted-foreground" />
+        <span className="font-medium">{q.flowName}</span>
+        <DryLiveBadge dryRun={q.dryRun} />
+        <span className="min-w-0 truncate text-xs text-muted-foreground">
+          {q.trigger}
+          {q.items > 0 ? ` · ${q.items} ${q.items === 1 ? 'item' : 'items'}` : ''}
+          {q.coalesced > 0 ? ` · +${q.coalesced} merged` : ''}
+        </span>
+        <span
+          className="ml-auto shrink-0 text-xs text-muted-foreground"
+          title={new Date(q.queuedAt).toLocaleString()}
+        >
+          queued {relTime(q.queuedAt)}
+        </span>
+      </div>
     </li>
   )
 }
@@ -379,6 +404,7 @@ function RunGroupCards({ group }: { group: RunGroup }) {
 export default function Activity() {
   const [runs, setRuns] = useState<FlowRun[]>([])
   const [inProgress, setInProgress] = useState<InProgress | null>(null)
+  const [queued, setQueued] = useState<QueuedRun[]>([])
   const [loading, setLoading] = useState(true)
   const [connected, setConnected] = useState(false)
   const [queues, setQueues] = useState<Record<string, QueueStat>>({})
@@ -453,6 +479,9 @@ export default function Activity() {
         case 'aborted':
           setInProgress((p) => (p && p.runToken === ev.runToken ? null : p))
           break
+        case 'queue':
+          setQueued(ev.pending)
+          break
         default:
           break // node-start, ping
       }
@@ -506,7 +535,7 @@ export default function Activity() {
         </div>
         {loading ? (
           <p className="text-sm text-muted-foreground">Loading activity…</p>
-        ) : runs.length === 0 && !inProgress ? (
+        ) : runs.length === 0 && !inProgress && queued.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border py-24 text-center">
             <ActivityIcon className="size-8 text-muted-foreground" />
             <div>
@@ -520,6 +549,10 @@ export default function Activity() {
           </div>
         ) : (
           <ul className="mx-auto flex max-w-2xl flex-col gap-3">
+            {/* Pending runs execute in list order; the next one sits nearest the running card. */}
+            {[...queued].reverse().map((q) => (
+              <QueuedCard key={q.id} q={q} />
+            ))}
             {inProgress ? <InProgressCard ip={inProgress} /> : null}
             {groupRuns(runs).map((group) => (
               <RunGroupCards key={group.key} group={group} />

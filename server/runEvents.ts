@@ -2,10 +2,12 @@
 // runs happen live. Every run — editor, scheduler, or MCP — goes through
 // runFlowAndRecord (flowRoutes.ts), which emits start → node(-start) → done here.
 // The flow lock means at most one run is in flight at a time, so a subscriber
-// only ever tracks a single in-progress run.
+// only ever tracks a single in-progress run. Runs waiting for the lock are
+// broadcast as `queue` snapshots.
 
 import { EventEmitter } from 'node:events'
 import type { FlowRunRow } from './flowsDb.js'
+import type { QueuedRunView } from './flowQueue.js'
 
 export type ActivityEvent =
   | {
@@ -32,6 +34,9 @@ export type ActivityEvent =
     }
   | { type: 'done'; runToken: string; run: FlowRunRow }
   | { type: 'aborted'; runToken: string; error: string }
+  /** The flow run queue changed (server/flowQueue.ts): the full pending list,
+   * in run order, so a client can just replace what it shows. */
+  | { type: 'queue'; pending: QueuedRunView[] }
 
 const emitter = new EventEmitter()
 emitter.setMaxListeners(0) // one listener per open Activity tab; don't warn

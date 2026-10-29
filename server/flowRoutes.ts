@@ -22,6 +22,15 @@ import { listPublishedComponents, parseComponent } from './flowsDb.js'
 import type { FlowRunRow, RunActivity, ScheduleKind, ScheduleSpec, WeekDay } from './flowsDb.js'
 import { computeNextRun, runScheduleNow } from './scheduler.js'
 import { emitActivity, subscribeActivity } from './runEvents.js'
+import {
+  acquireFlowLock,
+  releaseFlowLock,
+  coalesceKey,
+  enqueueRuns,
+  flowQueueSnapshot,
+  type EnqueueResult,
+  type RunRequest,
+} from './flowQueue.js'
 import { queueStats, recentRequests } from './httpQueue.js'
 import { recentSyncs } from './sync.js'
 
@@ -216,10 +225,15 @@ flowRouter.get('/api/flows/runs', (req, res) => {
 
 // Live snapshot of background work for the Activity tab: the outbound-request
 // limiter (per-service counts + a log of the most recent requests, so the
-// traffic is attributable) and recent portal-sync passes (the main non-flow
-// background job).
+// traffic is attributable), recent portal-sync passes (the main non-flow
+// background job), and the flow run queue (runs waiting for the flow lock).
 flowRouter.get('/api/flows/queue', (_req, res) => {
-  res.json({ queues: queueStats(), requests: recentRequests(), syncs: recentSyncs() })
+  res.json({
+    queues: queueStats(),
+    requests: recentRequests(),
+    syncs: recentSyncs(),
+    runs: flowQueueSnapshot(),
+  })
 })
 
 // Live activity feed: an initial snapshot of recent runs, then a newline-delimited
@@ -234,6 +248,7 @@ flowRouter.get('/api/flows/runs/stream', (req, res) => {
   res.flushHeaders?.()
   const send = (obj: unknown) => res.write(JSON.stringify(obj) + '\n')
   send({ type: 'snapshot', runs: flowsDb.listRuns(100) })
+  send({ type: 'queue', pending: flowQueueSnapshot().pending })
   const unsubscribe = subscribeActivity(send)
   const ping = setInterval(() => send({ type: 'ping' }), 25_000)
   req.on('close', () => {
@@ -411,42 +426,42 @@ flowRouter.delete('/api/flows/:id', (req, res) => {
   res.json({ ok: true })
 })
 
-// One run at a time — flows hit rate-limited upstreams (Jikan) and there is a
-// single admin; a second concurrent run is always a mistake. Exported so the
-// per-series re-search shares the same lock.
-let running = false
-export function acquireFlowLock(): boolean {
-  if (running) return false
-  running = true
-  return true
-}
-export function releaseFlowLock(): void {
-  running = false
-}
+// One run at a time — the flow lock and the queue of automated runs waiting for
+// it live in flowQueue.ts. Re-exported so the per-series re-search and the
+// scheduler share the same lock.
+export { acquireFlowLock, releaseFlowLock }
 
 // Chain-depth cap so a self-firing loop (flow A fires a name that runs A, …)
 // can't run away forever. Kept high enough for intentional test loops; past
 // this depth further fires are dropped with a warning.
 const FIRE_DEPTH_CAP = 100
 
+// Coalescing identity of a trigger event: the bus name for a named trigger, the
+// kind for an event trigger (see coalesceKey in flowQueue.ts for the rule).
+function eventIdentity(event: TriggerEvent): string {
+  return event.kind === 'start' ? `start:${event.name}` : event.kind
+}
+
 /**
- * Run a set of flows for one trigger event, seeding each as the firing event so
- * only the matching trigger node emits its payload. Runs are serialized through
- * the flow lock (one at a time), and each run's own `trigger.fire` outputs are
- * drained recursively (depth-capped). Callers must NOT already hold the flow
- * lock. Never throws — a bad flow is logged and skipped so a chain can't wedge.
+ * Queue one run per subscribing flow for a trigger event, seeding each as the
+ * firing event so only the matching trigger node emits its payload. The queue
+ * (flowQueue.ts) runs them one at a time under the flow lock — waiting for a
+ * busy lock instead of dropping the run — and coalesces item-less repeats.
+ * Each run's own `trigger.fire` outputs are queued ahead of other pending work
+ * (depth-capped), so a chain still completes before unrelated runs start.
  *
- * Returns `false` if any subscriber was skipped because the flow lock was held
- * (i.e. the event was NOT fully dispatched this pass) so an event-watcher can
- * leave its watermark un-advanced and retry next tick. A flow that actually ran
- * — even if it errored or was invalid — does not count as a lock-skip.
+ * The flow is re-read when its turn comes: a graph edited while queued runs as
+ * saved, and a flow disabled or deleted meanwhile is skipped.
+ *
+ * Returns null when the depth cap stopped the chain.
  */
-async function runMatchingFlows(
-  flows: { id: number; name: string; graph: string }[],
+function queueMatchingFlows(
+  flows: { id: number; name: string }[],
   event: TriggerEvent,
   depth: number,
-  dryRun = false,
-): Promise<boolean> {
+  dryRun: boolean,
+  front = false,
+): EnqueueResult | null {
   const label = event.kind === 'start' ? `"${event.name}"` : event.kind
   if (depth > FIRE_DEPTH_CAP) {
     const msg = `Trigger chain depth cap (${FIRE_DEPTH_CAP}) reached at ${label} — stopping chain`
@@ -463,63 +478,131 @@ async function runMatchingFlows(
       startedAt: new Date().toISOString(),
     })
     emitActivity({ type: 'aborted', runToken, error: msg })
-    return true
+    return null
   }
-  let dispatched = true
-  for (const flow of flows) {
-    if (!acquireFlowLock()) {
-      console.warn(`fireTrigger: ${label} → flow #${flow.id} skipped (a flow is already running)`)
-      dispatched = false
-      continue
-    }
-    let fires: FireRequest[] = []
-    try {
-      const graph = JSON.parse(flow.graph) as FlowGraph
-      const resolver = buildSpecResolver(flow.id, (id) => flowsDb.getFlow(id))
-      const invalid = validateGraph(graph, resolver)
-      if (invalid) {
-        console.warn(`fireTrigger: flow #${flow.id} "${flow.name}" invalid — ${invalid}`)
-        continue
-      }
-      const report = await runFlowAndRecord(graph, {
-        dryRun,
-        flowId: flow.id,
-        flowName: flow.name,
-        resolveSpec: resolver,
-        trigger: event,
-      })
-      fires = report.fires ?? []
-    } catch (e) {
-      console.error(`fireTrigger: flow #${flow.id} "${flow.name}" threw`, e)
-    } finally {
-      releaseFlowLock()
-    }
-    // Drain this flow's own fires (lock released) before moving on.
-    for (const f of fires) await fireTrigger(f.name, f.items, depth + 1, dryRun)
-  }
-  return dispatched
+  const items = event.items.length
+  const reqs: RunRequest[] = flows.map((f) => ({
+    key: coalesceKey(f.id, eventIdentity(event), dryRun, items),
+    flowId: f.id,
+    flowName: f.name,
+    trigger: label,
+    items,
+    dryRun,
+    run: () => runQueuedFlow(f.id, event, depth, dryRun),
+  }))
+  return enqueueRuns(reqs, { front })
 }
 
-/** Publish to a named trigger bus: run every flow with a `trigger.start` of `name`.
- * `dryRun` carries a dry-run schedule's flag to every subscriber and the chains
- * they fire — it used to be dropped here, so a "dry" schedule queued live. */
-export async function fireTrigger(name: string, items: FlowItem[], depth = 0, dryRun = false): Promise<void> {
+// A queued run's body — called by the queue with the flow lock held. Never
+// throws: a bad flow is logged and skipped so a chain can't wedge. Its fires
+// are queued (ahead of other pending work) before the lock passes on, carrying
+// this run's dryRun so a dry schedule's whole chain stays dry.
+async function runQueuedFlow(flowId: number, event: TriggerEvent, depth: number, dryRun: boolean): Promise<void> {
+  const flow = flowsDb.getFlow(flowId)
+  if (!flow || !flow.enabled) {
+    console.warn(`fireTrigger: flow #${flowId} was ${flow ? 'disabled' : 'deleted'} while queued — skipped`)
+    return
+  }
+  let fires: FireRequest[] = []
+  try {
+    const graph = JSON.parse(flow.graph) as FlowGraph
+    const resolver = buildSpecResolver(flow.id, (id) => flowsDb.getFlow(id))
+    const invalid = validateGraph(graph, resolver)
+    if (invalid) {
+      console.warn(`fireTrigger: flow #${flow.id} "${flow.name}" invalid — ${invalid}`)
+      return
+    }
+    const report = await runFlowAndRecord(graph, {
+      dryRun,
+      flowId: flow.id,
+      flowName: flow.name,
+      resolveSpec: resolver,
+      trigger: event,
+    })
+    fires = report.fires ?? []
+  } catch (e) {
+    console.error(`fireTrigger: flow #${flow.id} "${flow.name}" threw`, e)
+  }
+  queueFires(fires, depth + 1, dryRun)
+}
+
+// Queue a run's fires at the front of the queue, keeping the order they fired
+// in: front-inserting the last fire first leaves the first fire at the head.
+function queueFires(fires: FireRequest[], depth: number, dryRun: boolean): void {
+  for (const f of [...fires].reverse()) enqueueTrigger(f.name, f.items, depth, dryRun, true)
+}
+
+function enqueueTrigger(
+  name: string,
+  items: FlowItem[],
+  depth: number,
+  dryRun: boolean,
+  front: boolean,
+): EnqueueResult | null {
   const flows = flowsDb.flowsWithTrigger(name)
   if (flows.length === 0) {
     console.warn(`fireTrigger: no flow has a trigger named "${name}"`)
-    return
+    return null
   }
-  await runMatchingFlows(flows, { kind: 'start', name, items }, depth, dryRun)
+  return queueMatchingFlows(flows, { kind: 'start', name, items }, depth, dryRun, front)
 }
 
-/** Fire an event trigger: run every flow with a `trigger.<kind>` node, seeding
- * it with the event items. Used by the scheduler's watchers. Returns `false` if
- * a subscriber was lock-skipped (event not fully dispatched) so the caller can
- * retry rather than advance its watermark. */
+/** Publish to a named trigger bus: queue a run of every flow with a
+ * `trigger.start` of `name`. Resolves once the runs are queued (or merged into
+ * an identical pending run), not when they finish — a schedule tick or the
+ * air-date sweep must not wait behind a long import. `dryRun` carries a
+ * dry-run schedule's flag to every subscriber and the chains they fire. */
+export async function fireTrigger(
+  name: string,
+  items: FlowItem[],
+  depth = 0,
+  dryRun = false,
+): Promise<{ queued: number; coalesced: number }> {
+  const r = enqueueTrigger(name, items, depth, dryRun, false)
+  return { queued: r?.queued ?? 0, coalesced: r?.coalesced ?? 0 }
+}
+
+/** Fire an event trigger: queue a run of every flow with a `trigger.<kind>`
+ * node, seeded with the event items, and resolve once those runs have finished.
+ *
+ * Returns `false` only when the queue was full and refused the batch (nothing
+ * was queued). The event watchers advance their watermark on `true`, i.e. after
+ * the subscribers actually ran — being queued does not count as dispatched.
+ * The queue is in-memory, so a restart drops a waiting event; since its
+ * watermark hasn't moved, the first watcher pass after boot re-detects it and
+ * fires it then. Not lost, and not doubled: the watcher's per-kind in-flight
+ * guard (dispatchEvent in scheduler.ts) stops it re-queueing the same items
+ * while this fire waits, and item-bearing runs never coalesce, so the payload
+ * reaches every subscriber intact. */
 export async function fireEvent(kind: TriggerKind, items: FlowItem[], depth = 0): Promise<boolean> {
   const flows = flowsDb.flowsWithTriggerType(`trigger.${kind}`)
   if (flows.length === 0) return true
-  return runMatchingFlows(flows, { kind, items }, depth)
+  const r = queueMatchingFlows(flows, { kind, items }, depth, false)
+  if (!r) return true // depth cap: a retry would hit it again
+  if (!r.accepted) return false
+  await r.done
+  return true
+}
+
+/** Queue a legacy flow-id schedule's run (fireDueSchedule in scheduler.ts).
+ * `run` is called with the flow lock held. Keyed by schedule, so the ticks that
+ * re-see it as due while it waits fold into one entry. */
+export function queueScheduledRun(
+  sched: { id: number; flow_id: number; dry_run: boolean },
+  flowName: string,
+  run: () => Promise<void>,
+): void {
+  enqueueRuns([
+    {
+      key: coalesceKey(sched.flow_id, `schedule:${sched.id}`, sched.dry_run, 0),
+      flowId: sched.flow_id,
+      flowName,
+      trigger: `schedule #${sched.id}`,
+      items: 0,
+      dryRun: sched.dry_run,
+      run,
+    },
+  ])
 }
 
 const TRIGGER_KINDS: TriggerKind[] = ['start', 'new-item', 'new-portal', 'release', 'qbit-complete']
@@ -539,18 +622,28 @@ function parseRunTrigger(raw: unknown): TriggerEvent | null {
   }
 }
 
-// Fan out a run's queued fires as fire-and-forget chains. Call *after* releasing
-// the flow lock; errors are swallowed so a chain can't break the originating run.
+// Queue an editor run's trigger.fire publishes, after it released the flow lock.
+// Like any run's own fires they go to the front of the queue. Errors are logged
+// so a chain can't break the originating run.
 export function dispatchFires(fires: FireRequest[] | undefined): void {
   if (!fires?.length) return
-  void (async () => {
-    for (const f of fires) await fireTrigger(f.name, f.items, 1)
-  })().catch((e) => console.error('dispatchFires failed', e))
+  try {
+    queueFires(fires, 1, false)
+  } catch (e) {
+    console.error('dispatchFires failed', e)
+  }
 }
 
 // Deliberately ignores flows.enabled: disable turns off *automation*
 // (schedules + event triggers), while manual runs are how you iterate on a
 // disabled flow before switching it back on.
+//
+// Editor runs don't join the flow queue: when the lock is busy they answer 409
+// at once, as before. The streaming route paints nodes as they finish, so a
+// queued editor run would hold the request open with nothing to show for as
+// long as an import takes, and a run you asked for to see *now* starting
+// minutes later (possibly live) is a surprise, not a convenience. The 409 is
+// immediate, the editor already shows it, and Activity shows what's ahead.
 flowRouter.post('/api/flows/:id/run', async (req, res) => {
   const id = Number(req.params.id)
   const row = Number.isFinite(id) ? flowsDb.getFlow(id) : undefined
@@ -821,12 +914,13 @@ flowRouter.post('/api/schedules/:id/run', async (req, res) => {
     res.status(404).json({ error: 'Schedule not found' })
     return
   }
-  // Name-based: publish the trigger (fireTrigger takes the flow lock per run, so
-  // don't hold it here). There may be several matching flows / no single report.
+  // Name-based: publish the trigger. Its runs go through the flow queue, so this
+  // answers as soon as they're queued (or merged into an identical pending run)
+  // — there may be several matching flows and no single report.
   if (sched.trigger_name) {
     try {
-      await fireTrigger(sched.trigger_name, [], 0, sched.dry_run)
-      res.json({ ok: true, fired: sched.trigger_name })
+      const { queued, coalesced } = await fireTrigger(sched.trigger_name, [], 0, sched.dry_run)
+      res.json({ ok: true, fired: sched.trigger_name, queued, coalesced })
     } catch (e) {
       console.error(e)
       res.status(500).json({ error: e instanceof Error ? e.message : 'Run failed' })
