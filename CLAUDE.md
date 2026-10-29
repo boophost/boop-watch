@@ -295,6 +295,12 @@ The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can
   "Blacklist & replace" / research route) queues into (default `anime`). Saved flow graphs carry
   their own category; this only covers the graph we construct in code. **Set `anime-dev` on staging**
   so a dev instance sharing qBit with prod never queues into prod's `anime` category.
+- `QBIT_MIN_FREE_GB` (default `100`; `0` = off), `QBIT_REQUIRED_INTERFACE` (e.g. `tailscale0`;
+  empty = off), `HOME_PUBLIC_IP` (empty = off) — the **torrent-add guard** (`server/qbitGuard.ts`).
+  `qbitAddTorrents()` there is the only `torrents/add` call; it refuses unless qBittorrent reports
+  enough free space, is bound to the required interface, and its external IPv4 isn't the home IP.
+  `sink.qbittorrent` routes a refused batch to its `refused` output (wants stay open);
+  `GET /api/qbit/guard` (admin) feeds the `/manage` banner. Add new add paths through it.
 - `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
 - `TORRENT_APBAY_URL` — public Western TV/movie index for `enrich.torrent-search`’s `apibay`
