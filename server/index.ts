@@ -44,7 +44,7 @@ import {
   retryExhaustedTorrent,
   wantAction,
 } from './sourcing.js'
-import { qbitConfigured, qbitDelete } from './qbit.js'
+import { qbitConfigured, qbitDelete, qbitGuard } from './qbit.js'
 import { createIssue, githubConfigured } from './github.js'
 import * as blacklist from './blacklist.js'
 import { posthogProxy } from './posthogProxy.js'
@@ -222,6 +222,26 @@ app.get('/api/storage', requireAuth, requireAdmin, async (_req, res) => {
     console.error(e)
     res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to read storage' })
   }
+})
+
+// The torrent-add guard (server/qbitGuard.ts) as it stands right now — drives
+// the /manage warning banner. Never carries the configured home IP.
+app.get('/api/qbit/guard', requireAuth, requireAdmin, async (_req, res) => {
+  if (!qbitConfigured()) {
+    res.json({ ok: true, configured: false, reasons: [] })
+    return
+  }
+  const g = await qbitGuard()
+  res.json({
+    ok: g.ok,
+    configured: true,
+    freeGB: g.freeGB,
+    floorGB: g.floorGB,
+    interface: g.interface,
+    requiredInterface: g.requiredInterface,
+    ...(g.externalIp ? { externalIp: g.externalIp } : {}),
+    reasons: g.reasons,
+  })
 })
 
 app.post('/api/storage/delete', requireAuth, requireAdmin, async (req, res) => {
@@ -1356,6 +1376,13 @@ app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res)
     return
   }
   try {
+    // Fail fast with the guard's reason rather than search for a release the
+    // sink would refuse anyway.
+    const guard = await qbitGuard()
+    if (!guard.ok) {
+      res.status(409).json({ error: `qBittorrent add refused — ${guard.reasons.join('; ')}` })
+      return
+    }
     const query = `${series.title_english || series.title} 1080p`
     const report = await runFlowAndRecord(buildResearchGraph(id, query), {
       dryRun: false,
@@ -1364,6 +1391,12 @@ app.post('/api/series/:id/research', requireAuth, requireAdmin, async (req, res)
     })
     const queued = report.nodes.qb?.counts?.sent ?? 0
     const notes = [...(report.nodes.tor?.notes ?? []), ...(report.nodes.qb?.notes ?? [])]
+    // The guard can still trip between the pre-check and the add.
+    if ((report.nodes.qb?.counts?.refused ?? 0) > 0) {
+      const why = report.nodes.qb?.notes?.find((n) => n.startsWith('REFUSED')) ?? 'qBittorrent add refused'
+      res.status(409).json({ error: why, queued, notes })
+      return
+    }
     res.json({ ok: report.ok, queued, notes })
   } catch (e) {
     console.error(e)
