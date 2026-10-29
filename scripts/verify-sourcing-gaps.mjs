@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Smoke tests for planTvGaps / torrentCoverage (enrich.sourcing-gaps). No vitest in this repo.
 const { planTvGaps, torrentCoverage } = await import('../server/sourcingGaps.ts')
-const { NODE_REGISTRY } = await import('../server/flowNodes.ts')
+const { NODE_REGISTRY, releaseNamesTitle } = await import('../server/flowNodes.ts')
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg)
@@ -53,6 +53,20 @@ assert(r.missing.length === 1, 'aired today counts')
 // onlySeason restricts the plan (the pack-missed fallback).
 r = plan([...season(1, 2), ...season(2, 2)], { seasonPacks: false, onlySeason: 2 })
 assert(r.missing.length === 2 && r.missing.every((m) => m.season === 2), 'onlySeason')
+
+// Dotted episode markers are episodes, not packs.
+assert(eq(torrentCoverage('One.Tree.Hill.S01.E01.SWESUB.DVDRip'), { seasons: { from: 1, to: 1 }, episode: 1 }), 'S01.E01')
+
+// strictTitle: the word after the title must be a marker.
+const named = (n, t) => releaseNamesTitle(n, [t])
+assert(named('Criminal.Minds.S01.COMPLETE.720p.WEBRip.x264', 'criminal minds'), 'show itself')
+assert(!named('Criminal.Minds.Suspect.Behavior.S01.COMPLETE.720p.WEBRip.x264-Ga', 'criminal minds'), 'spin-off rejected')
+assert(!named('Criminal.Minds.Beyond.Borders.S02.COMPLETE.720p', 'criminal minds'), 'spin-off rejected 2')
+assert(named('The.Office.US.S03.1080p.BluRay', 'the office'), 'country tag allowed')
+assert(named('Iron Man (2008) 1080p BrRip x264 - 1.65GB - YIFY', 'iron man'), 'movie with year')
+assert(!named('Iron Man 2 (2010) 1080p', 'iron man'), 'sequel rejected')
+assert(named('Blade Runner 2049 (2017) 1080p', 'blade runner 2049'), 'title containing a year')
+assert(named('[Group] One Tree Hill Season 3 Complete', 'one tree hill'), 'leading group tag')
 
 // Registered.
 assert(NODE_REGISTRY.has('enrich.sourcing-gaps'), 'node registered')

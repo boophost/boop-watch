@@ -30,7 +30,7 @@ export interface TorrentCoverage {
 }
 
 export function torrentCoverage(name: string): TorrentCoverage {
-  let m = name.match(/\bS(\d{1,2})\s*E(\d{1,4})\b/i) ?? name.match(/\b(\d{1,2})x(\d{2,3})\b/)
+  let m = name.match(/\bS(\d{1,2})[\s._-]*E(\d{1,4})\b/i) ?? name.match(/\b(\d{1,2})x(\d{2,3})\b/)
   if (m) {
     const s = Number(m[1])
     return { seasons: { from: s, to: s }, episode: Number(m[2]) }
