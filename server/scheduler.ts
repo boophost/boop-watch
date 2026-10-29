@@ -12,11 +12,13 @@ import {
   getLastRecordedRunId,
   fireTrigger,
   fireEvent,
+  queueScheduledRun,
 } from './flowRoutes.js'
 import { buildSpecResolver } from './flowComponents.js'
 import {
   dueSchedules,
   getFlow,
+  getSchedule,
   markScheduleFired,
   flowsWithTriggerType,
   triggerStateHas,
@@ -210,21 +212,26 @@ async function fireDueSchedule(): Promise<void> {
   if (due.length === 0) return
   const sched = due[0]
   if (sched.trigger_name) {
-    // Name-based: roll the cadence now, then publish — fireTrigger takes the
-    // flow lock per subscribing run itself (so the tick must NOT hold it: a
-    // live run can take minutes, and awaiting it here would freeze `ticking`
-    // for that whole time, starving the event watchers below).
+    // Name-based: roll the cadence now, then publish — fireTrigger queues one
+    // run per subscriber behind any run in progress (so the tick must NOT hold
+    // the lock: a live run can take minutes). A restart drops a queued fire;
+    // the schedule's next cadence covers it, as it would a missed tick.
     rollSchedule(sched, new Date())
     void fireTrigger(sched.trigger_name, [], 0, sched.dry_run).catch((e) =>
       console.error(`scheduler: fireTrigger("${sched.trigger_name}") threw`, e),
     )
     return
   }
-  // Legacy flow-id schedule — one flow at a time; back off if a run is in
-  // progress. Lock is acquired synchronously here (so a concurrent watcher
-  // correctly sees it busy), but the run itself must not block the tick.
-  if (!acquireFlowLock()) return
-  void fireScheduled(sched).finally(() => releaseFlowLock())
+  // Legacy flow-id schedule — queued behind any run in progress (the run itself
+  // must not block the tick). next_run only rolls when it actually runs, so it
+  // stays due (and survives a restart) while it waits: the queue folds the ticks
+  // that re-see it into one entry, and the run re-reads the schedule so an entry
+  // queued while an earlier fire of it was mid-run is a no-op.
+  queueScheduledRun(sched, getFlow(sched.flow_id)?.name ?? `flow #${sched.flow_id}`, async () => {
+    const fresh = getSchedule(sched.id)
+    if (!fresh?.enabled || !fresh.next_run || fresh.next_run > new Date().toISOString()) return
+    await fireScheduled(fresh)
+  })
 }
 
 // --- Event-trigger watchers ------------------------------------------------
@@ -349,10 +356,15 @@ async function watchReleases(): Promise<void> {
 // never recovers: the Chase-wants flow only re-sources 'open' wants, and
 // sink.qbittorrent refuses to re-queue the dead hash — so the episode stays
 // missing forever until someone runs reconcile by hand. This runs the same safe
-// fixer (server/sourcing.ts) hourly: dead-torrent orphans → failed, their
-// sourced wants → open, phantom-fulfilled wants (file gone from disk) → open.
-const RECONCILE_INTERVAL_MS = 60 * 60_000
+// fixer (server/sourcing.ts) every 15 minutes: dead-torrent orphans → failed,
+// their sourced wants → open, phantom-fulfilled wants (file gone from disk) →
+// open, and — patiently — stalled / missingFiles torrents → removed + reopened.
+// The stall threshold (SOURCING_STALL_HOURS) is what makes the short cadence
+// safe; one pass is a qBittorrent list plus local SQLite reads.
+const RECONCILE_INTERVAL_MS = 15 * 60_000
 let lastReconcileAt = 0
+// Errored torrents are reported every pass; only log when the set changes.
+let lastErroredKey = ''
 
 async function reconcileSourcing(): Promise<void> {
   if (Date.now() - lastReconcileAt < RECONCILE_INTERVAL_MS) return
@@ -366,9 +378,18 @@ async function reconcileSourcing(): Promise<void> {
   try {
     lastReconcileAt = Date.now()
     const r = await sourcingReconcile(false)
-    if (r.orphanRowsClosed || r.wantsReopened || r.phantomFulfilledReopened) {
+    const erroredKey = r.errored.map((t) => t.hash).sort().join(',')
+    if (
+      r.orphanRowsClosed ||
+      r.wantsReopened ||
+      r.phantomFulfilledReopened ||
+      r.stalled.length ||
+      r.missingFiles.length ||
+      erroredKey !== lastErroredKey
+    ) {
       console.log('scheduler: sourcing reconcile —', JSON.stringify(r))
     }
+    lastErroredKey = erroredKey
   } finally {
     releaseFlowLock()
   }
@@ -423,7 +444,7 @@ async function tick(): Promise<void> {
     // Backstop the (scrape-driven) release watcher from our own air-date cache.
     await sweepAiringWants().catch((e) => console.error('scheduler: sweepAiringWants threw', e))
     // Self-heal orphaned sourcing state last, only when nothing else holds the
-    // flow lock this tick (gated to hourly internally).
+    // flow lock this tick (gated to every 15 min internally).
     await reconcileSourcing().catch((e) => console.error('scheduler: reconcileSourcing threw', e))
   } finally {
     ticking = false

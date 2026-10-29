@@ -63,6 +63,7 @@ import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
 import { clientForSection } from './metadata/index.js'
 import { blacklistedHashes } from './blacklist.js'
 import { qbitList, qbitToItem, qbitConfigured, qbitFreeSpace, parseTorrentTags } from './qbit.js'
+import { checkQbitGuard, qbitAddTorrents } from './qbitGuard.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
@@ -5654,9 +5655,12 @@ const qbittorrentSink: NodeImpl = {
     label: 'Send to qBittorrent',
     category: 'sink',
     description:
-      'Adds each item’s magnet link to a qBittorrent instance via its WebUI API.',
+      'Adds each item’s magnet link to a qBittorrent instance via its WebUI API. Refuses the whole batch (to "refused", with the reason) when the add guard fails: too little free space, not bound to the required VPN interface, or the external IP is the home connection.',
     inputs: [{ id: 'in', label: 'in' }],
-    outputs: [{ id: 'sent', label: 'sent' }],
+    outputs: [
+      { id: 'sent', label: 'sent' },
+      { id: 'refused', label: 'refused' },
+    ],
     config: [
       {
         key: 'url',
@@ -5745,33 +5749,83 @@ const qbittorrentSink: NodeImpl = {
         }
       }
     }
-    if (withMagnet.length === 0) return { sent: [] }
+    if (withMagnet.length === 0) return { sent: [], refused: [] }
+
+    // The add guard (server/qbitGuard.ts), checked against the qBittorrent this
+    // node actually sends to. A refusal routes the batch to `refused` with the
+    // reason and leaves its wants untouched, so they are retried once fixed.
+    const refuse = (reasons: string[]) => {
+      const reason = reasons.join('; ')
+      ctx.notes.push(
+        `${ctx.dryRun ? 'dry run — would refuse' : 'REFUSED'} ${withMagnet.length} magnet(s): ${reason}`,
+      )
+      return { sent: [], refused: withMagnet.map((it) => ({ ...it, refused_reason: reason })) }
+    }
+
     if (ctx.dryRun) {
+      // Dry runs never needed a reachable qBittorrent (previews run with the
+      // sink disabled), so an unreadable guard is a note here, not a failure.
+      try {
+        const { base, user, pass } = qbitCreds(config)
+        const guard = await checkQbitGuard(base, () => qbitLogin(base, user, pass))
+        if (!guard.ok) return refuse(guard.reasons)
+      } catch (e) {
+        ctx.notes.push(`add guard not checked: ${e instanceof Error ? e.message : String(e)}`)
+      }
       ctx.notes.push(`dry run — would send ${withMagnet.length} magnets to qBittorrent`)
-      return { sent: withMagnet }
+      return { sent: withMagnet, refused: [] }
     }
 
     // Node config wins; env vars are the fallback so credentials can be kept
     // out of the stored graph when preferred.
     const { base, user, pass } = qbitCreds(config)
     const cookie = await qbitLogin(base, user, pass)
+    const guard = await checkQbitGuard(base, async () => cookie)
+    if (!guard.ok) return refuse(guard.reasons)
+
+    // qBittorrent holds one torrent per info-hash across all categories. A hash
+    // that is already there (typically the other environment's copy of the same
+    // release) can't be added: alone it 409s the whole add, and in a batch it is
+    // skipped silently, after which the tag/rename loop below would rewrite the
+    // other environment's torrent. Route those to `refused` and back their wants
+    // off, so Chase doesn't re-pick the same release every run.
+    const present = new Map<string, string>()
+    const hashes = withMagnet.map((it) => String(it.torrent_hash ?? '').toLowerCase()).filter(Boolean)
+    if (hashes.length) {
+      const r = await fetch(`${base}/api/v2/torrents/info?hashes=${hashes.join('|')}`, {
+        headers: { Cookie: cookie },
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (!r.ok) throw new Error(`qBittorrent info failed (${r.status})`)
+      for (const t of (await r.json()) as { hash: string; category: string }[]) present.set(t.hash.toLowerCase(), t.category)
+    }
+    const elsewhere: FlowItem[] = []
+    const toAdd: FlowItem[] = []
+    for (const it of withMagnet) {
+      const h = String(it.torrent_hash ?? '').toLowerCase()
+      if (!present.has(h)) {
+        toAdd.push(it)
+        continue
+      }
+      const reason = `already in qBittorrent (category "${present.get(h) || 'none'}")`
+      elsewhere.push({ ...it, refused_reason: reason })
+      const wantId = asNumber(it.want_id)
+      if (wantId != null) recordWantAttempt(wantId, 360, `${reason}, backing off`)
+    }
+    if (elsewhere.length) ctx.notes.push(`skipped ${elsewhere.length} magnet(s) already in qBittorrent`)
+    if (toAdd.length === 0) return { sent: [], refused: elsewhere }
 
     const paused = bool(config, 'paused', false)
     const form = new URLSearchParams({
-      urls: withMagnet.map((it) => String(it[urlField])).join('\n'),
+      urls: toAdd.map((it) => String(it[urlField])).join('\n'),
       category: str(config, 'category', 'anime'),
       paused: String(paused),
       stopped: String(paused), // qBit >= 5 renamed the flag
     })
     const savepath = str(config, 'savepath', '')
     if (savepath) form.set('savepath', savepath)
-    const add = await fetch(`${base}/api/v2/torrents/add`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: form,
-      signal: AbortSignal.timeout(15_000),
-    })
-    if (!add.ok) throw new Error(`qBittorrent add failed (${add.status})`)
+    // Re-checks the guard (from cache) as the last step before sending.
+    await qbitAddTorrents(base, cookie, form)
 
     // `torrents/add` takes one tag set for the whole batch, but each magnet has
     // its own identity — so tag per hash, alongside the rename.
@@ -5792,7 +5846,7 @@ const qbittorrentSink: NodeImpl = {
     let tagged = 0
     let ledgered = 0
     let untracked = 0
-    for (const it of withMagnet) {
+    for (const it of toAdd) {
       const hash = String(it.torrent_hash ?? '').toLowerCase()
       const name = String(it.torrent_name ?? '')
       if (!hash) {
@@ -5850,13 +5904,13 @@ const qbittorrentSink: NodeImpl = {
       }
     }
     ctx.notes.push(
-      `sent ${withMagnet.length} magnet(s) to qBittorrent${paused ? ' (paused)' : ''}` +
+      `sent ${toAdd.length} magnet(s) to qBittorrent${paused ? ' (paused)' : ''}` +
         (renamed ? `, named ${renamed}` : '') +
         (tagged ? `, tagged ${tagged}` : '') +
         (ledgered ? `, ledgered ${ledgered}` : '') +
         (untracked ? `, ${untracked} WITHOUT a hash (untracked!)` : ''),
     )
-    return { sent: withMagnet }
+    return { sent: toAdd, refused: elsewhere }
   },
 }
 
