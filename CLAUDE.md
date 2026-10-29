@@ -204,7 +204,11 @@ searches per run for SD singles. Its torrent searches use `strictTitle`, without
 overlap picks spin-offs ("Criminal Minds Suspect Behavior" for Criminal Minds). It searches `apibay` and queues
 into the `movies` / `tv` qBit categories that the Movie/TV import flows consume, tagged
 `tmdb:{source_id}`. Nothing remembers a miss, so an unfindable episode is re-searched each run —
-keep the schedule coarse (6h). Like every flow, it must be built separately on each environment.
+keep the schedule coarse (6h). Like every flow, it must be built separately on each environment,
+and it runs **live on both** so each library stays complete. Because prod and staging share one
+qBittorrent, set the node's `categories` to that environment's own (`tv,movies` / `tv-dev,movies-dev`)
+— otherwise each counts the other's downloads as held and those seasons never reach its library.
+`minFreeGB` stops queueing below a free-space floor on the shared download disk (it filled once).
 
 ### Flows/schedules live in the DB, not git — promoting code never promotes them
 
@@ -301,6 +305,12 @@ The list below is the **legacy/bootstrap view**. Everything in `CONFIG_SPEC` can
   "Blacklist & replace" / research route) queues into (default `anime`). Saved flow graphs carry
   their own category; this only covers the graph we construct in code. **Set `anime-dev` on staging**
   so a dev instance sharing qBit with prod never queues into prod's `anime` category.
+- `QBIT_MIN_FREE_GB` (default `100`; `0` = off), `QBIT_REQUIRED_INTERFACE` (e.g. `tailscale0`;
+  empty = off), `HOME_PUBLIC_IP` (empty = off) — the **torrent-add guard** (`server/qbitGuard.ts`).
+  `qbitAddTorrents()` there is the only `torrents/add` call; it refuses unless qBittorrent reports
+  enough free space, is bound to the required interface, and its external IPv4 isn't the home IP.
+  `sink.qbittorrent` routes a refused batch to its `refused` output (wants stay open);
+  `GET /api/qbit/guard` (admin) feeds the `/manage` banner. Add new add paths through it.
 - `TORRENT_TOSHO_URL`, `TORRENT_TSUKI_URL` — torrent index base URLs (default
   `https://feed.animetosho.xyz` / `https://api.tsukihime.org`)
 - `TORRENT_APBAY_URL` — public Western TV/movie index for `enrich.torrent-search`’s `apibay`

@@ -62,7 +62,8 @@ import { searchAnime, pickPosterUrl } from './jikan.js'
 import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
 import { clientForSection } from './metadata/index.js'
 import { blacklistedHashes } from './blacklist.js'
-import { qbitList, qbitToItem, qbitConfigured, parseTorrentTags } from './qbit.js'
+import { qbitList, qbitToItem, qbitConfigured, qbitFreeSpace, parseTorrentTags } from './qbit.js'
+import { checkQbitGuard, qbitAddTorrents } from './qbitGuard.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
@@ -4036,6 +4037,8 @@ const sourcingGaps: NodeImpl = {
       { key: 'idField', label: 'Catalog id field', kind: 'text', default: 'id' },
       { key: 'seasonPacks', label: 'Season packs', kind: 'boolean', default: true, help: 'A fully-aired season with nothing held is emitted once as a pack (want_mode batch) instead of per episode.' },
       { key: 'seasonField', label: 'Only this season (field)', kind: 'text', default: '', help: 'When the item carries a season here, plan only that season. Wire a pack search’s "missed" back through a second copy (Season packs off) to fall back to single episodes.' },
+      { key: 'categories', label: 'Count torrents in categories', kind: 'text', default: '', help: 'Comma-separated qBit categories whose torrents count as held (e.g. "tv,movies"). Empty = every category. Set it when environments share one qBittorrent, or each skips what the other downloaded.' },
+      { key: 'minFreeGB', label: 'Minimum free space (GB)', kind: 'number', default: 0, help: 'Below this much free space on qBittorrent’s download disk, nothing is emitted as missing. 0 = no check.' },
     ],
   },
   async run(inputs, config, ctx) {
@@ -4051,7 +4054,16 @@ const sourcingGaps: NodeImpl = {
     // Without qBittorrent's list we can't see what is already downloading, and
     // planning blind re-queues it — fail the run rather than guess. Unconfigured
     // (previews, agent envs) has no sink to re-queue into, so an empty list is safe.
-    const torrents = qbitConfigured() ? await qbitList() : []
+    const cats = new Set(str(config, 'categories', '').split(',').map((c) => c.trim()).filter(Boolean))
+    const torrents = (qbitConfigured() ? await qbitList() : []).filter((t) => cats.size === 0 || cats.has(t.category))
+    const minFreeGB = num(config, 'minFreeGB', 0)
+    if (minFreeGB > 0 && qbitConfigured()) {
+      const free = await qbitFreeSpace()
+      if (free < minFreeGB * 2 ** 30) {
+        ctx.notes.push(`only ${(free / 2 ** 30).toFixed(1)} GB free (floor ${minFreeGB} GB) — nothing queued`)
+        return { missing, have, skipped: items }
+      }
+    }
     const portal = getAllPortalItems()
     const today = new Date().toISOString().slice(0, 10)
     let held = 0
@@ -5643,9 +5655,12 @@ const qbittorrentSink: NodeImpl = {
     label: 'Send to qBittorrent',
     category: 'sink',
     description:
-      'Adds each item’s magnet link to a qBittorrent instance via its WebUI API.',
+      'Adds each item’s magnet link to a qBittorrent instance via its WebUI API. Refuses the whole batch (to "refused", with the reason) when the add guard fails: too little free space, not bound to the required VPN interface, or the external IP is the home connection.',
     inputs: [{ id: 'in', label: 'in' }],
-    outputs: [{ id: 'sent', label: 'sent' }],
+    outputs: [
+      { id: 'sent', label: 'sent' },
+      { id: 'refused', label: 'refused' },
+    ],
     config: [
       {
         key: 'url',
@@ -5734,16 +5749,39 @@ const qbittorrentSink: NodeImpl = {
         }
       }
     }
-    if (withMagnet.length === 0) return { sent: [] }
+    if (withMagnet.length === 0) return { sent: [], refused: [] }
+
+    // The add guard (server/qbitGuard.ts), checked against the qBittorrent this
+    // node actually sends to. A refusal routes the batch to `refused` with the
+    // reason and leaves its wants untouched, so they are retried once fixed.
+    const refuse = (reasons: string[]) => {
+      const reason = reasons.join('; ')
+      ctx.notes.push(
+        `${ctx.dryRun ? 'dry run — would refuse' : 'REFUSED'} ${withMagnet.length} magnet(s): ${reason}`,
+      )
+      return { sent: [], refused: withMagnet.map((it) => ({ ...it, refused_reason: reason })) }
+    }
+
     if (ctx.dryRun) {
+      // Dry runs never needed a reachable qBittorrent (previews run with the
+      // sink disabled), so an unreadable guard is a note here, not a failure.
+      try {
+        const { base, user, pass } = qbitCreds(config)
+        const guard = await checkQbitGuard(base, () => qbitLogin(base, user, pass))
+        if (!guard.ok) return refuse(guard.reasons)
+      } catch (e) {
+        ctx.notes.push(`add guard not checked: ${e instanceof Error ? e.message : String(e)}`)
+      }
       ctx.notes.push(`dry run — would send ${withMagnet.length} magnets to qBittorrent`)
-      return { sent: withMagnet }
+      return { sent: withMagnet, refused: [] }
     }
 
     // Node config wins; env vars are the fallback so credentials can be kept
     // out of the stored graph when preferred.
     const { base, user, pass } = qbitCreds(config)
     const cookie = await qbitLogin(base, user, pass)
+    const guard = await checkQbitGuard(base, async () => cookie)
+    if (!guard.ok) return refuse(guard.reasons)
 
     const paused = bool(config, 'paused', false)
     const form = new URLSearchParams({
@@ -5754,13 +5792,8 @@ const qbittorrentSink: NodeImpl = {
     })
     const savepath = str(config, 'savepath', '')
     if (savepath) form.set('savepath', savepath)
-    const add = await fetch(`${base}/api/v2/torrents/add`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body: form,
-      signal: AbortSignal.timeout(15_000),
-    })
-    if (!add.ok) throw new Error(`qBittorrent add failed (${add.status})`)
+    // Re-checks the guard (from cache) as the last step before sending.
+    await qbitAddTorrents(base, cookie, form)
 
     // `torrents/add` takes one tag set for the whole batch, but each magnet has
     // its own identity — so tag per hash, alongside the rename.
@@ -5845,7 +5878,7 @@ const qbittorrentSink: NodeImpl = {
         (ledgered ? `, ledgered ${ledgered}` : '') +
         (untracked ? `, ${untracked} WITHOUT a hash (untracked!)` : ''),
     )
-    return { sent: withMagnet }
+    return { sent: withMagnet, refused: [] }
   },
 }
 
