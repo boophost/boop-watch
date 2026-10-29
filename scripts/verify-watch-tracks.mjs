@@ -117,6 +117,24 @@ const sub = (Index, Codec, Title, extra = {}) =>
   eq(s[0].index, 6, 'ass kept')
 }
 
+// --- groupless extracted sidecar folds into the single embedded group track ---
+{
+  const ext = { IsExternal: true }
+  const s = buildSubTracks([
+    sub(0, 'ass', 'English', ext),                         // S01E01.eng.ass extracted by import
+    sub(7, 'ass', '[MTBB] English'),
+    sub(8, 'ass', '[MTBB] English', { IsForced: true }),
+  ])
+  eq(s.map((t) => t.label), ['English: MTBB', 'English (forced)'], 'mushoku collapse')
+  eq(s[0].index, 7, 'embedded track is kept')
+  assert(s[0].alts.includes('i:0'), 'sidecar selector resolves to the embedded track')
+  // Two groups: ambiguous, so the sidecar stays.
+  const t = buildSubTracks([sub(0, 'ass', 'English', ext), sub(1, 'ass', '[A]'), sub(2, 'ass', '[B]')])
+  eq(t.length, 3, 'ambiguous sidecar not collapsed')
+  // An embedded groupless track is never folded.
+  eq(buildSubTracks([sub(0, 'ass', 'English'), sub(1, 'ass', '[A]')]).length, 2, 'embedded groupless kept')
+}
+
 // --- optional live (read-only) dump ---
 if (process.env.WATCH_URL && process.env.WATCH_IDS) {
   for (const id of process.env.WATCH_IDS.split(',')) {

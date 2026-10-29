@@ -21,6 +21,7 @@ import {
   updateSeriesMetadataById,
   listAnimeSeries,
   findByMalId,
+  getSeriesById,
   upsertSeriesMetadata,
   recordLibraryFile,
   forgetLibraryFile,
@@ -49,10 +50,14 @@ import {
   type WantStatus,
 } from './db.js'
 import { fetchAniListAiring } from './anilist.js'
-import { refreshEpisodeCache, isProperTitle } from './episodes.js'
+import { refreshEpisodeCache, isProperTitle, fetchLibrarySeasonLengths } from './episodes.js'
 import { enrichSeasonMapping } from './seasonMap.js'
+import { spillAbsoluteEpisode, buildSpillCatalog } from './absoluteSpill.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, isPortalSection, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
+import { matchSeriesDownloads } from './downloads.js'
+import { fetchTmdbShowEpisodes, tmdbConfigured } from './tmdb.js'
+import { planTvGaps } from './sourcingGaps.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
 import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
 import { clientForSection } from './metadata/index.js'
@@ -1042,6 +1047,7 @@ const qbittorrentSource: NodeImpl = {
       { key: 'category', label: 'Category', kind: 'text', default: 'anime', help: 'Empty = all categories. Unset defaults to "anime" — set the category explicitly on a non-anime flow.' },
       { key: 'completedOnly', label: 'Completed only', kind: 'boolean', default: true, help: 'Only emit torrents that finished downloading (ready to import).' },
       { key: 'skipImported', label: 'Skip already imported', kind: 'boolean', default: true, help: 'Drop torrents whose hash is already in the library ledger before the expensive probe/mux nodes, so a fresh download is not starved behind re-processing the backlog. Turn off to force a re-import.' },
+      { key: 'onlyHashes', label: 'Only these hashes', kind: 'text', default: '', help: 'Comma-separated torrent hashes. When set, only these are emitted and the already-imported / already-processed skip is bypassed - the supported way to re-run one torrent (e.g. after a mapping fix) without touching the ledger. Clear it afterwards.' },
       { key: 'newestFirst', label: 'Newest first', kind: 'boolean', default: true, help: 'Emit the most recently completed torrents first, so a just-finished download is processed ahead of older backlog work. Also exposes torrent_completed_on / torrent_added_on for filter.sort.' },
       { key: 'pathFrom', label: 'Download path (qBit)', kind: 'text', default: '', help: 'Path prefix as qBittorrent sees it, e.g. /downloads.' },
       { key: 'pathTo', label: 'Download path (pod)', kind: 'text', default: '', help: 'Where that same prefix is mounted here, e.g. /downloads. Both empty = no rewrite.' },
@@ -1094,7 +1100,13 @@ const qbittorrentSource: NodeImpl = {
     // upgrade is a *new* torrent (new hash), so it still runs.
     let skippedImported = 0
     let skippedProcessed = 0
-    if (skipImported) {
+    const only = new Set(
+      str(config, 'onlyHashes', '').split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
+    )
+    if (only.size > 0) {
+      torrents = torrents.filter((t) => only.has(String(t.hash).toLowerCase()))
+      ctx.notes.push(`onlyHashes: ${torrents.length}/${only.size} listed torrent(s), ledger skip bypassed`)
+    } else if (skipImported) {
       const imported = importedTorrentHashes()
       const processed = processedTorrentHashes()
       const keep: typeof torrents = []
@@ -3980,6 +3992,117 @@ const wantUpdate: NodeImpl = {
   },
 }
 
+// TV and movies have no MAL id, so the wants pipeline above can't hold their
+// intent. They plan from live state instead (server/sourcingGaps.ts): the
+// portal says what is served, qBittorrent what is on its way, TMDB what aired.
+const sourcingGaps: NodeImpl = {
+  spec: {
+    type: 'enrich.sourcing-gaps',
+    label: 'Sourcing gaps (TV & movies)',
+    category: 'enrich',
+    description:
+      'For each TV/movie catalog row, emits what still needs downloading: a movie that is neither on the portal nor in qBittorrent, or each aired TMDB episode (a fully-aired, fully-missing season as one pack) that neither covers. Sets want_mode, tvdb_season and torrent_episode for Torrent search. Anime rows go to "skipped" — the wants pipeline owns them.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'missing', label: 'missing' },
+      { id: 'have', label: 'have' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      { key: 'idField', label: 'Catalog id field', kind: 'text', default: 'id' },
+      { key: 'seasonPacks', label: 'Season packs', kind: 'boolean', default: true, help: 'A fully-aired season with nothing held is emitted once as a pack (want_mode batch) instead of per episode.' },
+      { key: 'seasonField', label: 'Only this season (field)', kind: 'text', default: '', help: 'When the item carries a season here, plan only that season. Wire a pack search’s "missed" back through a second copy (Season packs off) to fall back to single episodes.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const idField = str(config, 'idField', 'id')
+    const seasonPacks = bool(config, 'seasonPacks', true)
+    const seasonField = str(config, 'seasonField', '')
+    const items = allInputs(inputs)
+    const missing: FlowItem[] = []
+    const have: FlowItem[] = []
+    const skipped: FlowItem[] = []
+    if (items.length === 0) return { missing, have, skipped }
+
+    // Without qBittorrent's list we can't see what is already downloading, and
+    // planning blind re-queues it — fail the run rather than guess. Unconfigured
+    // (previews, agent envs) has no sink to re-queue into, so an empty list is safe.
+    const torrents = qbitConfigured() ? await qbitList() : []
+    const portal = getAllPortalItems()
+    const today = new Date().toISOString().slice(0, 10)
+    let held = 0
+    let unaired = 0
+
+    for (const item of items) {
+      const id = asNumber(item[idField])
+      const series = id != null ? getSeriesById(id) : undefined
+      if (!series || series.section === 'anime') {
+        skipped.push(item)
+        continue
+      }
+      const status = matchSeriesDownloads(series, portal, torrents, { configured: true, error: null })
+      const base = {
+        ...item,
+        series_id: series.id,
+        section: series.section,
+        source_id: series.source_id,
+        title: series.title,
+        year: series.year,
+      }
+
+      if (series.section === 'movies') {
+        if (status.siteEpisodes.movie || status.torrents.length > 0) have.push(base)
+        else missing.push({ ...base, want_mode: 'batch', tvdb_season: null, torrent_episode: null, season_label: '' })
+        continue
+      }
+
+      if (series.source !== 'tmdb' || series.source_id == null || !tmdbConfigured()) {
+        ctx.notes.push(`${series.title}: no TMDB id to list episodes from`)
+        skipped.push(base)
+        continue
+      }
+      let episodes: Awaited<ReturnType<typeof fetchTmdbShowEpisodes>>
+      try {
+        episodes = await fetchTmdbShowEpisodes(series.source_id)
+      } catch (e) {
+        ctx.notes.push(`${series.title}: TMDB episodes failed — ${e instanceof Error ? e.message : String(e)}`)
+        skipped.push(base)
+        continue
+      }
+      const plan = planTvGaps({
+        episodes,
+        onSite: new Set(Object.keys(status.siteEpisodes)),
+        torrents: status.torrents.map((t) => t.name),
+        today,
+        seasonPacks,
+        onlySeason: seasonField ? asNumber(item[seasonField]) : null,
+      })
+      held += plan.held
+      unaired += plan.unaired
+      if (plan.missing.length === 0) {
+        have.push(base)
+        continue
+      }
+      const pad = (n: number) => String(n).padStart(2, '0')
+      for (const g of plan.missing) {
+        missing.push(
+          g.kind === 'batch'
+            ? { ...base, want_mode: 'batch', tvdb_season: g.season, torrent_episode: null, season_label: `S${pad(g.season)}` }
+            : { ...base, want_mode: 'episode', tvdb_season: g.season, torrent_episode: g.episode, episode: g.episode, season_label: '' },
+        )
+      }
+    }
+
+    const packs = missing.filter((m) => m.want_mode === 'batch' && m.section === 'tv').length
+    ctx.notes.push(
+      `${missing.length} to source (${packs} season pack(s)), ${have.length} fully held, ${skipped.length} skipped` +
+        (held ? ` · ${held} episode(s) already on site or in qBittorrent` : '') +
+        (unaired ? ` · ${unaired} not aired yet` : ''),
+    )
+    return { missing, have, skipped }
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Library-import stage: expand a torrent into its video files, probe them for
 // subtitle tracks, extract embedded subs we own, then place the files. These
@@ -4377,6 +4500,88 @@ const expandFiles: NodeImpl = {
     }
     ctx.notes.push(`${files.length} file(s) from ${allInputs(inputs).length} item(s), ${empty.length} with none`)
     return { files, empty }
+  },
+}
+
+const absoluteSpill: NodeImpl = {
+  spec: {
+    type: 'transform.absolute-spill',
+    label: 'Spill absolute episodes',
+    category: 'enrich',
+    description:
+      'For packs numbered absolutely across a franchise (Dragon Ball Kai 001-159): a file whose episode number is past the length of its cour moves to the next sibling cour (same tvdb_id, next tvdb_season) with the lengths of the earlier cours subtracted, chaining through several cours. Needs mal_id + tvdb_season from enrich.metadata, so place it after that. Files within range, unknown cour lengths and shows with no sibling are left alone (noted in the run log).',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [{ id: 'out', label: 'out' }],
+    config: [],
+  },
+  async run(inputs, _config, ctx) {
+    const rows = listAnimeSeries()
+    // Boundary per cour = its length in the library (override > TVDB > MAL); the
+    // Jellyfin lookup only happens for shows that actually have overflow.
+    const all = allInputs(inputs)
+    const wanted: { mal_id: number; episode: number }[] = []
+    for (const item of all) {
+      const mal = asNumber(item.mal_id)
+      const ep = asNumber(item.torrent_episode)
+      if (mal != null && ep != null) wanted.push({ mal_id: mal, episode: ep })
+    }
+    const catalog = await buildSpillCatalog(rows, wanted, (r) => fetchLibrarySeasonLengths(r))
+    const out: FlowItem[] = []
+    let spilled = 0
+    // One summary per (source cour, target cour) so a dry run shows the boundary used.
+    const spans = new Map<string, { from: number; to: number; fromLo: number; fromHi: number; toLo: number; toHi: number; len: number | null; src: string }>()
+    const unchanged = new Set<string>()
+    for (const item of all) {
+      const mal = asNumber(item.mal_id)
+      const ep = asNumber(item.torrent_episode)
+      const cour = mal == null ? undefined : catalog.find((s) => s.mal_id === mal)
+      if (!cour || ep == null) {
+        out.push(item)
+        continue
+      }
+      const r = spillAbsoluteEpisode(ep, cour, catalog)
+      if (r.kind === 'in-range') {
+        out.push(item)
+      } else if (r.kind === 'unchanged') {
+        // Unknown length with no overflow evidence is routine; only note real misses.
+        if (r.reason !== 'cour episode count unknown') unchanged.add(`mal ${mal} E${ep}: ${r.reason}`)
+        else unchanged.add(`mal ${mal}: episode count unknown, left as is`)
+        out.push(item)
+      } else {
+        const target = rows.find((s) => s.mal_id === r.cour.mal_id)
+        spilled++
+        const key = `${mal}>${r.cour.mal_id}`
+        const sp = spans.get(key)
+        if (sp) {
+          sp.fromLo = Math.min(sp.fromLo, ep)
+          sp.fromHi = Math.max(sp.fromHi, ep)
+          sp.toLo = Math.min(sp.toLo, r.episode)
+          sp.toHi = Math.max(sp.toHi, r.episode)
+        } else {
+          spans.set(key, { from: mal as number, to: r.cour.mal_id as number, fromLo: ep, fromHi: ep, toLo: r.episode, toHi: r.episode, len: cour.episodes, src: cour.episodes_source })
+        }
+        out.push({
+          ...item,
+          spill_from_mal_id: mal,
+          spill_from_episode: ep,
+          mal_id: r.cour.mal_id,
+          tvdb_id: r.cour.tvdb_id,
+          tvdb_season: r.cour.tvdb_season,
+          episode_offset: r.cour.episode_offset ?? 0,
+          torrent_episode: r.episode,
+          ...(target?.title_english ? { title_english: target.title_english } : {}),
+          ...(target?.episodes != null ? { episodes_total: target.episodes } : {}),
+          ...(target?.year != null ? { production_year: target.year, year: target.year } : {}),
+          ...(item.series_id != null && target ? { series_id: target.id } : {}),
+        })
+      }
+    }
+    for (const n of unchanged) ctx.notes.push(`absolute-spill: ${n}`)
+    for (const s of spans.values()) {
+      ctx.notes.push(`absolute-spill: spilled mal ${s.from} E${s.fromLo}-${s.fromHi} -> mal ${s.to} E${s.toLo}-${s.toHi} (cour length ${s.len} from ${s.src === 'override' ? 'override' : s.src === 'tvdb' ? 'tvdb' : 'mal'})`)
+    }
+    ctx.notes.push(`absolute-spill: moved ${spilled} file(s) into a sibling cour`)
+    return { out }
   },
 }
 
@@ -6838,6 +7043,7 @@ const IMPLS: NodeImpl[] = [
   groupPick,
   join,
   expandFiles,
+  absoluteSpill,
   parseSeasonNode,
   expandSeasons,
   mediaProbe,
@@ -6871,6 +7077,7 @@ const IMPLS: NodeImpl[] = [
   wantsSource,
   wantUpsert,
   wantUpdate,
+  sourcingGaps,
   torrentSearch,
   diff,
   merge,
