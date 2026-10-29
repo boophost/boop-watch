@@ -571,9 +571,28 @@ export interface SyncSummary {
   error: string | null
 }
 
+/** An automated flow run waiting for the flow lock (server/flowQueue.ts). */
+export interface QueuedRun {
+  id: number
+  flowId: number | null
+  flowName: string
+  /** What fired it: `"chase-wants"`, `qbit-complete`, `schedule #3`. */
+  trigger: string
+  items: number
+  dryRun: boolean
+  queuedAt: string
+  /** Identical fires merged into this entry while it waited. */
+  coalesced: number
+}
+
 export const getQueueStats = () =>
   fetchAuth('/api/flows/queue').then((r) =>
-    json<{ queues: Record<string, QueueStat>; requests: RequestLogEntry[]; syncs: SyncSummary[] }>(r),
+    json<{
+      queues: Record<string, QueueStat>
+      requests: RequestLogEntry[]
+      syncs: SyncSummary[]
+      runs: { busy: boolean; running: QueuedRun | null; pending: QueuedRun[]; max: number; dropped: number }
+    }>(r),
   )
 
 // Live activity stream events (GET /api/flows/runs/stream). `snapshot` arrives
@@ -597,6 +616,8 @@ export type ActivityStreamEvent =
     }
   | { type: 'done'; runToken: string; run: FlowRun }
   | { type: 'aborted'; runToken: string; error: string }
+  /** The run queue changed — the full pending list, in run order. */
+  | { type: 'queue'; pending: QueuedRun[] }
   | { type: 'ping' }
 
 // Subscribe to the live activity feed. Calls `onEvent` per event until the
