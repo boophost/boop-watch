@@ -62,7 +62,7 @@ import { searchAnime, pickPosterUrl } from './jikan.js'
 import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
 import { clientForSection } from './metadata/index.js'
 import { blacklistedHashes } from './blacklist.js'
-import { qbitList, qbitToItem, qbitConfigured, parseTorrentTags } from './qbit.js'
+import { qbitList, qbitToItem, qbitConfigured, qbitFreeSpace, parseTorrentTags } from './qbit.js'
 import { limitedFetch, limitedJson, hostKey } from './httpQueue.js'
 import type { FlowGraph, NodeReport, RunHooks } from './flowExecutor.js'
 import { getFlow, parseComponent } from './flowsDb.js'
@@ -4036,6 +4036,8 @@ const sourcingGaps: NodeImpl = {
       { key: 'idField', label: 'Catalog id field', kind: 'text', default: 'id' },
       { key: 'seasonPacks', label: 'Season packs', kind: 'boolean', default: true, help: 'A fully-aired season with nothing held is emitted once as a pack (want_mode batch) instead of per episode.' },
       { key: 'seasonField', label: 'Only this season (field)', kind: 'text', default: '', help: 'When the item carries a season here, plan only that season. Wire a pack search’s "missed" back through a second copy (Season packs off) to fall back to single episodes.' },
+      { key: 'categories', label: 'Count torrents in categories', kind: 'text', default: '', help: 'Comma-separated qBit categories whose torrents count as held (e.g. "tv,movies"). Empty = every category. Set it when environments share one qBittorrent, or each skips what the other downloaded.' },
+      { key: 'minFreeGB', label: 'Minimum free space (GB)', kind: 'number', default: 0, help: 'Below this much free space on qBittorrent’s download disk, nothing is emitted as missing. 0 = no check.' },
     ],
   },
   async run(inputs, config, ctx) {
@@ -4051,7 +4053,16 @@ const sourcingGaps: NodeImpl = {
     // Without qBittorrent's list we can't see what is already downloading, and
     // planning blind re-queues it — fail the run rather than guess. Unconfigured
     // (previews, agent envs) has no sink to re-queue into, so an empty list is safe.
-    const torrents = qbitConfigured() ? await qbitList() : []
+    const cats = new Set(str(config, 'categories', '').split(',').map((c) => c.trim()).filter(Boolean))
+    const torrents = (qbitConfigured() ? await qbitList() : []).filter((t) => cats.size === 0 || cats.has(t.category))
+    const minFreeGB = num(config, 'minFreeGB', 0)
+    if (minFreeGB > 0 && qbitConfigured()) {
+      const free = await qbitFreeSpace()
+      if (free < minFreeGB * 2 ** 30) {
+        ctx.notes.push(`only ${(free / 2 ** 30).toFixed(1)} GB free (floor ${minFreeGB} GB) — nothing queued`)
+        return { missing, have, skipped: items }
+      }
+    }
     const portal = getAllPortalItems()
     const today = new Date().toISOString().slice(0, 10)
     let held = 0
