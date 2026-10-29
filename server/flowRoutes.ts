@@ -445,6 +445,7 @@ async function runMatchingFlows(
   flows: { id: number; name: string; graph: string }[],
   event: TriggerEvent,
   depth: number,
+  dryRun = false,
 ): Promise<boolean> {
   const label = event.kind === 'start' ? `"${event.name}"` : event.kind
   if (depth > FIRE_DEPTH_CAP) {
@@ -481,7 +482,7 @@ async function runMatchingFlows(
         continue
       }
       const report = await runFlowAndRecord(graph, {
-        dryRun: false,
+        dryRun,
         flowId: flow.id,
         flowName: flow.name,
         resolveSpec: resolver,
@@ -494,19 +495,21 @@ async function runMatchingFlows(
       releaseFlowLock()
     }
     // Drain this flow's own fires (lock released) before moving on.
-    for (const f of fires) await fireTrigger(f.name, f.items, depth + 1)
+    for (const f of fires) await fireTrigger(f.name, f.items, depth + 1, dryRun)
   }
   return dispatched
 }
 
-/** Publish to a named trigger bus: run every flow with a `trigger.start` of `name`. */
-export async function fireTrigger(name: string, items: FlowItem[], depth = 0): Promise<void> {
+/** Publish to a named trigger bus: run every flow with a `trigger.start` of `name`.
+ * `dryRun` carries a dry-run schedule's flag to every subscriber and the chains
+ * they fire — it used to be dropped here, so a "dry" schedule queued live. */
+export async function fireTrigger(name: string, items: FlowItem[], depth = 0, dryRun = false): Promise<void> {
   const flows = flowsDb.flowsWithTrigger(name)
   if (flows.length === 0) {
     console.warn(`fireTrigger: no flow has a trigger named "${name}"`)
     return
   }
-  await runMatchingFlows(flows, { kind: 'start', name, items }, depth)
+  await runMatchingFlows(flows, { kind: 'start', name, items }, depth, dryRun)
 }
 
 /** Fire an event trigger: run every flow with a `trigger.<kind>` node, seeding
@@ -822,7 +825,7 @@ flowRouter.post('/api/schedules/:id/run', async (req, res) => {
   // don't hold it here). There may be several matching flows / no single report.
   if (sched.trigger_name) {
     try {
-      await fireTrigger(sched.trigger_name, [])
+      await fireTrigger(sched.trigger_name, [], 0, sched.dry_run)
       res.json({ ok: true, fired: sched.trigger_name })
     } catch (e) {
       console.error(e)
