@@ -106,10 +106,23 @@ export const CONFIG_SPEC: ConfigFieldSpec[] = [
   { key: 'QBIT_PASSWORD', label: 'qBittorrent password', group: 'Downloads', secret: true },
   { key: 'QBIT_CATEGORY', label: 'qBittorrent category', group: 'Downloads', default: 'anime',
     help: 'Category the code-built research flow queues into. Use anime-dev on staging so it never lands in prod’s queue.' },
+  // The add guard (server/qbitGuard.ts) — every torrent add is refused unless
+  // all of these pass. Non-secret on purpose: the guard status shows them.
+  { key: 'QBIT_MIN_FREE_GB', label: 'Minimum free space to add (GB)', group: 'Downloads', default: '100',
+    help: 'Torrent adds are refused while qBittorrent reports less free space than this. 0 turns the check off.' },
+  { key: 'QBIT_REQUIRED_INTERFACE', label: 'Required qBittorrent interface', group: 'Downloads',
+    placeholder: 'tailscale0',
+    help: 'Torrent adds are refused unless qBittorrent is bound to this network interface. Empty turns the check off.' },
+  { key: 'HOME_PUBLIC_IP', label: 'Home public IP', group: 'Downloads',
+    help: 'Torrent adds are refused while qBittorrent’s external IPv4 equals this. Empty turns the check off.' },
   { key: 'TORRENT_TOSHO_URL', label: 'AnimeTosho URL', group: 'Downloads', default: 'https://feed.animetosho.xyz' },
   { key: 'TORRENT_TSUKI_URL', label: 'TsukiHime URL', group: 'Downloads', default: 'https://api.tsukihime.org' },
   { key: 'TORRENT_APBAY_URL', label: 'apibay (TPB) URL', group: 'Downloads', default: 'https://apibay.org',
     help: 'Public Western TV/movie index used by Torrent search’s apibay provider. Anime stays on Tosho/TsukiHime.' },
+  { key: 'SOURCING_STALL_HOURS', label: 'Stalled download timeout (hours)', group: 'Downloads', default: '24',
+    help: 'The sourcing reconcile gives up on a stalled download only after qBittorrent has seen no data move for this long, then re-searches the episode.' },
+  { key: 'SOURCING_STALL_DELETE_FILES', label: 'Delete files of stalled downloads', group: 'Downloads', default: 'true',
+    help: 'When a stalled download is given up on, also delete its partial files.' },
 
   // --- Analytics + integrations --------------------------------------------
   { key: 'POSTHOG_KEY', label: 'PostHog project token', group: 'Integrations',

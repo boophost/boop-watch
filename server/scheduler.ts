@@ -356,10 +356,15 @@ async function watchReleases(): Promise<void> {
 // never recovers: the Chase-wants flow only re-sources 'open' wants, and
 // sink.qbittorrent refuses to re-queue the dead hash — so the episode stays
 // missing forever until someone runs reconcile by hand. This runs the same safe
-// fixer (server/sourcing.ts) hourly: dead-torrent orphans → failed, their
-// sourced wants → open, phantom-fulfilled wants (file gone from disk) → open.
-const RECONCILE_INTERVAL_MS = 60 * 60_000
+// fixer (server/sourcing.ts) every 15 minutes: dead-torrent orphans → failed,
+// their sourced wants → open, phantom-fulfilled wants (file gone from disk) →
+// open, and — patiently — stalled / missingFiles torrents → removed + reopened.
+// The stall threshold (SOURCING_STALL_HOURS) is what makes the short cadence
+// safe; one pass is a qBittorrent list plus local SQLite reads.
+const RECONCILE_INTERVAL_MS = 15 * 60_000
 let lastReconcileAt = 0
+// Errored torrents are reported every pass; only log when the set changes.
+let lastErroredKey = ''
 
 async function reconcileSourcing(): Promise<void> {
   if (Date.now() - lastReconcileAt < RECONCILE_INTERVAL_MS) return
@@ -373,9 +378,18 @@ async function reconcileSourcing(): Promise<void> {
   try {
     lastReconcileAt = Date.now()
     const r = await sourcingReconcile(false)
-    if (r.orphanRowsClosed || r.wantsReopened || r.phantomFulfilledReopened) {
+    const erroredKey = r.errored.map((t) => t.hash).sort().join(',')
+    if (
+      r.orphanRowsClosed ||
+      r.wantsReopened ||
+      r.phantomFulfilledReopened ||
+      r.stalled.length ||
+      r.missingFiles.length ||
+      erroredKey !== lastErroredKey
+    ) {
       console.log('scheduler: sourcing reconcile —', JSON.stringify(r))
     }
+    lastErroredKey = erroredKey
   } finally {
     releaseFlowLock()
   }
@@ -430,7 +444,7 @@ async function tick(): Promise<void> {
     // Backstop the (scrape-driven) release watcher from our own air-date cache.
     await sweepAiringWants().catch((e) => console.error('scheduler: sweepAiringWants threw', e))
     // Self-heal orphaned sourcing state last, only when nothing else holds the
-    // flow lock this tick (gated to hourly internally).
+    // flow lock this tick (gated to every 15 min internally).
     await reconcileSourcing().catch((e) => console.error('scheduler: reconcileSourcing threw', e))
   } finally {
     ticking = false
