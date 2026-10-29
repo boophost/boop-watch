@@ -1,6 +1,8 @@
+import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
   Activity,
+  AlertTriangle,
   CalendarClock,
   ExternalLink,
   HardDrive,
@@ -15,6 +17,33 @@ import {
 import { useAuth } from '@/lib/AuthContext'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { getQbitGuard } from '@/lib/qbitGuard'
+
+const GUARD_POLL_MS = 60_000
+
+/** Reasons the torrent-add guard would refuse right now; empty when it passes,
+ *  for non-admins, and while the status can't be loaded. */
+function useQbitGuardReasons(enabled: boolean): string[] {
+  const [reasons, setReasons] = useState<string[]>([])
+  useEffect(() => {
+    if (!enabled) {
+      setReasons([])
+      return
+    }
+    let alive = true
+    const load = () =>
+      getQbitGuard()
+        .then((g) => alive && setReasons(g.ok ? [] : g.reasons))
+        .catch(() => alive && setReasons([]))
+    void load()
+    const t = setInterval(load, GUARD_POLL_MS)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [enabled])
+  return reasons
+}
 
 const NAV_ITEMS: {
   to: string
@@ -44,6 +73,7 @@ const NAV_ITEMS: {
 export default function ManageLayout() {
   const { user, logout } = useAuth()
   const { pathname } = useLocation()
+  const guardReasons = useQbitGuardReasons(user?.isAdmin === true)
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -106,6 +136,17 @@ export default function ManageLayout() {
         </div>
       </aside>
       <div className="min-w-0 flex-1">
+        {guardReasons.length > 0 && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive"
+          >
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            <span>
+              <span className="font-medium">Torrent adds blocked:</span> {guardReasons.join('; ')}
+            </span>
+          </div>
+        )}
         <Outlet />
       </div>
     </div>
