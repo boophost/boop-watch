@@ -21,6 +21,7 @@ import {
   updateSeriesMetadataById,
   listAnimeSeries,
   findByMalId,
+  getSeriesById,
   upsertSeriesMetadata,
   recordLibraryFile,
   forgetLibraryFile,
@@ -54,6 +55,9 @@ import { enrichSeasonMapping } from './seasonMap.js'
 import { spillAbsoluteEpisode, buildSpillCatalog } from './absoluteSpill.js'
 import { getAllPortalItems, getPortalItem, upsertPortalItem, PortalItem, isPortalSection, type PortalSection } from './portalDb.js'
 import { libraryAirings } from './schedule.js'
+import { matchSeriesDownloads } from './downloads.js'
+import { fetchTmdbShowEpisodes, tmdbConfigured } from './tmdb.js'
+import { planTvGaps } from './sourcingGaps.js'
 import { searchAnime, pickPosterUrl } from './jikan.js'
 import { resolveCatalog, type CatalogRecord } from './metadata/mal.js'
 import { clientForSection } from './metadata/index.js'
@@ -3988,6 +3992,117 @@ const wantUpdate: NodeImpl = {
   },
 }
 
+// TV and movies have no MAL id, so the wants pipeline above can't hold their
+// intent. They plan from live state instead (server/sourcingGaps.ts): the
+// portal says what is served, qBittorrent what is on its way, TMDB what aired.
+const sourcingGaps: NodeImpl = {
+  spec: {
+    type: 'enrich.sourcing-gaps',
+    label: 'Sourcing gaps (TV & movies)',
+    category: 'enrich',
+    description:
+      'For each TV/movie catalog row, emits what still needs downloading: a movie that is neither on the portal nor in qBittorrent, or each aired TMDB episode (a fully-aired, fully-missing season as one pack) that neither covers. Sets want_mode, tvdb_season and torrent_episode for Torrent search. Anime rows go to "skipped" — the wants pipeline owns them.',
+    inputs: [{ id: 'in', label: 'in' }],
+    outputs: [
+      { id: 'missing', label: 'missing' },
+      { id: 'have', label: 'have' },
+      { id: 'skipped', label: 'skipped' },
+    ],
+    config: [
+      { key: 'idField', label: 'Catalog id field', kind: 'text', default: 'id' },
+      { key: 'seasonPacks', label: 'Season packs', kind: 'boolean', default: true, help: 'A fully-aired season with nothing held is emitted once as a pack (want_mode batch) instead of per episode.' },
+      { key: 'seasonField', label: 'Only this season (field)', kind: 'text', default: '', help: 'When the item carries a season here, plan only that season. Wire a pack search’s "missed" back through a second copy (Season packs off) to fall back to single episodes.' },
+    ],
+  },
+  async run(inputs, config, ctx) {
+    const idField = str(config, 'idField', 'id')
+    const seasonPacks = bool(config, 'seasonPacks', true)
+    const seasonField = str(config, 'seasonField', '')
+    const items = allInputs(inputs)
+    const missing: FlowItem[] = []
+    const have: FlowItem[] = []
+    const skipped: FlowItem[] = []
+    if (items.length === 0) return { missing, have, skipped }
+
+    // Without qBittorrent's list we can't see what is already downloading, and
+    // planning blind re-queues it — fail the run rather than guess. Unconfigured
+    // (previews, agent envs) has no sink to re-queue into, so an empty list is safe.
+    const torrents = qbitConfigured() ? await qbitList() : []
+    const portal = getAllPortalItems()
+    const today = new Date().toISOString().slice(0, 10)
+    let held = 0
+    let unaired = 0
+
+    for (const item of items) {
+      const id = asNumber(item[idField])
+      const series = id != null ? getSeriesById(id) : undefined
+      if (!series || series.section === 'anime') {
+        skipped.push(item)
+        continue
+      }
+      const status = matchSeriesDownloads(series, portal, torrents, { configured: true, error: null })
+      const base = {
+        ...item,
+        series_id: series.id,
+        section: series.section,
+        source_id: series.source_id,
+        title: series.title,
+        year: series.year,
+      }
+
+      if (series.section === 'movies') {
+        if (status.siteEpisodes.movie || status.torrents.length > 0) have.push(base)
+        else missing.push({ ...base, want_mode: 'batch', tvdb_season: null, torrent_episode: null, season_label: '' })
+        continue
+      }
+
+      if (series.source !== 'tmdb' || series.source_id == null || !tmdbConfigured()) {
+        ctx.notes.push(`${series.title}: no TMDB id to list episodes from`)
+        skipped.push(base)
+        continue
+      }
+      let episodes: Awaited<ReturnType<typeof fetchTmdbShowEpisodes>>
+      try {
+        episodes = await fetchTmdbShowEpisodes(series.source_id)
+      } catch (e) {
+        ctx.notes.push(`${series.title}: TMDB episodes failed — ${e instanceof Error ? e.message : String(e)}`)
+        skipped.push(base)
+        continue
+      }
+      const plan = planTvGaps({
+        episodes,
+        onSite: new Set(Object.keys(status.siteEpisodes)),
+        torrents: status.torrents.map((t) => t.name),
+        today,
+        seasonPacks,
+        onlySeason: seasonField ? asNumber(item[seasonField]) : null,
+      })
+      held += plan.held
+      unaired += plan.unaired
+      if (plan.missing.length === 0) {
+        have.push(base)
+        continue
+      }
+      const pad = (n: number) => String(n).padStart(2, '0')
+      for (const g of plan.missing) {
+        missing.push(
+          g.kind === 'batch'
+            ? { ...base, want_mode: 'batch', tvdb_season: g.season, torrent_episode: null, season_label: `S${pad(g.season)}` }
+            : { ...base, want_mode: 'episode', tvdb_season: g.season, torrent_episode: g.episode, episode: g.episode, season_label: '' },
+        )
+      }
+    }
+
+    const packs = missing.filter((m) => m.want_mode === 'batch' && m.section === 'tv').length
+    ctx.notes.push(
+      `${missing.length} to source (${packs} season pack(s)), ${have.length} fully held, ${skipped.length} skipped` +
+        (held ? ` · ${held} episode(s) already on site or in qBittorrent` : '') +
+        (unaired ? ` · ${unaired} not aired yet` : ''),
+    )
+    return { missing, have, skipped }
+  },
+}
+
 // ---------------------------------------------------------------------------
 // Library-import stage: expand a torrent into its video files, probe them for
 // subtitle tracks, extract embedded subs we own, then place the files. These
@@ -6963,6 +7078,7 @@ const IMPLS: NodeImpl[] = [
   wantsSource,
   wantUpsert,
   wantUpdate,
+  sourcingGaps,
   torrentSearch,
   diff,
   merge,

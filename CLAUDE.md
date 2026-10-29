@@ -182,6 +182,18 @@ mount paths, and storage topology live in [`boophost/boop-watch-ops`](https://gi
 for the probe/extract nodes. The `mcp/` CLI (see `mcp/README.md`) drives flows against an
 authenticated staging backend for iteration.
 
+### TV & movie sourcing (no wants)
+
+The wants pipeline is MAL-keyed, so it only sources **anime**. TV and movies are sourced by the
+**"TV & movie sourcing"** flow around `enrich.sourcing-gaps` (`server/sourcingGaps.ts`), which plans
+from live state on every run: TMDB's aired episodes, minus what the portal serves, minus any
+qBittorrent torrent already matched to the title (whatever its state). A fully-aired season with
+nothing held becomes one season-pack search; a pack that misses falls back to single episodes
+through a second gaps node (`seasonField: tvdb_season`, packs off). It searches `apibay` and queues
+into the `movies` / `tv` qBit categories that the Movie/TV import flows consume, tagged
+`tmdb:{source_id}`. Nothing remembers a miss, so an unfindable episode is re-searched each run —
+keep the schedule coarse (6h). Like every flow, it must be built separately on each environment.
+
 ### Flows/schedules live in the DB, not git — promoting code never promotes them
 
 Flow graphs, published components, and schedules are rows in each environment's own `series.sqlite`
