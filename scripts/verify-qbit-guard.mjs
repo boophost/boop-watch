@@ -17,7 +17,7 @@ process.env.QBIT_REQUIRED_INTERFACE = 'tailscale0'
 process.env.HOME_PUBLIC_IP = '203.0.113.7'
 
 const GiB = 2 ** 30
-const qb = { free: 500 * GiB, iface: 'tailscale0', ext: '198.51.100.9' }
+const qb = { free: 500 * GiB, iface: 'tailscale0', ext: '198.51.100.9', present: {} }
 const calls = []
 globalThis.fetch = async (url) => {
   const u = String(url)
@@ -26,6 +26,10 @@ globalThis.fetch = async (url) => {
   if (u.endsWith('/sync/maindata'))
     return Response.json({ server_state: { free_space_on_disk: qb.free, last_external_address_v4: qb.ext } })
   if (u.endsWith('/app/preferences')) return Response.json({ current_network_interface: qb.iface })
+  if (u.includes('/torrents/info?hashes=')) {
+    const asked = decodeURIComponent(u.split('hashes=')[1]).split('|')
+    return Response.json(asked.filter((h) => qb.present[h]).map((h) => ({ hash: h, category: qb.present[h] })))
+  }
   if (u.endsWith('/torrents/add') || u.endsWith('/torrents/addTags') || u.endsWith('/torrents/rename'))
     return new Response('Ok.')
   throw new Error('unexpected fetch ' + u)
@@ -174,5 +178,22 @@ assert.equal(out.refused.length, 0)
 assert.equal(calls.filter((x) => x === '/torrents/add').length, 1, 'one add')
 assert.equal(calls.filter((x) => x === '/sync/maindata').length, 1, 'guard re-check served from cache')
 assert.equal(getWant(want.id).status, 'sourced', 'want sourced on a real add')
+
+// A hash qBittorrent already holds (the other environment's copy): refused with
+// the owning category, want backed off, nothing added, nothing re-tagged.
+const { want: want2 } = upsertWant({ mal_id: 1, kind: 'episode', episode: 2 })
+const hash2 = 'd'.repeat(40)
+qb.present[hash2] = 'anime-dev'
+clearQbitGuardCache()
+calls.length = 0
+c = ctx(false)
+out = await sink.run({ in: [{ ...item(), torrent_magnet: `magnet:?xt=urn:btih:${hash2}`, torrent_hash: hash2, want_id: want2.id, torrent_episode: 2 }] }, cfg, c)
+assert.equal(out.sent.length, 0, 'present hash not sent')
+assert.match(out.refused[0].refused_reason, /already in qBittorrent \(category "anime-dev"\)/)
+assert.ok(!calls.includes('/torrents/add'), 'no add for a present hash')
+assert.ok(!calls.some((x) => x.endsWith('/torrents/addTags') || x.endsWith('/torrents/rename')), 'other env torrent untouched')
+assert.equal(getWant(want2.id).status, 'open', 'want stays open')
+assert.equal(getWant(want2.id).attempts, 1, 'want backed off')
+assert.equal(getTorrent(hash2), undefined, 'not ledgered')
 
 console.log('verify-qbit-guard: all checks passed')
