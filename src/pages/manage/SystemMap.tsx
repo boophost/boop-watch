@@ -13,12 +13,16 @@ import { relPast } from '@/lib/format'
 import {
   getFlowMap,
   getQueueStats,
+  listRuns,
   listSchedules,
   streamActivity,
   type FlowMapEntry,
+  type FlowRun,
   type FlowSchedule,
   type QueuedRun,
 } from '@/lib/flows'
+import { buildTimeline } from '@/lib/runTimeline'
+import RunTimeline from './RunTimeline'
 import {
   buildSystemModel,
   layoutSystemModel,
@@ -29,12 +33,16 @@ import {
 } from '@/lib/systemMap'
 
 export interface LiveState {
-  running: Map<number, { node?: string; dryRun: boolean }>
+  running: Map<number, { node?: string; dryRun: boolean; startedAt: string }>
   queued: Map<number, number>
+  /** The pending runs themselves, in run order (the timeline draws them). */
+  queuedRuns: QueuedRun[]
   lastRun: Map<number, { ok: boolean; at: string; dryRun: boolean }>
+  /** Runs that finished since the page loaded, newest first. */
+  finished: FlowRun[]
 }
 
-const EMPTY_LIVE: LiveState = { running: new Map(), queued: new Map(), lastRun: new Map() }
+const EMPTY_LIVE: LiveState = { running: new Map(), queued: new Map(), queuedRuns: [], lastRun: new Map(), finished: [] }
 
 const TONE_STROKE: Record<Tone, string> = {
   anime: 'stroke-violet-400',
@@ -106,6 +114,10 @@ function Box({
   const running = b.flowId != null && live.running.has(b.flowId)
   const status = statusLine(b, live)
   const cx = b.x + b.w / 2
+  // ~7px per character at 12.5px semibold; a long flow name would otherwise
+  // run out of its card ("TV source — One Tree Hill S5-9" on staging).
+  const maxChars = Math.floor((b.w - 14) / 7)
+  const title = b.title.length > maxChars ? `${b.title.slice(0, maxChars - 1)}…` : b.title
   return (
     <g
       className={cn('transition-opacity', dim && 'opacity-30', onOpen && 'cursor-pointer')}
@@ -142,7 +154,7 @@ function Box({
         textAnchor="middle"
         className={cn('text-[12.5px] font-semibold', b.off ? 'fill-zinc-500' : 'fill-foreground')}
       >
-        {b.title}
+        {title}
       </text>
       {!pill &&
         b.lines.map((l, i) => (
@@ -235,18 +247,23 @@ export function SystemMapView({
       ))}
 
       {layout.edges.map((e) => {
-        const on = !linked || (linked.has(e.from) && linked.has(e.to) && (e.from === hover || e.to === hover))
+        const mine = Boolean(hover && (e.from === hover || e.to === hover))
+        const on = !linked || mine
+        // A switched-off flow's links only appear while you're looking at it.
+        if (e.muted && !mine) return null
+        const showLabel = e.labelAtRest ? on : mine
         return (
           <g key={e.id} className={cn('transition-opacity', !on && 'opacity-15')}>
             <path
               d={e.d}
               fill="none"
               className={EDGE_STROKE[e.tone]}
-              strokeWidth={on && linked ? 1.8 : 1.3}
+              strokeWidth={mine ? 1.8 : 1.3}
               strokeDasharray={e.dashed ? '4 3' : undefined}
               markerEnd={`url(#sm-ah-${e.tone})`}
+              markerStart={e.both ? `url(#sm-ah-${e.tone})` : undefined}
             />
-            {e.label && e.labelAt && (
+            {showLabel && e.label && e.labelAt && (
               <text
                 x={e.labelAt.x}
                 y={e.labelAt.y}
@@ -277,12 +294,20 @@ export function SystemMapView({
 }
 
 function Legend() {
-  const item = (cls: string, label: string, extra?: string) => (
-    <span className="inline-flex items-center gap-2">
-      <span className={cn('inline-block h-3 w-5 rounded-sm border-[1.5px]', cls, extra)} />
-      {label}
-    </span>
-  )
+  // Inline colours: the Tailwind border-colour classes lost to the base
+  // `border-color` rule on these swatches.
+  const item = (cls: string, label: string, extra?: string) => {
+    const color = cls.match(/border-(violet|teal|amber|orange|zinc)-(\d+)/)
+    return (
+      <span className="inline-flex items-center gap-2">
+        <span
+          className={cn('inline-block h-3 w-5 rounded-sm border-[1.5px]', cls, extra)}
+          style={color ? { borderColor: `var(--color-${color[1]}-${color[2]})` } : undefined}
+        />
+        {label}
+      </span>
+    )
+  }
   return (
     <div className="flex flex-wrap gap-x-5 gap-y-2 font-mono text-[11.5px] text-muted-foreground">
       {item('rounded-full border-zinc-500', 'event')}
@@ -295,7 +320,7 @@ function Legend() {
       {item('border-amber-400', 'shared infrastructure')}
       {item('border-orange-400', 'healer or destructive edge')}
       {item('border-dashed border-zinc-500', 'scheduler code or switched off')}
-      <span>hover a card to trace its links · click a flow to open it</span>
+      <span>↔ both ways · hover a card to trace its links and see every label · click a flow to open it</span>
     </div>
   )
 }
@@ -312,7 +337,7 @@ function applyEvent(prev: LiveState, ev: Parameters<Parameters<typeof streamActi
       if (ev.flowId == null) return prev
       tokens.set(ev.runToken, ev.flowId)
       const running = new Map(prev.running)
-      running.set(ev.flowId, { dryRun: ev.dryRun })
+      running.set(ev.flowId, { dryRun: ev.dryRun, startedAt: ev.startedAt })
       return { ...prev, running }
     }
     case 'node': {
@@ -332,10 +357,11 @@ function applyEvent(prev: LiveState, ev: Parameters<Parameters<typeof streamActi
       const lastRun = new Map(prev.lastRun)
       if (ev.type === 'done') lastRun.set(id, { ok: ev.run.ok, at: ev.run.started_at, dryRun: ev.run.dry_run })
       else lastRun.set(id, { ok: false, at: new Date().toISOString(), dryRun: false })
-      return { ...prev, running, lastRun }
+      const finished = ev.type === 'done' ? [ev.run, ...prev.finished].slice(0, 200) : prev.finished
+      return { ...prev, running, lastRun, finished }
     }
     case 'queue':
-      return { ...prev, queued: queuedCounts(ev.pending) }
+      return { ...prev, queued: queuedCounts(ev.pending), queuedRuns: ev.pending }
     default:
       return prev
   }
@@ -354,13 +380,26 @@ export default function SystemMap({ onShowGraphs }: { onShowGraphs: () => void }
   const [gen, setGen] = useState(0)
   const [live, setLive] = useState<LiveState>(EMPTY_LIVE)
   const [connected, setConnected] = useState(false)
+  const [history, setHistory] = useState<FlowRun[]>([])
+  const [pastHours, setPastHours] = useState<6 | 24>(6)
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 15_000)
+    return () => clearInterval(t)
+  }, [])
 
   const load = useCallback(async () => {
     setError(null)
     try {
-      const [map, sched, queue] = await Promise.all([getFlowMap(), listSchedules(), getQueueStats().catch(() => null)])
+      const [map, sched, queue, runs] = await Promise.all([
+        getFlowMap(),
+        listSchedules(),
+        getQueueStats().catch(() => null),
+        listRuns(400).catch(() => ({ runs: [] as FlowRun[] })),
+      ])
       setData({ flows: map.flows, schedules: sched.schedules })
-      if (queue) setLive((l) => ({ ...l, queued: queuedCounts(queue.runs?.pending ?? []) }))
+      setHistory(runs.runs)
+      if (queue) setLive((l) => ({ ...l, queued: queuedCounts(queue.runs?.pending ?? []), queuedRuns: queue.runs?.pending ?? [] }))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load flows')
     }
@@ -398,6 +437,21 @@ export default function SystemMap({ onShowGraphs }: { onShowGraphs: () => void }
 
   const model = useMemo(() => (data ? buildSystemModel(data.flows, data.schedules) : null), [data])
   const layout = useMemo(() => (model ? layoutSystemModel(model) : null), [model])
+  const timeline = useMemo(() => {
+    if (!model || !data) return null
+    const seen = new Set<number>()
+    const runs = [...live.finished, ...history].filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
+    return buildTimeline({
+      model,
+      schedules: data.schedules,
+      runs,
+      running: live.running,
+      queued: live.queuedRuns,
+      now,
+      pastMs: pastHours * 3_600_000,
+      futureMs: (pastHours === 6 ? 3 : 6) * 3_600_000,
+    })
+  }, [model, data, history, live, now, pastHours])
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -437,6 +491,33 @@ export default function SystemMap({ onShowGraphs }: { onShowGraphs: () => void }
               <SystemMapView layout={layout} live={live} onOpenFlow={(id) => navigate(`/manage/flows/${id}`)} />
             </div>
             <Legend />
+            {timeline && (
+              <section className="grid gap-2">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-sm font-semibold">Timeline</h2>
+                  <div className="inline-flex rounded-md border p-0.5 text-xs" role="tablist" aria-label="Timeline range">
+                    {([6, 24] as const).map((h) => (
+                      <button
+                        key={h}
+                        type="button"
+                        role="tab"
+                        aria-selected={pastHours === h}
+                        onClick={() => setPastHours(h)}
+                        className={cn('rounded px-2 py-0.5', pastHours === h ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:text-foreground')}
+                      >
+                        last {h} h
+                      </button>
+                    ))}
+                  </div>
+                  <span className="hidden font-mono text-[11px] text-muted-foreground md:inline">
+                    bar = run (hollow = dry, red = failed) · dashed tick = scheduled · ◆ = queued
+                  </span>
+                </div>
+                <div className="overflow-x-auto rounded-lg border bg-background py-2">
+                  <RunTimeline timeline={timeline} onOpenFlow={(id) => navigate(`/manage/flows/${id}`)} />
+                </div>
+              </section>
+            )}
             {model && model.components.length > 0 && (
               <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <Workflow className="size-3.5" />
