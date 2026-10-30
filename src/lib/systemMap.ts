@@ -222,7 +222,7 @@ export function buildSystemModel(flows: FlowMapEntry[], schedules: FlowSchedule[
 
     const lines: string[] = []
     if (role === 'import') lines.push(`imports ${[...new Set(facts.imports)].join(', ')} · ${facts.nodeCount} nodes`)
-    else if (facts.planner) lines.push(`plans gaps · ${facts.providers.map((p) => PROVIDER_LABEL[p] ?? p).join(', ') || 'search'}`)
+    else if (facts.planner) lines.push(`plans gaps · ${[...new Set(facts.providers)].map((p) => PROVIDER_LABEL[p] ?? p).join(', ') || 'search'}`)
     else if (facts.providers.length) lines.push(`search: ${[...new Set(facts.providers)].map((p) => PROVIDER_LABEL[p] ?? p).join(' → ')}`)
     else if (role === 'heal') lines.push(`reopens stuck wants${facts.qbDelete ? ' · deletes' : ''}`)
     else if (facts.wantUpsert) lines.push('records wants')
