@@ -418,6 +418,12 @@ Public collection (`isCollectionItem` / `getPlayableIds`). Never bypass it.
   **don't hardcode colors**. The admin uses **shadcn/Tailwind** (`src/index.css`), whose dark tokens
   are aligned to Kagura's violet. The whole app runs in dark mode (`<html class="dark">`).
 - **Icons** via the `Icon` component (`src/components/Icon.tsx`, `ICONS` map).
+- **No filler copy.** Cut taglines, helper text and secondary labels. If a screen needs them to
+  make sense, fix the layout instead. (Keep accessible names (`aria-label`, form labels), error
+  messages and empty states that offer an action; those aren't filler.)
+- **Elevate UX, DX and AX together.** Pick the option that improves the user experience, the
+  developer experience *and* the agent experience (clear names, greppable structure, docs that
+  match the code, scripts agents can run). Break nothing doing it, and stay within the task's scope.
 - **All Jellyfin access is server-side.** The browser never sees the API key. The HLS proxy
   (`stripCreds` in `server/jellyfin.ts`) removes `api_key`/`ApiKey` from playlist bodies — preserve
   that. Subtitles are delivered separately via `/api/sub` and rendered client-side (JASSUB), so
