@@ -52,6 +52,8 @@ export interface SysBox {
    * than as trigger pills: a pill per schedule sent an edge across the whole
    * lane for every 3-hourly import. */
   schedules?: { label: string; off: boolean; dry: boolean }[]
+  /** `trigger.start` names this flow listens on (what schedules fire). */
+  starts?: string[]
 }
 
 export type EdgeTone = 'normal' | 'heal' | 'soft'
@@ -66,6 +68,11 @@ export interface SysEdge {
   label?: string
   tone: EdgeTone
   dashed?: boolean
+  /** Two flows that link both ways (Chase ↔ wants: open / miss) are one
+   * double-headed line, not two lines laid side by side. */
+  both?: boolean
+  /** Belongs to a switched-off flow: real, but not live — drawn on hover only. */
+  muted?: boolean
 }
 
 export interface SystemModel {
@@ -240,9 +247,11 @@ export function buildSystemModel(flows: FlowMapEntry[], schedules: FlowSchedule[
       off,
       uses: facts.subflows.map((id) => byId.get(id)?.name).filter((n): n is string => Boolean(n)),
       schedules: own.map((s) => ({ label: cadence(s), off: !s.enabled, dry: s.dry_run })),
+      starts: facts.starts,
     })
     // A switched-off flow's links are real but not live; draw them muted.
     const soft = (t: EdgeTone): EdgeTone => (off ? 'soft' : t)
+    const before = edges.length
 
     // Triggers: one pill per event kind per lane, one per schedule.
     for (const ev of new Set(facts.events)) {
@@ -265,9 +274,9 @@ export function buildSystemModel(flows: FlowMapEntry[], schedules: FlowSchedule[
     for (const c of new Set(facts.qbRead))
       addEdge({ from: 'qbit', fromPort: c, to: flowBox(flow.id), label: role === 'import' ? 'done' : 'reads', tone: soft(role === 'import' ? 'normal' : 'soft'), dashed: off })
     if (facts.qbDelete && role !== 'import') addEdge({ from: flowBox(flow.id), to: 'qbit', toPort: facts.qbRead[0], label: 'delete', tone: soft('heal'), dashed: off })
-    if (facts.planner) for (const c of categories) if (isMediaCategory(c) && facts.qbWrite.some((w) => w.endsWith('-dev') === c.endsWith('-dev'))) addEdge({ from: 'qbit', fromPort: c, to: flowBox(flow.id), label: 'held', tone: 'soft', dashed: true })
 
     if (facts.imports.length || facts.jellyfin) addEdge({ from: flowBox(flow.id), to: 'jellyfin', tone: 'normal' })
+    if (off) for (let i = before; i < edges.length; i++) edges[i].muted = true
   }
 
   if (usesWants) {
@@ -306,7 +315,36 @@ export function buildSystemModel(flows: FlowMapEntry[], schedules: FlowSchedule[
     addEdge({ from: 'jellyfin', to: 'portal', tone: 'normal' })
   }
 
-  return { boxes, edges, components }
+  return { boxes, edges: mergeReciprocal(edges), components }
+}
+
+/** Fold A→B + B→A (same qBittorrent row, if any) into one double-headed edge.
+ * The heal tone wins only when both halves are heals, so a normal "done"
+ * paired with an "upgrade" doesn't paint the whole line orange. */
+function mergeReciprocal(edges: SysEdge[]): SysEdge[] {
+  const out: SysEdge[] = []
+  const used = new Set<string>()
+  for (const e of edges) {
+    if (used.has(e.id)) continue
+    const back = edges.find(
+      (r) => !used.has(r.id) && r.id !== e.id && r.from === e.to && r.to === e.from && (r.fromPort ?? '') === (e.toPort ?? '') && (r.toPort ?? '') === (e.fromPort ?? ''),
+    )
+    used.add(e.id)
+    if (!back) {
+      out.push(e)
+      continue
+    }
+    used.add(back.id)
+    out.push({
+      ...e,
+      both: true,
+      label: [e.label, back.label].filter(Boolean).join(' · ') || undefined,
+      tone: e.tone === 'heal' && back.tone === 'heal' ? 'heal' : e.tone === 'soft' && back.tone === 'soft' ? 'soft' : 'normal',
+      dashed: Boolean(e.dashed && back.dashed),
+      muted: Boolean(e.muted && back.muted),
+    })
+  }
+  return out
 }
 
 // --- Layout ------------------------------------------------------------------
@@ -319,6 +357,9 @@ export interface PlacedBox extends SysBox, Rect {
 export interface PlacedEdge extends SysEdge {
   d: string
   labelAt?: { x: number; y: number; anchor: 'start' | 'middle' | 'end' }
+  /** The label fit without touching a card or another label, so it is shown
+   * at rest. The rest appear when one of the edge's cards is hovered. */
+  labelAtRest?: boolean
 }
 export interface PlacedLane { id: Lane; label: string; y: number; h: number }
 export interface SystemLayout {
@@ -331,13 +372,16 @@ export interface SystemLayout {
 }
 
 const COL_W: Record<Column, number> = { trigger: 168, intent: 184, acquire: 184, shared: 168, import: 184, publish: 124 }
-const GAP = 52
+const GAP = 88
 const PAD_X = 16
 const HEAD_H = 34
 const LANE_PAD = 18
 const LANE_GAP = 10
-const STACK_GAP = 18
+const STACK_GAP = 22
 const PORT_H = 22
+/** Spacing between parallel vertical tracks in a column gap. */
+const TRACK = 7
+const CHAR_W = 6.3
 
 function heightOf(b: SysBox): number {
   switch (b.kind) {
@@ -349,6 +393,18 @@ function heightOf(b: SysBox): number {
   }
 }
 
+/** One edge's route before vertical tracks are assigned: horizontal from
+ * `start`, then for each leg a vertical run inside a column gap, then
+ * horizontal into `end`. */
+interface Route {
+  edge: SysEdge
+  start: [number, number]
+  legs: { gap: number; key: string; y1: number; y2: number; x?: number }[]
+  end: [number, number]
+  /** Pre-built path for the stacked-in-one-column case. */
+  direct?: string
+}
+
 export function layoutSystemModel(model: SystemModel): SystemLayout {
   const columns: SystemLayout['columns'] = []
   let x = PAD_X
@@ -358,17 +414,22 @@ export function layoutSystemModel(model: SystemModel): SystemLayout {
   }
   const width = x - GAP + PAD_X
   const colOf = new Map(columns.map((c) => [c.id, c]))
+  const colIdx = new Map(columns.map((c, i) => [c.id, i]))
 
   const lanes = LANES.filter((l) => model.boxes.some((b) => b.lane === l.id))
   const placed = new Map<string, PlacedBox>()
   const neighbours = (id: string) =>
     model.edges.flatMap((e) => (e.from === id ? [e.to] : e.to === id ? [e.from] : []))
-
-  // Order inside a stack: flows before the wants store and jobs, heals last,
-  // then by name, so related cards sit near each other across columns.
-  const rank = (b: SysBox) =>
-    (b.kind === 'wants' ? 2 : b.kind === 'job' ? 3 : b.tone === 'heal' ? 4 : b.off ? 5 : 1)
+  const rank = (b: SysBox) => (b.kind === 'job' ? 3 : b.tone === 'heal' ? 4 : b.off ? 5 : 1)
   const order: Column[] = ['intent', 'acquire', 'import', 'trigger']
+
+  function prefY(b: SysBox): number {
+    const ys = neighbours(b.id)
+      .map((id) => placed.get(id))
+      .filter((p): p is PlacedBox => Boolean(p))
+      .map((p) => p.y + p.h / 2)
+    return ys.length ? Math.min(...ys) : Number.NaN
+  }
 
   const placedLanes: PlacedLane[] = []
   let y = HEAD_H
@@ -377,13 +438,18 @@ export function layoutSystemModel(model: SystemModel): SystemLayout {
     let bottom = top
     for (const col of order) {
       const c = colOf.get(col)!
-      const stack = model.boxes
+      let stack = model.boxes
         .filter((b) => b.lane === lane.id && b.column === col)
         .sort((a, b) => rank(a) - rank(b) || a.title.localeCompare(b.title))
-      // Greedy alignment: each card wants to sit level with what it connects
-      // to that is already placed, but never above the previous card.
-      if (col === 'trigger') {
-        stack.sort((a, b) => prefY(a) - prefY(b) || a.title.localeCompare(b.title))
+      if (col === 'trigger') stack.sort((a, b) => prefY(a) - prefY(b) || a.title.localeCompare(b.title))
+      // A store sits in the middle of the flows that write it, so each writer
+      // reaches it with a short straight arrow instead of a loop round the side.
+      const store = stack.find((b) => b.kind === 'wants')
+      if (store) {
+        const rest = stack.filter((b) => b !== store)
+        const flows = rest.filter((b) => b.kind === 'flow')
+        const half = Math.ceil(flows.length / 2)
+        stack = [...flows.slice(0, half), store, ...flows.slice(half), ...rest.filter((b) => b.kind !== 'flow')]
       }
       let cursor = top
       for (const b of stack) {
@@ -401,15 +467,7 @@ export function layoutSystemModel(model: SystemModel): SystemLayout {
   }
   const height = y - LANE_GAP + 16
 
-  function prefY(b: SysBox): number {
-    const ys = neighbours(b.id)
-      .map((id) => placed.get(id))
-      .filter((p): p is PlacedBox => Boolean(p))
-      .map((p) => p.y + p.h / 2)
-    return ys.length ? Math.min(...ys) : Number.NaN
-  }
-
-  // Spanning boxes: qBittorrent across the lanes it serves; Jellyfin + portal
+  // Spanning boxes: qBittorrent across the sourcing lanes, Jellyfin + portal
   // down the publish column.
   const qbit = model.boxes.find((b) => b.kind === 'qbit')
   if (qbit) {
@@ -434,82 +492,209 @@ export function layoutSystemModel(model: SystemModel): SystemLayout {
     placed.set(jelly.id, { ...jelly, x: c.x, y: jTop, w: c.w, h: Math.max(80, height - 16 - LANE_PAD - jTop) })
   }
 
-  // --- Edge routing: orthogonal, one vertical channel per edge in the gap
-  // beside its target, with offsets so parallel edges don't overlap.
+  const boxes = [...placed.values()]
+  const ci = (b: PlacedBox) => colIdx.get(b.column)!
+  /** Centre x of the gap to the right of column k. */
+  const gapCentre = (k: number) => columns[k].x + columns[k].w + GAP / 2
+  /** True when nothing in columns `cols` covers height y (with clearance). */
+  const freeAt = (y: number, cols: number[]) =>
+    cols.every((k) => !boxes.some((b) => ci(b) === k && y > b.y - 8 && y < b.y + b.h + 8))
+  const range = (a: number, b: number) => Array.from({ length: Math.max(0, b - a + 1) }, (_, i) => a + i)
+  /** The y to cross intermediate columns at: the source row if it's clear,
+   * else the target row, else the nearest gap between cards. */
+  function corridor(sy: number, ty: number, cols: number[]): number {
+    if (!cols.length || freeAt(sy, cols)) return sy
+    if (freeAt(ty, cols)) return ty
+    const cands = boxes
+      .filter((b) => cols.includes(ci(b)))
+      .flatMap((b) => [b.y - 11, b.y + b.h + 11])
+      .filter((c) => c > HEAD_H && c < height - 4 && freeAt(c, cols))
+    cands.sort((p, q) => Math.abs(p - sy) + Math.abs(p - ty) - (Math.abs(q - sy) + Math.abs(q - ty)))
+    return cands[0] ?? sy
+  }
+
+  // Anchor points: edges sharing a card side are spread down that side; edges
+  // on one qBittorrent row are spread within the row.
+  const dirOf = (a: PlacedBox, b: PlacedBox) => (ci(b) > ci(a) ? 'fwd' : ci(b) < ci(a) ? 'back' : 'same')
   const sideCount = new Map<string, number>()
-  const sideIndex = new Map<string, number>()
-  const anchorKey = (box: string, side: string) => `${box}|${side}`
-  const routes: { e: SysEdge; a: PlacedBox; b: PlacedBox; dir: 'fwd' | 'back' | 'same' }[] = []
+  const bump = (k: string) => sideCount.set(k, (sideCount.get(k) ?? 0) + 1)
+  const sideKey = (box: string, side: string, port?: string) => `${box}|${side}|${port ?? ''}`
   for (const e of model.edges) {
     const a = placed.get(e.from)
     const b = placed.get(e.to)
     if (!a || !b) continue
-    const dir = b.x > a.x + 1 ? 'fwd' : b.x < a.x - 1 ? 'back' : 'same'
-    routes.push({ e, a, b, dir })
-    const outSide = dir === 'fwd' ? 'R' : 'L'
-    const inSide = dir === 'back' ? 'R' : 'L'
-    if (!e.fromPort) sideCount.set(anchorKey(a.id, outSide), (sideCount.get(anchorKey(a.id, outSide)) ?? 0) + 1)
-    if (!e.toPort) sideCount.set(anchorKey(b.id, inSide), (sideCount.get(anchorKey(b.id, inSide)) ?? 0) + 1)
+    const dir = dirOf(a, b)
+    bump(sideKey(a.id, dir === 'fwd' ? 'R' : 'L', e.fromPort))
+    bump(sideKey(b.id, dir === 'back' ? 'R' : 'L', e.toPort))
   }
-  const anchorY = (box: PlacedBox, side: string, port?: string, toward?: number): number => {
-    if (port && box.portY?.[port] != null) return box.portY[port]
-    if (box.kind === 'qbit' || box.kind === 'jellyfin') {
-      const t = toward ?? box.y + box.h / 2
-      return Math.min(box.y + box.h - 14, Math.max(box.y + 14, t))
-    }
-    const k = anchorKey(box.id, side)
+  const sideUsed = new Map<string, number>()
+  const anchorY = (box: PlacedBox, side: string, port: string | undefined, toward: number): number => {
+    const k = sideKey(box.id, side, port)
     const n = sideCount.get(k) ?? 1
-    const i = sideIndex.get(k) ?? 0
-    sideIndex.set(k, i + 1)
+    const i = sideUsed.get(k) ?? 0
+    sideUsed.set(k, i + 1)
+    if (port && box.portY?.[port] != null) return box.portY[port] + (i - (n - 1) / 2) * 5
+    if (box.kind === 'qbit' || box.kind === 'jellyfin') return Math.min(box.y + box.h - 14, Math.max(box.y + 14, toward))
     const step = Math.min(10, (box.h - 12) / Math.max(1, n))
     return box.y + box.h / 2 + (i - (n - 1) / 2) * step
   }
-  const channelUse = new Map<number, number>()
-  const channel = (base: number) => {
-    const n = channelUse.get(base) ?? 0
-    channelUse.set(base, n + 1)
-    return base - (n % 6) * 6
+
+  // Legs that may share one vertical track: a fan-in of the same meaning
+  // (three "fires" into Chase), or a fan-out from one qBittorrent row.
+  const sameMeaningIn = new Map<string, number>()
+  for (const e of model.edges) sameMeaningIn.set(`${e.to}|${e.label ?? ''}`, (sameMeaningIn.get(`${e.to}|${e.label ?? ''}`) ?? 0) + 1)
+  const legKey = (e: SysEdge, end: 'first' | 'last' | 'only', i: number) => {
+    if ((end === 'last' || end === 'only') && (sameMeaningIn.get(`${e.to}|${e.label ?? ''}`) ?? 0) > 1) return `in:${e.to}:${e.label ?? ''}`
+    if ((end === 'first' || end === 'only') && e.fromPort) return `out:${e.from}:${e.fromPort}`
+    return `e:${e.id}:${i}`
   }
 
-  const edges: PlacedEdge[] = []
-  for (const { e, a, b, dir } of routes) {
-    const ay0 = anchorY(a, dir === 'fwd' ? 'R' : 'L', e.fromPort, b.y + b.h / 2)
-    const by0 = anchorY(b, dir === 'back' ? 'R' : 'L', e.toPort, ay0)
-    let d: string
-    let labelAt: PlacedEdge['labelAt']
+  const routes: Route[] = []
+  for (const e of model.edges) {
+    const a = placed.get(e.from)
+    const b = placed.get(e.to)
+    if (!a || !b) continue
+    const dir = dirOf(a, b)
+    const ka = ci(a)
+    const kb = ci(b)
     if (dir === 'fwd') {
-      const sx = a.x + a.w
-      const tx = b.x - 4
-      const cx = channel(b.x - 14)
-      if (Math.abs(ay0 - by0) < 1) d = `M${sx} ${ay0} H${tx}`
-      else d = `M${sx} ${ay0} H${cx} V${by0} H${tx}`
-      labelAt = Math.abs(ay0 - by0) < 1 || cx - sx > 70
-        ? { x: (sx + (Math.abs(ay0 - by0) < 1 ? tx : cx)) / 2, y: ay0 - 5, anchor: 'middle' }
-        : { x: cx - 4, y: (ay0 + by0) / 2 + 3, anchor: 'end' }
+      const sy = anchorY(a, 'R', e.fromPort, b.y + b.h / 2)
+      const ty = anchorY(b, 'L', e.toPort, sy)
+      const start: [number, number] = [a.x + a.w, sy]
+      const end: [number, number] = [b.x - 4, ty]
+      if (kb === ka + 1) routes.push({ edge: e, start, end, legs: [{ gap: ka, key: legKey(e, 'only', 0), y1: sy, y2: ty }] })
+      else {
+        const c = corridor(sy, ty, range(ka + 1, kb - 1))
+        routes.push({ edge: e, start, end, legs: [
+          { gap: ka, key: legKey(e, 'first', 0), y1: sy, y2: c },
+          { gap: kb - 1, key: legKey(e, 'last', 1), y1: c, y2: ty },
+        ] })
+      }
     } else if (dir === 'back') {
-      const sx = a.x
-      const tx = b.x + b.w + 4
-      const cx = channel(a.x - 14)
-      d = Math.abs(ay0 - by0) < 1 ? `M${sx} ${ay0} H${tx}` : `M${sx} ${ay0} H${cx} V${by0} H${tx}`
-      labelAt = { x: (cx + tx) / 2, y: by0 + 12, anchor: 'middle' }
-    } else if (a.y >= b.y + b.h || b.y >= a.y + a.h ? Math.abs(a.x - b.x) < 1 && (a.kind === 'jellyfin' || a.kind === 'portal') : false) {
-      // Stacked in one column (Jellyfin → portal): a short vertical arrow.
-      const up = b.y + b.h <= a.y
-      const xm = a.x + a.w / 2
-      d = up ? `M${xm} ${a.y} V${b.y + b.h + 4}` : `M${xm} ${a.y + a.h} V${b.y - 4}`
-      labelAt = { x: xm + 6, y: up ? (a.y + b.y + b.h) / 2 : (a.y + a.h + b.y) / 2, anchor: 'start' }
+      const sy = anchorY(a, 'L', e.fromPort, b.y + b.h / 2)
+      const ty = anchorY(b, 'R', e.toPort, sy)
+      const start: [number, number] = [a.x, sy]
+      const end: [number, number] = [b.x + b.w + 4, ty]
+      if (ka === kb + 1) routes.push({ edge: e, start, end, legs: [{ gap: kb, key: legKey(e, 'only', 0), y1: sy, y2: ty }] })
+      else {
+        const c = corridor(sy, ty, range(kb + 1, ka - 1))
+        routes.push({ edge: e, start, end, legs: [
+          { gap: ka - 1, key: legKey(e, 'first', 0), y1: sy, y2: c },
+          { gap: kb, key: legKey(e, 'last', 1), y1: c, y2: ty },
+        ] })
+      }
     } else {
-      // Same column (an intent flow writing the wants store below it): loop
-      // down the left side, which only carries trigger edges, rather than the
-      // busy channel on the right.
-      const ax = a.x
-      const cx = a.x - 10 - (channelUse.get(-a.x) ?? 0) * 5
-      channelUse.set(-a.x, (channelUse.get(-a.x) ?? 0) + 1)
-      d = `M${ax} ${ay0} H${cx} V${by0} H${b.x - 4}`
-      labelAt = { x: cx - 4, y: (ay0 + by0) / 2 + 3, anchor: 'end' }
+      const top = a.y < b.y ? a : b
+      const bot = top === a ? b : a
+      const between = boxes.some((o) => o !== a && o !== b && ci(o) === ka && o.y >= top.y + top.h - 1 && o.y + o.h <= bot.y + 1)
+      if (!between) {
+        // Stacked neighbours (a writer and the store, Jellyfin and portal): a
+        // short straight arrow between them.
+        const xm = a.x + a.w / 2 + (a.kind === 'flow' || b.kind === 'flow' ? 0 : 0)
+        const down = a === top
+        const d = down ? `M${xm} ${a.y + a.h} V${b.y - 4}` : `M${xm} ${a.y} V${b.y + b.h + 4}`
+        routes.push({ edge: e, start: [xm, 0], end: [xm, 0], legs: [], direct: d })
+      } else {
+        const sy = anchorY(a, 'L', e.fromPort, b.y)
+        const ty = anchorY(b, 'L', e.toPort, sy)
+        routes.push({ edge: e, start: [a.x, sy], end: [b.x - 4, ty], legs: [{ gap: ka - 1, key: legKey(e, 'only', 0), y1: sy, y2: ty }] })
+      }
     }
-    edges.push({ ...e, d, labelAt: e.label ? labelAt : undefined })
   }
 
-  return { width, height, columns, lanes: placedLanes, boxes: [...placed.values()], edges }
+  // Track assignment, per gap: legs whose vertical spans overlap get separate
+  // x positions; legs with the same key share one (and their span is merged).
+  const byGap = new Map<number, Map<string, { lo: number; hi: number; legs: Route['legs'] }>>()
+  for (const r of routes)
+    for (const l of r.legs) {
+      if (Math.abs(l.y1 - l.y2) < 0.5) continue
+      const g = byGap.get(l.gap) ?? new Map()
+      byGap.set(l.gap, g)
+      const grp = g.get(l.key) ?? { lo: Infinity, hi: -Infinity, legs: [] }
+      grp.lo = Math.min(grp.lo, l.y1, l.y2)
+      grp.hi = Math.max(grp.hi, l.y1, l.y2)
+      grp.legs.push(l)
+      g.set(l.key, grp)
+    }
+  for (const [gap, groups] of byGap) {
+    const list = [...groups.values()].sort((p, q) => p.lo - q.lo || q.hi - p.hi)
+    const trackEnds: number[] = []
+    const assigned: number[] = []
+    for (const grp of list) {
+      let t = trackEnds.findIndex((end) => end < grp.lo - 6)
+      if (t < 0) { t = trackEnds.length; trackEnds.push(grp.hi) } else trackEnds[t] = grp.hi
+      assigned.push(t)
+    }
+    const n = trackEnds.length
+    const step = Math.min(TRACK, (GAP - 16) / Math.max(1, n))
+    list.forEach((grp, i) => {
+      const xTrack = gapCentre(gap) + (assigned[i] - (n - 1) / 2) * step
+      for (const l of grp.legs) l.x = xTrack
+    })
+  }
+  for (const r of routes)
+    for (const l of r.legs) if (l.x == null) l.x = gapCentre(l.gap)
+
+  // Paths, then labels: each label goes on the edge's longest horizontal run
+  // (or beside its vertical) and is kept at rest only if it collides with no
+  // card and no label already placed.
+  const placedLabels: Rect[] = []
+  const boxRects = boxes.map((b) => ({ x: b.x - 2, y: b.y - 2, w: b.w + 4, h: b.h + 4 }))
+  const hit = (r: Rect, list: Rect[]) => list.some((o) => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h)
+  const importance = (e: SysEdge) => (e.muted ? 3 : e.tone === 'heal' ? 0 : e.tone === 'normal' ? 1 : 2)
+  const edges: PlacedEdge[] = []
+  for (const r of [...routes].sort((p, q) => importance(p.edge) - importance(q.edge))) {
+    let d: string
+    const hs: { x1: number; x2: number; y: number }[] = []
+    const vs: { x: number; y1: number; y2: number }[] = []
+    if (r.direct) {
+      d = r.direct
+      const m = /M([\d.-]+) ([\d.-]+) V([\d.-]+)/.exec(d)
+      if (m) vs.push({ x: Number(m[1]), y1: Number(m[2]), y2: Number(m[3]) })
+    } else {
+      let [cx, cy] = r.start
+      const parts = [`M${cx} ${cy}`]
+      for (const l of r.legs) {
+        if (Math.abs(l.y1 - l.y2) < 0.5 && Math.abs(cy - l.y2) < 0.5) continue
+        hs.push({ x1: cx, x2: l.x!, y: cy })
+        parts.push(`H${l.x}`, `V${l.y2}`)
+        vs.push({ x: l.x!, y1: cy, y2: l.y2 })
+        cx = l.x!
+        cy = l.y2
+      }
+      hs.push({ x1: cx, x2: r.end[0], y: cy })
+      parts.push(`H${r.end[0]}`)
+      d = parts.join(' ')
+    }
+    let labelAt: PlacedEdge['labelAt']
+    let labelAtRest = false
+    const label = r.edge.label
+    if (label) {
+      const w = label.length * CHAR_W + 6
+      const cands: { at: NonNullable<PlacedEdge['labelAt']>; rect: Rect }[] = []
+      for (const h of [...hs].sort((p, q) => Math.abs(q.x2 - q.x1) - Math.abs(p.x2 - p.x1)))
+        if (Math.abs(h.x2 - h.x1) >= w + 8) {
+          const mx = (h.x1 + h.x2) / 2
+          for (const dy of [-5, 13])
+            cands.push({ at: { x: mx, y: h.y + dy, anchor: 'middle' }, rect: { x: mx - w / 2, y: h.y + dy - 10, w, h: 12 } })
+        }
+      for (const v of vs) {
+        const my = (v.y1 + v.y2) / 2 + 3
+        cands.push({ at: { x: v.x + 4, y: my, anchor: 'start' }, rect: { x: v.x + 2, y: my - 10, w, h: 12 } })
+        cands.push({ at: { x: v.x - 4, y: my, anchor: 'end' }, rect: { x: v.x - 2 - w, y: my - 10, w, h: 12 } })
+      }
+      const ok = r.edge.muted ? undefined : cands.find((c) => !hit(c.rect, boxRects) && !hit(c.rect, placedLabels))
+      const pick = ok ?? cands[0]
+      if (pick) {
+        labelAt = pick.at
+        if (ok) {
+          labelAtRest = true
+          placedLabels.push(ok.rect)
+        }
+      }
+    }
+    edges.push({ ...r.edge, d, labelAt, labelAtRest })
+  }
+
+  return { width, height, columns, lanes: placedLanes, boxes, edges }
 }
