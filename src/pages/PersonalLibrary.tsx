@@ -35,7 +35,7 @@ export default function PersonalLibrary() {
         if (error) console.error(error)
         else if (data) {
           if (count != null) setHistoryTotal(count)
-          const items = data.map((r: any) => ({
+          const items = data.map((r: { item_id: string; position: number; duration: number; watched: boolean }) => ({
             id: r.item_id,
             position: r.position,
             duration: r.duration,

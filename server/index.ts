@@ -66,8 +66,6 @@ const JWT_SECRET = process.env.JWT_SECRET ?? 'dev-secret-change-me'
 // dev instance sharing qBit with prod doesn't queue into prod's category. Set
 // qbitCategory()=anime-dev on staging; default 'anime' is prod-correct.
 const qbitCategory = (): string => cfgSafe('qbitCategory()') || 'anime'
-const AUTH_USERNAME = process.env.AUTH_USERNAME ?? 'admin'
-const AUTH_PASSWORD = process.env.AUTH_PASSWORD ?? 'changeme'
 // .trim() guards against stray whitespace in the env value — untrimmed, a
 // trailing space survives string interpolation and makes fetch() throw
 // "Failed to parse URL" on every Supabase Bearer-token check, silently
@@ -134,7 +132,7 @@ async function requireAuth(
         }
         return next()
       }
-    } catch (e) {
+    } catch {
       // fallback to jwt.verify below
     }
   }

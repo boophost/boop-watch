@@ -135,7 +135,7 @@ async function syncSection(
     keepIds.add(it.Id)
     const existing = getPortalItem(it.Id)
     let imageUrl = existing?.image_url || null
-    let backdropUrl = existing?.backdrop_url || null
+    const backdropUrl = existing?.backdrop_url || null
 
     // A catalog hit lets us use its clean title (and episode titles below) and
     // its poster; Jellyfin's own name/art is the fallback.
