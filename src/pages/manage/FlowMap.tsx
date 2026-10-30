@@ -4,7 +4,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   Background,
   Controls,
@@ -73,6 +73,7 @@ import {
   type RunActivity,
 } from '@/lib/flows'
 import { useFlowHistory } from './useFlowHistory'
+import SystemMap from './SystemMap'
 
 // ---- constants -------------------------------------------------------------
 
@@ -1001,7 +1002,7 @@ function activityCanvasIds(
   return [...ids]
 }
 
-function FlowMapInner() {
+function FlowMapInner({ onShowSystem }: { onShowSystem: () => void }) {
   const [flows, setFlows] = useState<FlowMapEntry[]>([])
   const [specs, setSpecs] = useState<Map<string, NodeSpec>>(new Map())
   const [loading, setLoading] = useState(true)
@@ -1640,6 +1641,14 @@ function FlowMapInner() {
       <header className="flex shrink-0 items-center gap-3 border-b px-4 py-3 md:px-6">
         <MapIcon className="size-5 shrink-0 text-muted-foreground" />
         <h1 className="min-w-0 flex-1 truncate text-lg font-semibold md:text-xl">Flow Map</h1>
+        <div className="inline-flex rounded-md border p-0.5 text-xs" role="tablist" aria-label="Map view">
+          <button type="button" role="tab" aria-selected={false} className="rounded px-2.5 py-1 text-muted-foreground hover:text-foreground" onClick={onShowSystem}>
+            System
+          </button>
+          <button type="button" role="tab" aria-selected className="rounded bg-muted px-2.5 py-1 font-medium text-foreground">
+            Graphs
+          </button>
+        </div>
         <Button
           size="sm"
           variant="outline"
@@ -1948,10 +1957,14 @@ function FlowMapInner() {
   )
 }
 
+// The system view (one card per flow, links between flows) is the default;
+// the node-level canvas with its saved notes and arrows stays at ?view=graphs.
 export default function FlowMap() {
+  const [params, setParams] = useSearchParams()
+  if (params.get('view') !== 'graphs') return <SystemMap onShowGraphs={() => setParams({ view: 'graphs' })} />
   return (
     <ReactFlowProvider>
-      <FlowMapInner />
+      <FlowMapInner onShowSystem={() => setParams({})} />
     </ReactFlowProvider>
   )
 }
