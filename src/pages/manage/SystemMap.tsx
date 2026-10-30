@@ -106,6 +106,10 @@ function Box({
   const running = b.flowId != null && live.running.has(b.flowId)
   const status = statusLine(b, live)
   const cx = b.x + b.w / 2
+  // ~7px per character at 12.5px semibold; a long flow name would otherwise
+  // run out of its card ("TV source — One Tree Hill S5-9" on staging).
+  const maxChars = Math.floor((b.w - 14) / 7)
+  const title = b.title.length > maxChars ? `${b.title.slice(0, maxChars - 1)}…` : b.title
   return (
     <g
       className={cn('transition-opacity', dim && 'opacity-30', onOpen && 'cursor-pointer')}
@@ -142,7 +146,7 @@ function Box({
         textAnchor="middle"
         className={cn('text-[12.5px] font-semibold', b.off ? 'fill-zinc-500' : 'fill-foreground')}
       >
-        {b.title}
+        {title}
       </text>
       {!pill &&
         b.lines.map((l, i) => (
@@ -277,12 +281,20 @@ export function SystemMapView({
 }
 
 function Legend() {
-  const item = (cls: string, label: string, extra?: string) => (
-    <span className="inline-flex items-center gap-2">
-      <span className={cn('inline-block h-3 w-5 rounded-sm border-[1.5px]', cls, extra)} />
-      {label}
-    </span>
-  )
+  // Inline colours: the Tailwind border-colour classes lost to the base
+  // `border-color` rule on these swatches.
+  const item = (cls: string, label: string, extra?: string) => {
+    const color = cls.match(/border-(violet|teal|amber|orange|zinc)-(\d+)/)
+    return (
+      <span className="inline-flex items-center gap-2">
+        <span
+          className={cn('inline-block h-3 w-5 rounded-sm border-[1.5px]', cls, extra)}
+          style={color ? { borderColor: `var(--color-${color[1]}-${color[2]})` } : undefined}
+        />
+        {label}
+      </span>
+    )
+  }
   return (
     <div className="flex flex-wrap gap-x-5 gap-y-2 font-mono text-[11.5px] text-muted-foreground">
       {item('rounded-full border-zinc-500', 'event')}
