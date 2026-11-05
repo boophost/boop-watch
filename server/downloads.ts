@@ -6,12 +6,7 @@ import { qbitConfigured, qbitList, type QbitTorrent } from './qbit.js'
 import { getAllPortalItems, type PortalSection } from './portalDb.js'
 import { getSeriesById } from './db.js'
 import { jellyfinConfigured, jfJson, type JfItem, type JfMediaStream } from './jellyfin.js'
-
-const norm = (s: unknown): string =>
-  String(s ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
+import { norm } from './titleText.js'
 
 const STOP = new Set([
   'the', 'a', 'an', 'of', 'no', 'to', 'wa', 'ga', 'season', 'part', 'ova', 'movie',

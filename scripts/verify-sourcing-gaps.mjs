@@ -2,6 +2,7 @@
 // Smoke tests for planTvGaps / torrentCoverage (enrich.sourcing-gaps). No vitest in this repo.
 const { planTvGaps, torrentCoverage } = await import('../server/sourcingGaps.ts')
 const { NODE_REGISTRY, releaseNamesTitle } = await import('../server/flowNodes.ts')
+const { decodeReleaseName, norm } = await import('../server/titleText.ts')
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg)
@@ -67,6 +68,15 @@ assert(named('Iron Man (2008) 1080p BrRip x264 - 1.65GB - YIFY', 'iron man'), 'm
 assert(!named('Iron Man 2 (2010) 1080p', 'iron man'), 'sequel rejected')
 assert(named('Blade Runner 2049 (2017) 1080p', 'blade runner 2049'), 'title containing a year')
 assert(named('[Group] One Tree Hill Season 3 Complete', 'one tree hill'), 'leading group tag')
+
+// Accented titles, against the names apibay really returns.
+const leon = norm('Léon: The Professional')
+assert(leon === 'leon the professional', 'accent folds instead of splitting the word')
+assert(named(decodeReleaseName('L&eacute;on.The.Professional.1994.REMASTERED.EXTENDED.1080p.BluRay.x265 -88'), leon), 'entity-encoded scene name')
+assert(named(decodeReleaseName('L&eacute;on The Professional (1994) BRRiP 720p x264 AC3 5.1[Team'), leon), 'entity-encoded with year')
+assert(named('Leon.The.Professional.1994.1080p', leon), 'unaccented release of an accented title')
+assert(!named(decodeReleaseName('Udemy - The Professional Ruby On Rails Developer [NepsterJay]'), leon), 'unrelated hit rejected')
+assert(decodeReleaseName('Nikita Season 1, 2, 3 &amp; 4') === 'Nikita Season 1, 2, 3 & 4', 'named entities decode')
 
 // Registered.
 assert(NODE_REGISTRY.has('enrich.sourcing-gaps'), 'node registered')
