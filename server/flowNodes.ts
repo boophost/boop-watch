@@ -14,6 +14,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { decodeReleaseName, norm } from './titleText.js'
 import { jfJson, jfUrl, jfHeaders, jellyfinConfigured, sectionCollections, JfItem } from './jellyfin.js'
 import {
   listSeries,
@@ -348,12 +349,6 @@ const runOnDryField = (def: boolean): ConfigField => ({
   default: def,
   help: 'Off = does nothing on a dry run (safe preview). On = performs its action even in a dry run.',
 })
-
-const norm = (s: unknown): string =>
-  String(s ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
 
 const allInputs = (inputs: Record<string, FlowItem[]>): FlowItem[] =>
   Object.values(inputs).flat()
@@ -3013,7 +3008,7 @@ async function apibayCandidates(q: string, base: string): Promise<Candidate[]> {
       return hash.length >= 32 && hash !== ZERO
     })
     .map((r) => {
-      const title = String(r.name ?? '')
+      const title = decodeReleaseName(r.name)
       const hash = String(r.info_hash ?? '')
       const files = r.num_files != null ? Number(r.num_files) : 0
       return {

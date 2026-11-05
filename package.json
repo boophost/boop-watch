@@ -1,7 +1,7 @@
 {
   "name": "boop-watch",
   "private": true,
-  "version": "2.120.0",
+  "version": "2.120.1",
   "description": "Public, no-login viewing portal for a curated Jellyfin collection + library manager",
   "type": "module",
   "scripts": {
@@ -26,6 +26,7 @@
     "clsx": "^2.1.1",
     "cookie-parser": "^1.4.7",
     "express": "^5.1.0",
+    "he": "^2.0.0",
     "hls.js": "^1.6.16",
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.511.0",
@@ -42,6 +43,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/cookie-parser": "^1.4.8",
     "@types/express": "^5.0.1",
+    "@types/he": "^1.2.3",
     "@types/jsonwebtoken": "^9.0.9",
     "@types/node": "^22.15.17",
     "@types/react": "^19.1.2",
